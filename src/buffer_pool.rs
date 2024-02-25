@@ -12,11 +12,26 @@ use std::{
 
 pub const NUM_PAGES: usize = 1 << 16;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ContainerPageKey {
+    container_id: usize,
+    page_id: usize,
+}
+
+impl ContainerPageKey {
+    pub fn new(container_id: usize, page_id: usize) -> Self {
+        ContainerPageKey {
+            container_id,
+            page_id,
+        }
+    }
+}
+
 pub struct BufferPool {
     path: PathBuf,
     latch: AtomicBool,
     pages: UnsafeCell<Vec<BufferFrame>>,
-    id_to_index: UnsafeCell<HashMap<(usize, usize), usize>>, // (container_id, page_id) -> index
+    id_to_index: UnsafeCell<HashMap<ContainerPageKey, usize>>, // (container_id, page_id) -> index
     container_to_file: UnsafeCell<HashMap<usize, FileManager>>,
 }
 
@@ -55,7 +70,15 @@ impl BufferPool {
         self.latch.store(false, Ordering::Release);
     }
 
-    pub fn create_new_page(&self, container_id: usize) -> usize {
+    fn choose_page_to_evict(&self) -> ContainerPageKey {
+        unimplemented!()
+    }
+
+    fn get_empty_frame(&self) -> usize {
+        0 // TODO: Check if there is an empty frame. If not, evict a page.
+    }
+
+    pub fn create_new_page(&self, container_id: usize) -> ContainerPageKey {
         // Modification to the following data structures must be done while holding the latch
         // on the buffer pool.
         let container_to_file = unsafe { &mut *self.container_to_file.get() };
@@ -68,7 +91,7 @@ impl BufferPool {
                 self.unlatch();
 
                 let page_id = file_manager.new_page();
-                page_id
+                ContainerPageKey::new(container_id, page_id)
             }
             Entry::Vacant(entry) => {
                 let file_manager = FileManager::new(self.path.join(container_id.to_string()));
@@ -76,16 +99,12 @@ impl BufferPool {
                 self.unlatch();
 
                 let page_id = file_manager.new_page();
-                page_id
+                ContainerPageKey::new(container_id, page_id)
             }
         }
     }
 
-    pub fn get_page_for_write(
-        &self,
-        container_id: usize,
-        page_id: usize,
-    ) -> Option<FrameWriteGuard> {
+    pub fn get_page_for_write(&self, key: ContainerPageKey) -> Option<FrameWriteGuard> {
         // Modification to the following data structures must be done while holding the latch
         // on the buffer pool.
         let pages = unsafe { &mut *self.pages.get() };
@@ -95,24 +114,24 @@ impl BufferPool {
         self.latch();
 
         // Check if the page already exists
-        if let Some(index) = id_to_index.get(&(container_id, page_id)).copied() {
+        if let Some(index) = id_to_index.get(&key).copied() {
             let res = pages[index].try_write();
             self.unlatch();
             res
         } else {
             // Choose a page to evict
-            let (old_id, index) = ((0, 0), 0); // TODO: implement a replacement policy. Returns ((container_id, page_id), frame_index)
+            let index = self.get_empty_frame();
             if let Some(mut guard) = pages[index].try_write() {
                 // Always get the frame latch before modifying the id_to_index map
                 // Modify the id_to_index map
-                id_to_index.remove(&old_id);
-                id_to_index.insert((container_id, page_id), index);
+                id_to_index.insert(key, index);
+
                 let file = container_to_file
-                    .get(&container_id)
+                    .get(&key.container_id)
                     .expect("file not found");
                 self.unlatch();
 
-                let page = file.read_page(page_id);
+                let page = file.read_page(key.page_id);
                 guard.copy(&page);
                 Some(guard)
             } else {
@@ -122,7 +141,7 @@ impl BufferPool {
         }
     }
 
-    pub fn get_page_for_read(&self, container_id: usize, page_id: usize) -> Option<FrameReadGuard> {
+    pub fn get_page_for_read(&self, key: ContainerPageKey) -> Option<FrameReadGuard> {
         // Modification to the following data structures must be done while holding the latch
         // on the buffer pool.
 
@@ -133,24 +152,24 @@ impl BufferPool {
         self.latch();
 
         // Check if the page already exists
-        if let Some(index) = id_to_index.get(&(container_id, page_id)).copied() {
+        if let Some(index) = id_to_index.get(&key).copied() {
             let res = pages[index].try_read();
             self.unlatch();
             res
         } else {
             // Choose a page to evict
-            let (old_id, index) = ((0, 0), 0); // TODO: implement a replacement policy. Returns (page_id, frame_index)
+            let index = self.get_empty_frame();
             if let Some(mut guard) = pages[index].try_write() {
                 // Always get the frame latch before modifying the id_to_index map
                 // Modify the id_to_index map
-                id_to_index.remove(&old_id);
-                id_to_index.insert((container_id, page_id), index);
+                id_to_index.insert(key, index);
+
                 let file = container_to_file
-                    .get(&container_id)
+                    .get(&key.container_id)
                     .expect("file not found");
                 self.unlatch();
 
-                let page = file.read_page(page_id);
+                let page = file.read_page(key.page_id);
                 guard.copy(&page);
                 Some(guard.downgrade())
             } else {
@@ -174,7 +193,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         {
             let bp = BufferPool::new(temp_dir.path());
-            let page_id = bp.create_new_page(0);
+            let key = bp.create_new_page(0);
             let num_threads = 3;
             let num_iterations = 80; // Note: u8 max value is 255
             thread::scope(|s| {
@@ -182,7 +201,7 @@ mod tests {
                     s.spawn(|| {
                         for _ in 0..num_iterations {
                             loop {
-                                if let Some(mut guard) = bp.get_page_for_write(0, page_id) {
+                                if let Some(mut guard) = bp.get_page_for_write(key) {
                                     guard[0] += 1;
                                     break;
                                 } else {
@@ -196,7 +215,7 @@ mod tests {
                 }
             });
 
-            let guard = bp.get_page_for_read(0, page_id).unwrap();
+            let guard = bp.get_page_for_read(key).unwrap();
             assert_eq!(guard[0], num_threads * num_iterations);
         }
     }
