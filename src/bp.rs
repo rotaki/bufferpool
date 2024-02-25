@@ -7,15 +7,40 @@ use std::{
 
 pub const NUM_PAGES: usize = 1 << 16;
 
-pub struct BufferFrame {
+pub struct FrameHeader {
     pub latch: AtomicBool,
+}
+
+impl Default for FrameHeader {
+    fn default() -> Self {
+        FrameHeader {
+            latch: AtomicBool::new(false),
+        }
+    }
+}
+
+impl FrameHeader {
+    pub fn latch(&self) {
+        while self.latch.swap(true, Ordering::Acquire) {
+            // spin
+            std::hint::spin_loop();
+        }
+    }
+
+    pub fn unlatch(&self) {
+        self.latch.store(false, Ordering::Release);
+    }
+}
+
+pub struct BufferFrame {
+    pub header: FrameHeader,
     pub page: UnsafeCell<Page>,
 }
 
 impl Default for BufferFrame {
     fn default() -> Self {
         BufferFrame {
-            latch: AtomicBool::new(false),
+            header: FrameHeader::default(),
             page: UnsafeCell::new(Page::new()),
         }
     }
@@ -34,12 +59,11 @@ impl BufferPool {
     }
 
     pub fn lock(&self, page_id: usize) -> Guard {
-        let page = &self.pages[page_id];
-        while page.latch.swap(true, Ordering::Acquire) {
-            // spin
-            std::hint::spin_loop();
+        let frame = &self.pages[page_id];
+        frame.header.latch();
+        Guard {
+            buffer_frame: frame,
         }
-        Guard { buffer_frame: page }
     }
 }
 
@@ -49,7 +73,7 @@ pub struct Guard<'a> {
 
 impl<'a> Drop for Guard<'a> {
     fn drop(&mut self) {
-        self.buffer_frame.latch.store(false, Ordering::Release);
+        self.buffer_frame.header.unlatch();
     }
 }
 
