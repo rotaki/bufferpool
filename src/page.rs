@@ -7,6 +7,10 @@ impl Page {
     pub fn new() -> Self {
         Page([0; PAGE_SIZE])
     }
+
+    pub fn copy(&mut self, other: &Page) {
+        self.0.copy_from_slice(&other.0);
+    }
 }
 
 // Index and IndexMut allow us to use the [] operator on Page.
