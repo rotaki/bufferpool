@@ -1,77 +1,15 @@
-use crate::page::Page;
+use crate::{
+    buffer_frame::{BufferFrame, FrameReadGuard, FrameWriteGuard},
+    page::Page,
+};
 use std::{
     cell::UnsafeCell,
     collections::HashMap,
-    ops::{Deref, DerefMut},
     sync::atomic::{AtomicBool, Ordering},
 };
 
 pub const NUM_PAGES: usize = 1 << 16;
 
-pub struct FrameHeader {
-    pub latch: AtomicBool,
-}
-
-impl Default for FrameHeader {
-    fn default() -> Self {
-        FrameHeader {
-            latch: AtomicBool::new(false),
-        }
-    }
-}
-
-impl FrameHeader {
-    pub fn latch(&self) {
-        while self.latch.swap(true, Ordering::Acquire) {
-            // spin
-            std::hint::spin_loop();
-        }
-    }
-
-    pub fn unlatch(&self) {
-        self.latch.store(false, Ordering::Release);
-    }
-}
-
-pub struct BufferFrame {
-    pub header: FrameHeader,
-    pub page: UnsafeCell<Page>,
-}
-
-impl Default for BufferFrame {
-    fn default() -> Self {
-        BufferFrame {
-            header: FrameHeader::default(),
-            page: UnsafeCell::new(Page::new()),
-        }
-    }
-}
-
-unsafe impl Sync for BufferFrame {}
-
-pub struct FrameGuard<'a> {
-    pub buffer_frame: &'a BufferFrame,
-}
-
-impl<'a> Drop for FrameGuard<'a> {
-    fn drop(&mut self) {
-        self.buffer_frame.header.unlatch();
-    }
-}
-
-impl Deref for FrameGuard<'_> {
-    type Target = Page;
-
-    fn deref(&self) -> &Self::Target {
-        unsafe { &*self.buffer_frame.page.get() }
-    }
-}
-
-impl DerefMut for FrameGuard<'_> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { &mut *self.buffer_frame.page.get() }
-    }
-}
 struct BufferPoolInner {
     pub id_to_index: HashMap<usize, usize>,
     pub pages: Vec<BufferFrame>,
@@ -86,12 +24,8 @@ impl BufferPoolInner {
         }
     }
 
-    pub fn latch(&self, index: usize) -> FrameGuard {
-        let frame = &self.pages[index];
-        frame.header.latch();
-        FrameGuard {
-            buffer_frame: frame,
-        }
+    pub fn get_frame(&self, index: usize) -> &BufferFrame {
+        &self.pages[index]
     }
 }
 
@@ -119,22 +53,46 @@ impl BufferPool {
         self.latch.store(false, Ordering::Release);
     }
 
-    pub fn get_page(&self, id: usize) -> FrameGuard {
+    pub fn get_page_for_write(&self, id: usize) -> FrameWriteGuard {
         self.latch();
         let inner = unsafe { &mut *self.inner.get() };
         // Check if the page already exists
         if let Some(index) = inner.id_to_index.get(&id).copied() {
-            let guard = inner.latch(index);
+            let guard = inner.get_frame(index).write();
             self.unlatch();
             return guard;
         }
-        let index = 0; // TODO: implement a replacement policy
-        let page = Page::new(); // TODO: read from disk
+        let (old_id, index) = (0, 0); // TODO: implement a replacement policy. Returns (page_id, frame_index)
+        inner.id_to_index.remove(&old_id);
         inner.id_to_index.insert(id, index);
-        let mut guard = inner.latch(index);
-        guard.copy(&page);
+
+        let mut guard = inner.get_frame(index).write();
         self.unlatch();
+
+        let page = Page::new(); // TODO: read from disk
+        guard.copy(&page);
         guard
+    }
+
+    pub fn get_page_for_read(&self, id: usize) -> FrameReadGuard {
+        self.latch();
+        let inner = unsafe { &mut *self.inner.get() };
+        // Check if the page already exists
+        if let Some(index) = inner.id_to_index.get(&id).copied() {
+            let guard = inner.get_frame(index).read();
+            self.unlatch();
+            return guard;
+        }
+        let (old_id, index) = (0, 0); // TODO: implement a replacement policy. Returns (page_id, frame_index)
+        inner.id_to_index.remove(&old_id);
+        inner.id_to_index.insert(id, index);
+
+        let mut guard = inner.get_frame(index).write();
+        self.unlatch();
+
+        let page = Page::new(); // TODO: read from disk
+        guard.copy(&page);
+        guard.downgrade()
     }
 }
 
@@ -156,7 +114,7 @@ mod tests {
             for _ in 0..num_threads {
                 s.spawn(|| {
                     for _ in 0..num_iterations {
-                        let mut guard = bp_inner.latch(0);
+                        let mut guard = bp_inner.get_frame(0).write();
                         guard[0] += 1;
                     }
                 });
@@ -164,7 +122,7 @@ mod tests {
         });
 
         // check if the counter is correct
-        let guard = bp_inner.latch(0);
+        let guard = bp_inner.get_frame(0).read();
         assert_eq!(guard[0], num_threads * num_iterations);
     }
 
@@ -178,14 +136,14 @@ mod tests {
             for _ in 0..num_threads {
                 s.spawn(|| {
                     for _ in 0..num_iterations {
-                        let mut guard = bp.get_page(id);
+                        let mut guard = bp.get_page_for_write(id);
                         guard[0] += 1;
                     }
                 });
             }
         });
 
-        let guard = bp.get_page(id);
+        let guard = bp.get_page_for_read(id);
         assert_eq!(guard[0], num_threads * num_iterations);
     }
 }
