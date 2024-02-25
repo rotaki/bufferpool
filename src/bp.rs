@@ -58,7 +58,7 @@ impl BufferPool {
         BufferPool { pages }
     }
 
-    pub fn lock(&self, page_id: usize) -> Guard {
+    pub fn latch(&self, page_id: usize) -> Guard {
         let frame = &self.pages[page_id];
         frame.header.latch();
         Guard {
@@ -97,7 +97,7 @@ mod tests {
     use std::thread;
 
     #[test]
-    fn test_lock() {
+    fn test_latch() {
         let buffer_pool = BufferPool::new();
         // multiple threads using frame as a counter
         let num_threads = 10;
@@ -107,7 +107,7 @@ mod tests {
             for _ in 0..num_threads {
                 s.spawn(|| {
                     for _ in 0..num_iterations {
-                        let mut guard = buffer_pool.lock(0);
+                        let mut guard = buffer_pool.latch(0);
                         guard[0] += 1;
                     }
                 });
@@ -115,7 +115,7 @@ mod tests {
         });
 
         // check if the counter is correct
-        let guard = buffer_pool.lock(0);
+        let guard = buffer_pool.latch(0);
         assert_eq!(guard[0], num_threads * num_iterations);
     }
 }
