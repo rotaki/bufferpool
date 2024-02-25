@@ -171,11 +171,6 @@ mod tests {
     fn test_bp_and_frame_latch() {
         let temp_dir = TempDir::new().unwrap();
         {
-            // Create a new file in the tempdir with name 0
-            let file_manager = FileManager::new(temp_dir.path().join("0"));
-            assert_eq!(file_manager.new_page(), 0);
-        }
-        {
             let bp = BufferPool::new(temp_dir.path());
             let page_id = bp.create_new_page(0);
             let num_threads = 3;
