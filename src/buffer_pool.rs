@@ -56,6 +56,8 @@ impl BufferPool {
     }
 
     pub fn create_new_page(&self, container_id: usize) -> usize {
+        // Modification to the following data structures must be done while holding the latch
+        // on the buffer pool.
         let container_to_file = unsafe { &mut *self.container_to_file.get() };
 
         self.latch();
