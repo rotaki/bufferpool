@@ -30,6 +30,25 @@ impl RwLatch {
         }
     }
 
+    pub fn try_shared(&self) -> bool {
+        let mut expected: i16;
+        loop {
+            expected = self.cnt.load(Ordering::Acquire);
+            if expected < 0 {
+                return false;
+            }
+            if self.cnt.compare_exchange(
+                expected,
+                expected + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) == Ok(expected)
+            {
+                return true;
+            }
+        }
+    }
+
     pub fn exclusive(&self) {
         let mut expected: i16;
         loop {
@@ -45,6 +64,23 @@ impl RwLatch {
         }
     }
 
+    pub fn try_exclusive(&self) -> bool {
+        let mut expected: i16;
+        loop {
+            expected = self.cnt.load(Ordering::Acquire);
+            if expected != 0 {
+                return false;
+            }
+            if self
+                .cnt
+                .compare_exchange(expected, -1, Ordering::AcqRel, Ordering::Acquire)
+                == Ok(expected)
+            {
+                return true;
+            }
+        }
+    }
+
     pub fn upgrade(&self) {
         let mut expected: i16;
         loop {
@@ -56,6 +92,23 @@ impl RwLatch {
                     == Ok(expected)
             {
                 break;
+            }
+        }
+    }
+
+    pub fn try_upgrade(&self) -> bool {
+        let mut expected: i16;
+        loop {
+            expected = self.cnt.load(Ordering::Acquire);
+            if expected != 1 {
+                return false;
+            }
+            if self
+                .cnt
+                .compare_exchange(expected, -1, Ordering::AcqRel, Ordering::Acquire)
+                == Ok(expected)
+            {
+                return true;
             }
         }
     }
@@ -91,25 +144,21 @@ mod tests {
     use super::*;
 
     // Need to wrap the UnsafeCell in a struct to implement Sync
-    pub struct Counter {
-        cnt: UnsafeCell<usize>,
-    }
+    pub struct Counter(UnsafeCell<usize>);
 
     impl Counter {
         pub fn new() -> Self {
-            Counter {
-                cnt: UnsafeCell::new(0),
-            }
+            Counter(UnsafeCell::new(0))
         }
 
         pub fn increment(&self) {
             unsafe {
-                *self.cnt.get() += 1;
+                *self.0.get() += 1;
             }
         }
 
         pub fn read(&self) -> usize {
-            unsafe { *self.cnt.get() }
+            unsafe { *self.0.get() }
         }
     }
 

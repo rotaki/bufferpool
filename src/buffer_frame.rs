@@ -38,9 +38,25 @@ impl BufferFrame {
         FrameReadGuard { buffer_frame: self }
     }
 
+    pub fn try_read(&self) -> Option<FrameReadGuard> {
+        if self.header.latch.try_shared() {
+            Some(FrameReadGuard { buffer_frame: self })
+        } else {
+            None
+        }
+    }
+
     pub fn write(&self) -> FrameWriteGuard {
         self.header.latch.exclusive();
         FrameWriteGuard { buffer_frame: self }
+    }
+
+    pub fn try_write(&self) -> Option<FrameWriteGuard> {
+        if self.header.latch.try_exclusive() {
+            Some(FrameWriteGuard { buffer_frame: self })
+        } else {
+            None
+        }
     }
 }
 

@@ -10,35 +10,19 @@ use std::{
 
 pub const NUM_PAGES: usize = 1 << 16;
 
-struct BufferPoolInner {
-    pub id_to_index: HashMap<usize, usize>,
-    pub pages: Vec<BufferFrame>,
-}
-
-impl BufferPoolInner {
-    pub fn new() -> Self {
-        let pages = (0..NUM_PAGES).map(|_| BufferFrame::default()).collect();
-        BufferPoolInner {
-            id_to_index: HashMap::new(),
-            pages,
-        }
-    }
-
-    pub fn get_frame(&self, index: usize) -> &BufferFrame {
-        &self.pages[index]
-    }
-}
-
 pub struct BufferPool {
     latch: AtomicBool,
-    inner: UnsafeCell<BufferPoolInner>,
+    pages: UnsafeCell<Vec<BufferFrame>>,
+    id_to_index: UnsafeCell<HashMap<usize, usize>>,
 }
 
 impl BufferPool {
     pub fn new() -> Self {
+        let pages = (0..NUM_PAGES).map(|_| BufferFrame::default()).collect();
         BufferPool {
             latch: AtomicBool::new(false),
-            inner: UnsafeCell::new(BufferPoolInner::new()),
+            id_to_index: UnsafeCell::new(HashMap::new()),
+            pages: UnsafeCell::new(pages),
         }
     }
 
@@ -53,46 +37,63 @@ impl BufferPool {
         self.latch.store(false, Ordering::Release);
     }
 
-    pub fn get_page_for_write(&self, id: usize) -> FrameWriteGuard {
+    pub fn get_page_for_write(&self, id: usize) -> Option<FrameWriteGuard> {
         self.latch();
-        let inner = unsafe { &mut *self.inner.get() };
+        let id_to_index = unsafe { &mut *self.id_to_index.get() };
+        let pages = unsafe { &mut *self.pages.get() };
         // Check if the page already exists
-        if let Some(index) = inner.id_to_index.get(&id).copied() {
-            let guard = inner.get_frame(index).write();
+        if let Some(index) = id_to_index.get(&id).copied() {
+            let res = pages[index].try_write();
             self.unlatch();
-            return guard;
+            res
+        } else {
+            // Choose a page to evict
+            let (old_id, index) = (0, 0); // TODO: implement a replacement policy. Returns (page_id, frame_index)
+            if let Some(mut guard) = pages[index].try_write() {
+                // Always get the frame latch before modifying the id_to_index map
+                // Modify the id_to_index map
+                id_to_index.remove(&old_id);
+                id_to_index.insert(id, index);
+                self.unlatch();
+
+                let page = Page::new(); // TODO: read from disk
+                guard.copy(&page);
+                Some(guard)
+            } else {
+                self.unlatch();
+                None
+            }
         }
-        let (old_id, index) = (0, 0); // TODO: implement a replacement policy. Returns (page_id, frame_index)
-        inner.id_to_index.remove(&old_id);
-        inner.id_to_index.insert(id, index);
-
-        let mut guard = inner.get_frame(index).write();
-        self.unlatch();
-
-        let page = Page::new(); // TODO: read from disk
-        guard.copy(&page);
-        guard
     }
 
-    pub fn get_page_for_read(&self, id: usize) -> FrameReadGuard {
+    pub fn get_page_for_read(&self, id: usize) -> Option<FrameReadGuard> {
         self.latch();
-        let inner = unsafe { &mut *self.inner.get() };
+        let id_to_index = unsafe { &mut *self.id_to_index.get() };
+        let pages = unsafe { &mut *self.pages.get() };
+
         // Check if the page already exists
-        if let Some(index) = inner.id_to_index.get(&id).copied() {
-            let guard = inner.get_frame(index).read();
+        if let Some(index) = id_to_index.get(&id).copied() {
+            let res = pages[index].try_read();
             self.unlatch();
-            return guard;
+            res
+        } else {
+            // Choose a page to evict
+            let (old_id, index) = (0, 0); // TODO: implement a replacement policy. Returns (page_id, frame_index)
+            if let Some(mut guard) = pages[index].try_write() {
+                // Always get the frame latch before modifying the id_to_index map
+                // Modify the id_to_index map
+                id_to_index.remove(&old_id);
+                id_to_index.insert(id, index);
+                self.unlatch();
+
+                let page = Page::new(); // TODO: read from disk
+                guard.copy(&page);
+                Some(guard.downgrade())
+            } else {
+                self.unlatch();
+                None
+            }
         }
-        let (old_id, index) = (0, 0); // TODO: implement a replacement policy. Returns (page_id, frame_index)
-        inner.id_to_index.remove(&old_id);
-        inner.id_to_index.insert(id, index);
-
-        let mut guard = inner.get_frame(index).write();
-        self.unlatch();
-
-        let page = Page::new(); // TODO: read from disk
-        guard.copy(&page);
-        guard.downgrade()
     }
 }
 
@@ -104,29 +105,6 @@ mod tests {
     use std::thread;
 
     #[test]
-    fn test_frame_latch() {
-        let bp_inner = BufferPoolInner::new();
-        // multiple threads using frame as a counter
-        let num_threads = 10;
-        let num_iterations = 10;
-        // scoped threads
-        thread::scope(|s| {
-            for _ in 0..num_threads {
-                s.spawn(|| {
-                    for _ in 0..num_iterations {
-                        let mut guard = bp_inner.get_frame(0).write();
-                        guard[0] += 1;
-                    }
-                });
-            }
-        });
-
-        // check if the counter is correct
-        let guard = bp_inner.get_frame(0).read();
-        assert_eq!(guard[0], num_threads * num_iterations);
-    }
-
-    #[test]
     fn test_bp_and_frame_latch() {
         let bp = BufferPool::new();
         let id = 0;
@@ -136,14 +114,21 @@ mod tests {
             for _ in 0..num_threads {
                 s.spawn(|| {
                     for _ in 0..num_iterations {
-                        let mut guard = bp.get_page_for_write(id);
-                        guard[0] += 1;
+                        loop {
+                            if let Some(mut guard) = bp.get_page_for_write(id) {
+                                guard[0] += 1;
+                                break;
+                            } else {
+                                // spin
+                                std::hint::spin_loop();
+                            }
+                        }
                     }
                 });
             }
         });
 
-        let guard = bp.get_page_for_read(id);
+        let guard = bp.get_page_for_read(id).unwrap();
         assert_eq!(guard[0], num_threads * num_iterations);
     }
 }
