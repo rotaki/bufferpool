@@ -1,16 +1,16 @@
 use crate::{
     buffer_frame::{BufferFrame, FrameReadGuard, FrameWriteGuard},
+    eviction_policy::EvictionPolicy,
     file_manager::FileManager,
 };
 use std::{
     cell::UnsafeCell,
-    collections::hash_map::Entry,
-    collections::HashMap,
+    collections::{hash_map::Entry, HashMap},
     path::PathBuf,
     sync::atomic::{AtomicBool, Ordering},
 };
 
-pub const NUM_PAGES: usize = 1 << 16;
+pub const NUM_PAGES: usize = 1 << 16; // 64K pages
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ContainerPageKey {
@@ -30,9 +30,10 @@ impl ContainerPageKey {
 pub struct BufferPool {
     path: PathBuf,
     latch: AtomicBool,
-    pages: UnsafeCell<Vec<BufferFrame>>,
+    frames: UnsafeCell<Vec<BufferFrame>>,
     id_to_index: UnsafeCell<HashMap<ContainerPageKey, usize>>, // (container_id, page_id) -> index
     container_to_file: UnsafeCell<HashMap<usize, FileManager>>,
+    eviction_policy: UnsafeCell<EvictionPolicy>,
 }
 
 impl BufferPool {
@@ -49,13 +50,14 @@ impl BufferPool {
             container.insert(file_id, file_manager);
         }
 
-        let pages = (0..NUM_PAGES).map(|_| BufferFrame::default()).collect();
+        let frames = (0..NUM_PAGES).map(|_| BufferFrame::default()).collect();
         BufferPool {
             path: path.as_ref().to_path_buf(),
             latch: AtomicBool::new(false),
             id_to_index: UnsafeCell::new(HashMap::new()),
-            pages: UnsafeCell::new(pages),
+            frames: UnsafeCell::new(frames),
             container_to_file: UnsafeCell::new(container),
+            eviction_policy: UnsafeCell::new(EvictionPolicy::new(NUM_PAGES)),
         }
     }
 
@@ -70,16 +72,8 @@ impl BufferPool {
         self.latch.store(false, Ordering::Release);
     }
 
-    fn choose_page_to_evict(&self) -> ContainerPageKey {
-        unimplemented!()
-    }
-
-    fn get_empty_frame(&self) -> usize {
-        0 // TODO: Check if there is an empty frame. If not, evict a page.
-    }
-
     pub fn create_new_page(&self, container_id: usize) -> ContainerPageKey {
-        // Modification to the following data structures must be done while holding the latch
+        // Reading and writing to the following data structures must be done while holding the latch
         // on the buffer pool.
         let container_to_file = unsafe { &mut *self.container_to_file.get() };
 
@@ -105,26 +99,37 @@ impl BufferPool {
     }
 
     pub fn get_page_for_write(&self, key: ContainerPageKey) -> Option<FrameWriteGuard> {
-        // Modification to the following data structures must be done while holding the latch
+        // Reading and writing to the following data structures must be done while holding the latch
         // on the buffer pool.
-        let pages = unsafe { &mut *self.pages.get() };
+        let pages = unsafe { &mut *self.frames.get() };
         let id_to_index = unsafe { &mut *self.id_to_index.get() };
         let container_to_file = unsafe { &mut *self.container_to_file.get() };
+        let eviction_policy = unsafe { &mut *self.eviction_policy.get() };
 
         self.latch();
 
         // Check if the page already exists
         if let Some(index) = id_to_index.get(&key).copied() {
             let res = pages[index].try_write();
+
+            eviction_policy.update(index);
+
             self.unlatch();
             res
         } else {
-            // Choose a page to evict
-            let index = self.get_empty_frame();
+            let index = eviction_policy.choose_victim(); // Victim frame index
+
             if let Some(mut guard) = pages[index].try_write() {
                 // Always get the frame latch before modifying the id_to_index map
-                // Modify the id_to_index map
+                let old_key = guard.key();
+                if let Some(old_key_inner) = old_key {
+                    id_to_index.remove(&old_key_inner);
+                }
                 id_to_index.insert(key, index);
+                *old_key = Some(key);
+
+                eviction_policy.reset(index);
+                eviction_policy.update(index);
 
                 let file = container_to_file
                     .get(&key.container_id)
@@ -145,24 +150,35 @@ impl BufferPool {
         // Modification to the following data structures must be done while holding the latch
         // on the buffer pool.
 
-        let pages = unsafe { &mut *self.pages.get() };
+        let pages = unsafe { &mut *self.frames.get() };
         let id_to_index = unsafe { &mut *self.id_to_index.get() };
         let container_to_file = unsafe { &mut *self.container_to_file.get() };
+        let eviction_policy = unsafe { &mut *self.eviction_policy.get() };
 
         self.latch();
 
         // Check if the page already exists
         if let Some(index) = id_to_index.get(&key).copied() {
             let res = pages[index].try_read();
+
+            eviction_policy.update(index);
+
             self.unlatch();
             res
         } else {
-            // Choose a page to evict
-            let index = self.get_empty_frame();
+            let index = eviction_policy.choose_victim();
+
             if let Some(mut guard) = pages[index].try_write() {
                 // Always get the frame latch before modifying the id_to_index map
-                // Modify the id_to_index map
+                let old_key = guard.key();
+                if let Some(old_key) = old_key {
+                    id_to_index.remove(&old_key);
+                }
                 id_to_index.insert(key, index);
+                *old_key = Some(key);
+
+                eviction_policy.reset(index);
+                eviction_policy.update(index);
 
                 let file = container_to_file
                     .get(&key.container_id)
