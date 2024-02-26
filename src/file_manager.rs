@@ -11,8 +11,6 @@ pub struct FileManager {
 
 impl FileManager {
     pub fn new<P: AsRef<std::path::Path>>(path: P) -> Self {
-        // open if exists and figure out the number of pages
-        // otherwise create a new file
         let file = OpenOptions::new()
             .read(true)
             .write(true)

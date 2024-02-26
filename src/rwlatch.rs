@@ -13,6 +13,14 @@ impl Default for RwLatch {
 }
 
 impl RwLatch {
+    pub fn is_shared(&self) -> bool {
+        self.cnt.load(Ordering::Acquire) > 0
+    }
+
+    pub fn is_exclusive(&self) -> bool {
+        self.cnt.load(Ordering::Acquire) < 0
+    }
+
     pub fn shared(&self) {
         let mut expected: i16;
         loop {

@@ -10,8 +10,6 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-pub const NUM_PAGES: usize = 1 << 16; // 64K pages
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ContainerPageKey {
     container_id: usize,
@@ -37,7 +35,7 @@ pub struct BufferPool {
 }
 
 impl BufferPool {
-    pub fn new<P: AsRef<std::path::Path>>(path: P) -> Self {
+    pub fn new<P: AsRef<std::path::Path>>(path: P, num_pages: usize) -> Self {
         // Identify all the files in the directory. Parse the file name to a number.
         // Create a FileManager for each file and store it in the container.
         let mut container = HashMap::new();
@@ -50,14 +48,14 @@ impl BufferPool {
             container.insert(file_id, file_manager);
         }
 
-        let frames = (0..NUM_PAGES).map(|_| BufferFrame::default()).collect();
+        let frames = (0..num_pages).map(|_| BufferFrame::default()).collect();
         BufferPool {
             path: path.as_ref().to_path_buf(),
             latch: AtomicBool::new(false),
             id_to_index: UnsafeCell::new(HashMap::new()),
             frames: UnsafeCell::new(frames),
             container_to_file: UnsafeCell::new(container),
-            eviction_policy: UnsafeCell::new(EvictionPolicy::new(NUM_PAGES)),
+            eviction_policy: UnsafeCell::new(EvictionPolicy::new(num_pages)),
         }
     }
 
@@ -122,11 +120,20 @@ impl BufferPool {
             if let Some(mut guard) = pages[index].try_write() {
                 // Always get the frame latch before modifying the id_to_index map
                 let old_key = guard.key();
+                let is_dirty = guard.is_dirty();
                 if let Some(old_key_inner) = old_key {
+                    // If the page is dirty, write it to disk
+                    if *is_dirty {
+                        let file = container_to_file
+                            .get(&old_key_inner.container_id)
+                            .expect("file not found");
+                        file.write_page(old_key_inner.page_id, &*guard);
+                    }
                     id_to_index.remove(&old_key_inner);
                 }
                 id_to_index.insert(key, index);
                 *old_key = Some(key);
+                *is_dirty = false;
 
                 eviction_policy.reset(index);
                 eviction_policy.update(index);
@@ -171,11 +178,20 @@ impl BufferPool {
             if let Some(mut guard) = pages[index].try_write() {
                 // Always get the frame latch before modifying the id_to_index map
                 let old_key = guard.key();
-                if let Some(old_key) = old_key {
-                    id_to_index.remove(&old_key);
+                let is_dirty = guard.is_dirty();
+                if let Some(old_key_inner) = old_key {
+                    // If the page is dirty, write it to disk
+                    if *is_dirty {
+                        let file = container_to_file
+                            .get(&old_key_inner.container_id)
+                            .expect("file not found");
+                        file.write_page(old_key_inner.page_id, &*guard);
+                    }
+                    id_to_index.remove(&old_key_inner);
                 }
                 id_to_index.insert(key, index);
                 *old_key = Some(key);
+                *is_dirty = false;
 
                 eviction_policy.reset(index);
                 eviction_policy.update(index);
@@ -196,6 +212,39 @@ impl BufferPool {
     }
 }
 
+#[cfg(test)]
+impl BufferPool {
+    pub fn check_all_frames_unlatched(&self) {
+        let frames = unsafe { &*self.frames.get() };
+        for frame in frames.iter() {
+            assert!(!frame.latch.is_exclusive());
+            assert!(!frame.latch.is_shared());
+        }
+    }
+
+    pub fn check_id_to_index(&self) {
+        let id_to_index = unsafe { &*self.id_to_index.get() };
+        let mut index_to_id = HashMap::new();
+        for (k, &v) in id_to_index.iter() {
+            index_to_id.insert(v, k);
+        }
+        let frames = unsafe { &*self.frames.get() };
+        for (i, frame) in frames.iter().enumerate() {
+            if index_to_id.contains_key(&i) {
+                assert_eq!((unsafe { *frame.key.get() }).unwrap(), *index_to_id[&i]);
+            } else {
+                assert_eq!(unsafe { *frame.key.get() }, None);
+            }
+        }
+        // println!("id_to_index: {:?}", id_to_index);
+    }
+
+    pub fn is_in_buffer_pool(&self, key: ContainerPageKey) -> bool {
+        let id_to_index = unsafe { &*self.id_to_index.get() };
+        id_to_index.contains_key(&key)
+    }
+}
+
 unsafe impl Sync for BufferPool {}
 
 #[cfg(test)]
@@ -208,7 +257,7 @@ mod tests {
     fn test_bp_and_frame_latch() {
         let temp_dir = TempDir::new().unwrap();
         {
-            let bp = BufferPool::new(temp_dir.path());
+            let bp = BufferPool::new(temp_dir.path(), 10);
             let key = bp.create_new_page(0);
             let num_threads = 3;
             let num_iterations = 80; // Note: u8 max value is 255
@@ -233,6 +282,64 @@ mod tests {
 
             let guard = bp.get_page_for_read(key).unwrap();
             assert_eq!(guard[0], num_threads * num_iterations);
+        }
+    }
+
+    #[test]
+    fn test_bp_write_back_simple() {
+        let tempdir = TempDir::new().unwrap();
+        {
+            let bp = BufferPool::new(tempdir.path(), 1);
+            let container_id = 0;
+            let key1 = {
+                let key = bp.create_new_page(container_id);
+                let mut guard = bp.get_page_for_write(key).unwrap();
+                assert_eq!(guard[0], 0);
+                guard[0] = 1;
+                key
+            };
+            let key2 = {
+                let new_key = bp.create_new_page(container_id);
+                let mut guard = bp.get_page_for_write(new_key).unwrap();
+                assert_eq!(guard[0], 0);
+                guard[0] = 2;
+                new_key
+            };
+            bp.check_all_frames_unlatched();
+            // check contents of evicted page
+            {
+                let guard = bp.get_page_for_read(key1).unwrap();
+                assert_eq!(guard[0], 1);
+            }
+            // check contents of the page in the buffer pool
+            {
+                let guard = bp.get_page_for_read(key2).unwrap();
+                assert_eq!(guard[0], 2);
+            }
+        }
+    }
+
+    #[test]
+    fn test_bp_write_back_many() {
+        let temp_dir = TempDir::new().unwrap();
+        {
+            let mut keys = Vec::new();
+            let bp = BufferPool::new(temp_dir.path(), 1);
+            let container_id = 0;
+            for i in 0..100 {
+                let key = bp.create_new_page(container_id);
+
+                let mut guard = bp.get_page_for_write(key).unwrap();
+                guard[0] = i;
+                keys.push(key);
+
+                bp.check_id_to_index();
+            }
+            bp.check_all_frames_unlatched();
+            for (i, key) in keys.iter().enumerate() {
+                let guard = bp.get_page_for_read(*key).unwrap();
+                assert_eq!(guard[0], i as u8);
+            }
         }
     }
 }
