@@ -1,7 +1,10 @@
+use log::debug;
+
 use crate::{
     buffer_frame::{BufferFrame, FrameReadGuard, FrameWriteGuard},
     eviction_policy::EvictionPolicy,
     file_manager::FileManager,
+    utils::init_logger,
 };
 use std::{
     cell::UnsafeCell,
@@ -36,6 +39,9 @@ pub struct BufferPool {
 
 impl BufferPool {
     pub fn new<P: AsRef<std::path::Path>>(path: P, num_pages: usize) -> Self {
+        init_logger();
+        debug!("Buffer pool created: num_pages: {}", num_pages);
+
         // Identify all the files in the directory. Parse the file name to a number.
         // Create a FileManager for each file and store it in the container.
         let mut container = HashMap::new();
@@ -83,6 +89,10 @@ impl BufferPool {
                 self.unlatch();
 
                 let page_id = file_manager.new_page();
+                debug!(
+                    "New page created: c_id: {}, p_id: {}",
+                    container_id, page_id
+                );
                 ContainerPageKey::new(container_id, page_id)
             }
             Entry::Vacant(entry) => {
@@ -91,6 +101,10 @@ impl BufferPool {
                 self.unlatch();
 
                 let page_id = file_manager.new_page();
+                debug!(
+                    "New page created: c_id: {}, p_id: {}",
+                    container_id, page_id
+                );
                 ContainerPageKey::new(container_id, page_id)
             }
         }
@@ -130,6 +144,10 @@ impl BufferPool {
                         file.write_page(old_key_inner.page_id, &*guard);
                     }
                     id_to_index.remove(&old_key_inner);
+                    debug!(
+                        "Page evicted: c_id: {}, p_id: {}",
+                        old_key_inner.container_id, old_key_inner.page_id
+                    );
                 }
                 id_to_index.insert(key, index);
                 *old_key = Some(key);
@@ -145,6 +163,10 @@ impl BufferPool {
 
                 let page = file.read_page(key.page_id);
                 guard.copy(&page);
+                debug!(
+                    "Page loaded: c_id: {}, p_id: {}",
+                    key.container_id, key.page_id
+                );
                 Some(guard)
             } else {
                 self.unlatch();
@@ -188,6 +210,10 @@ impl BufferPool {
                         file.write_page(old_key_inner.page_id, &*guard);
                     }
                     id_to_index.remove(&old_key_inner);
+                    debug!(
+                        "Page evicted: c_id: {}, p_id: {}",
+                        old_key_inner.container_id, old_key_inner.page_id
+                    );
                 }
                 id_to_index.insert(key, index);
                 *old_key = Some(key);
@@ -203,6 +229,10 @@ impl BufferPool {
 
                 let page = file.read_page(key.page_id);
                 guard.copy(&page);
+                debug!(
+                    "Page loaded: c_id: {}, p_id: {}",
+                    key.container_id, key.page_id
+                );
                 Some(guard.downgrade())
             } else {
                 self.unlatch();
@@ -328,7 +358,6 @@ mod tests {
             let container_id = 0;
             for i in 0..100 {
                 let key = bp.create_new_page(container_id);
-
                 let mut guard = bp.get_page_for_write(key).unwrap();
                 guard[0] = i;
                 keys.push(key);
