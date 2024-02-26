@@ -310,6 +310,8 @@ mod tests {
                 }
             });
 
+            bp.check_all_frames_unlatched();
+            bp.check_id_to_index();
             let guard = bp.get_page_for_read(key).unwrap();
             assert_eq!(guard[0], num_threads * num_iterations);
         }
