@@ -109,8 +109,10 @@ impl BufferPool {
                 self.unlatch();
 
                 let page_id = file_manager.get_new_page_id();
+                let mut page = Page::new();
+                init(&mut page);
                 // TODO: Write log
-                file_manager.write_page(page_id, &Page::new());
+                file_manager.write_page(page_id, &page);
                 debug!(
                     "New page created: c_id: {}, p_id: {}",
                     container_id, page_id
@@ -298,7 +300,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         {
             let bp = BufferPool::new(temp_dir.path(), 10);
-            let key = bp.create_new_page(0, &|page: &mut Page| {});
+            let key = bp.create_new_page(0, &|_: &mut Page| {});
             let num_threads = 3;
             let num_iterations = 80; // Note: u8 max value is 255
             thread::scope(|s| {
