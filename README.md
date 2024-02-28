@@ -7,3 +7,4 @@
     * [] Add more eviction algo
 * [] Add write-ahead log, page lsn
 * [] Add pointer swizzling
+* [] Add Foster B-tree

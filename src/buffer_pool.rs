@@ -1,7 +1,10 @@
 use log::debug;
 
 use crate::{
-    buffer_frame::{BufferFrame, FrameReadGuard, FrameWriteGuard}, eviction_policy::EvictionPolicy, file_manager::FileManager, page::Page, utils::init_logger
+    buffer_frame::{BufferFrame, FrameReadGuard, FrameWriteGuard},
+    eviction_policy::EvictionPolicy,
+    page::{FileManager, Page},
+    utils::init_logger,
 };
 use std::{
     cell::UnsafeCell,
@@ -73,7 +76,11 @@ impl BufferPool {
         self.latch.store(false, Ordering::Release);
     }
 
-    pub fn create_new_page(&self, container_id: usize) -> ContainerPageKey {
+    pub fn create_new_page<T: Fn(&mut Page)>(
+        &self,
+        container_id: usize,
+        init: &T,
+    ) -> ContainerPageKey {
         // Reading and writing to the following data structures must be done while holding the latch
         // on the buffer pool.
         let container_to_file = unsafe { &mut *self.container_to_file.get() };
@@ -86,8 +93,10 @@ impl BufferPool {
                 self.unlatch();
 
                 let page_id = file_manager.get_new_page_id();
+                let mut page = Page::new();
+                init(&mut page);
                 // TODO: Write log
-                file_manager.write_page(page_id, &Page::new());
+                file_manager.write_page(page_id, &page);
                 debug!(
                     "New page created: c_id: {}, p_id: {}",
                     container_id, page_id
@@ -289,7 +298,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         {
             let bp = BufferPool::new(temp_dir.path(), 10);
-            let key = bp.create_new_page(0);
+            let key = bp.create_new_page(0, &|page: &mut Page| {});
             let num_threads = 3;
             let num_iterations = 80; // Note: u8 max value is 255
             thread::scope(|s| {
@@ -325,14 +334,18 @@ mod tests {
             let bp = BufferPool::new(tempdir.path(), 1);
             let container_id = 0;
             let key1 = {
-                let key = bp.create_new_page(container_id);
+                let key = bp.create_new_page(container_id, &|page: &mut Page| {
+                    page[0] = 0;
+                });
                 let mut guard = bp.get_page_for_write(key).unwrap();
                 assert_eq!(guard[0], 0);
                 guard[0] = 1;
                 key
             };
             let key2 = {
-                let new_key = bp.create_new_page(container_id);
+                let new_key = bp.create_new_page(container_id, &|page: &mut Page| {
+                    page[0] = 0;
+                });
                 let mut guard = bp.get_page_for_write(new_key).unwrap();
                 assert_eq!(guard[0], 0);
                 guard[0] = 2;
@@ -360,7 +373,9 @@ mod tests {
             let bp = BufferPool::new(temp_dir.path(), 1);
             let container_id = 0;
             for i in 0..100 {
-                let key = bp.create_new_page(container_id);
+                let key = bp.create_new_page(container_id, &|page: &mut Page| {
+                    page[0] = 0;
+                });
                 let mut guard = bp.get_page_for_write(key).unwrap();
                 guard[0] = i;
                 keys.push(key);
@@ -369,7 +384,7 @@ mod tests {
             }
             bp.check_all_frames_unlatched();
             for (i, key) in keys.iter().enumerate() {
-                let guard = bp.get_page_for_read(*key).unwrap();
+                let guard: FrameReadGuard<'_> = bp.get_page_for_read(*key).unwrap();
                 assert_eq!(guard[0], i as u8);
             }
         }
