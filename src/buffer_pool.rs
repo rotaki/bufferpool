@@ -1,10 +1,7 @@
 use log::debug;
 
 use crate::{
-    buffer_frame::{BufferFrame, FrameReadGuard, FrameWriteGuard},
-    eviction_policy::EvictionPolicy,
-    file_manager::FileManager,
-    utils::init_logger,
+    buffer_frame::{BufferFrame, FrameReadGuard, FrameWriteGuard}, eviction_policy::EvictionPolicy, file_manager::FileManager, page::Page, utils::init_logger
 };
 use std::{
     cell::UnsafeCell,
@@ -88,7 +85,9 @@ impl BufferPool {
                 let file_manager = entry.get_mut();
                 self.unlatch();
 
-                let page_id = file_manager.new_page();
+                let page_id = file_manager.get_new_page_id();
+                // TODO: Write log
+                file_manager.write_page(page_id, &Page::new());
                 debug!(
                     "New page created: c_id: {}, p_id: {}",
                     container_id, page_id
@@ -100,7 +99,9 @@ impl BufferPool {
                 let file_manager = entry.insert(file_manager);
                 self.unlatch();
 
-                let page_id = file_manager.new_page();
+                let page_id = file_manager.get_new_page_id();
+                // TODO: Write log
+                file_manager.write_page(page_id, &Page::new());
                 debug!(
                     "New page created: c_id: {}, p_id: {}",
                     container_id, page_id

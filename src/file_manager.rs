@@ -28,12 +28,8 @@ impl FileManager {
         }
     }
 
-    pub fn new_page(&self) -> usize {
-        let page_id = self
-            .num_pages
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.write_page(page_id, &Page::new());
-        page_id
+    pub fn get_new_page_id(&self) -> usize {
+        self.num_pages.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn read_page(&self, page_id: usize) -> Page {
