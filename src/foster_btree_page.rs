@@ -785,116 +785,241 @@ mod tests {
     */
 
     #[test]
-    fn test_lower_bound_and_find_for_normal_fence_page() {
-        let mut page = Page::new();
-        let low_fence = "b".as_bytes();
-        let high_fence = "g".as_bytes();
-        FosterBtreePage::init(&mut page);
-        let mut fbt_page = FosterBtreePage::new(&mut page);
-        fbt_page.insert_low_fence(low_fence);
-        fbt_page.insert_high_fence(high_fence);
+    fn test_lower_bound_and_find() {
+        {
+            // Normal fence page
+            let mut page = Page::new();
+            let low_fence = "b".as_bytes();
+            let high_fence = "g".as_bytes();
+            FosterBtreePage::init(&mut page);
+            let mut fbt_page = FosterBtreePage::new(&mut page);
+            fbt_page.insert_low_fence(low_fence);
+            fbt_page.insert_high_fence(high_fence);
 
-        assert_eq!(fbt_page.lower_bound("a".as_bytes()), None);
-        assert_eq!(fbt_page.lower_bound("b".as_bytes()), Some("b".as_bytes()));
-        assert_eq!(fbt_page.lower_bound("c".as_bytes()), Some("b".as_bytes()));
-        assert_eq!(fbt_page.lower_bound("d".as_bytes()), Some("b".as_bytes()));
-        assert_eq!(fbt_page.lower_bound("e".as_bytes()), Some("b".as_bytes()));
-        assert_eq!(fbt_page.lower_bound("f".as_bytes()), Some("b".as_bytes()));
-        assert_eq!(fbt_page.lower_bound("g".as_bytes()), None);
-        assert_eq!(fbt_page.lower_bound("h".as_bytes()), None);
-        assert_eq!(fbt_page.lower_bound("i".as_bytes()), None);
-        assert_eq!(fbt_page.find("a".as_bytes()), None);
-        assert_eq!(fbt_page.find("b".as_bytes()), None);
-        assert_eq!(fbt_page.find("c".as_bytes()), None);
-        assert_eq!(fbt_page.find("d".as_bytes()), None);
-        assert_eq!(fbt_page.find("e".as_bytes()), None);
-        assert_eq!(fbt_page.find("f".as_bytes()), None);
-        assert_eq!(fbt_page.find("g".as_bytes()), None);
-        assert_eq!(fbt_page.find("h".as_bytes()), None);
-        assert_eq!(fbt_page.find("i".as_bytes()), None);
+            assert_eq!(fbt_page.lower_bound("a".as_bytes()), None);
+            assert_eq!(fbt_page.lower_bound("b".as_bytes()), Some("b".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("c".as_bytes()), Some("b".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("d".as_bytes()), Some("b".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("e".as_bytes()), Some("b".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("f".as_bytes()), Some("b".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("g".as_bytes()), None);
+            assert_eq!(fbt_page.lower_bound("h".as_bytes()), None);
+            assert_eq!(fbt_page.lower_bound("i".as_bytes()), None);
+            assert_eq!(fbt_page.find("a".as_bytes()), None);
+            assert_eq!(fbt_page.find("b".as_bytes()), None);
+            assert_eq!(fbt_page.find("c".as_bytes()), None);
+            assert_eq!(fbt_page.find("d".as_bytes()), None);
+            assert_eq!(fbt_page.find("e".as_bytes()), None);
+            assert_eq!(fbt_page.find("f".as_bytes()), None);
+            assert_eq!(fbt_page.find("g".as_bytes()), None);
+            assert_eq!(fbt_page.find("h".as_bytes()), None);
+            assert_eq!(fbt_page.find("i".as_bytes()), None);
 
-        // Push two keys "c" and "e"
-        assert!(fbt_page.insert("c".as_bytes(), "cc".as_bytes(), false));
-        fbt_page.check_keys_are_sorted();
-        fbt_page.check_slot_data_start();
-        assert!(fbt_page.header().active_slot_count() == 3);
+            // Push two keys "c" and "e"
+            assert!(fbt_page.insert("c".as_bytes(), "cc".as_bytes(), false));
+            fbt_page.check_keys_are_sorted();
+            fbt_page.check_slot_data_start();
+            assert!(fbt_page.header().active_slot_count() == 3);
 
-        assert!(fbt_page.insert("e".as_bytes(), "ee".as_bytes(), false));
-        fbt_page.check_keys_are_sorted();
-        fbt_page.check_slot_data_start();
-        assert!(fbt_page.header().active_slot_count() == 4);
+            assert!(fbt_page.insert("e".as_bytes(), "ee".as_bytes(), false));
+            fbt_page.check_keys_are_sorted();
+            fbt_page.check_slot_data_start();
+            assert!(fbt_page.header().active_slot_count() == 4);
 
-        assert_eq!(fbt_page.lower_bound("a".as_bytes()), None);
-        assert_eq!(fbt_page.lower_bound("b".as_bytes()), Some("b".as_bytes()));
-        assert_eq!(fbt_page.lower_bound("c".as_bytes()), Some("c".as_bytes()));
-        assert_eq!(fbt_page.lower_bound("d".as_bytes()), Some("c".as_bytes()));
-        assert_eq!(fbt_page.lower_bound("e".as_bytes()), Some("e".as_bytes()));
-        assert_eq!(fbt_page.lower_bound("f".as_bytes()), Some("e".as_bytes()));
-        assert_eq!(fbt_page.lower_bound("g".as_bytes()), None);
-        assert_eq!(fbt_page.lower_bound("h".as_bytes()), None);
-        assert_eq!(fbt_page.lower_bound("i".as_bytes()), None);
-        assert_eq!(fbt_page.find("a".as_bytes()), None);
-        assert_eq!(fbt_page.find("b".as_bytes()), None);
-        assert_eq!(fbt_page.find("c".as_bytes()), Some("cc".as_bytes()));
-        assert_eq!(fbt_page.find("d".as_bytes()), None);
-        assert_eq!(fbt_page.find("e".as_bytes()), Some("ee".as_bytes()));
-        assert_eq!(fbt_page.find("f".as_bytes()), None);
-        assert_eq!(fbt_page.find("g".as_bytes()), None);
-        assert_eq!(fbt_page.find("h".as_bytes()), None);
-        assert_eq!(fbt_page.find("i".as_bytes()), None);
-    }
+            assert_eq!(fbt_page.lower_bound("a".as_bytes()), None);
+            assert_eq!(fbt_page.lower_bound("b".as_bytes()), Some("b".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("c".as_bytes()), Some("c".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("d".as_bytes()), Some("c".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("e".as_bytes()), Some("e".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("f".as_bytes()), Some("e".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("g".as_bytes()), None);
+            assert_eq!(fbt_page.lower_bound("h".as_bytes()), None);
+            assert_eq!(fbt_page.lower_bound("i".as_bytes()), None);
+            assert_eq!(fbt_page.find("a".as_bytes()), None);
+            assert_eq!(fbt_page.find("b".as_bytes()), None);
+            assert_eq!(fbt_page.find("c".as_bytes()), Some("cc".as_bytes()));
+            assert_eq!(fbt_page.find("d".as_bytes()), None);
+            assert_eq!(fbt_page.find("e".as_bytes()), Some("ee".as_bytes()));
+            assert_eq!(fbt_page.find("f".as_bytes()), None);
+            assert_eq!(fbt_page.find("g".as_bytes()), None);
+            assert_eq!(fbt_page.find("h".as_bytes()), None);
+            assert_eq!(fbt_page.find("i".as_bytes()), None);
+        }
 
-    #[test]
-    fn test_lower_bound_and_find_for_root_page() {
-        let mut page = Page::new();
-        FosterBtreePage::init_as_root(&mut page);
-        let mut fbt_page = FosterBtreePage::new(&mut page);
+        {
+            // Root page
+            let mut page = Page::new();
+            FosterBtreePage::init_as_root(&mut page);
+            let mut fbt_page = FosterBtreePage::new(&mut page);
 
-        assert_eq!(fbt_page.lower_bound("a".as_bytes()), Some("".as_bytes()));
-        assert_eq!(fbt_page.lower_bound("b".as_bytes()), Some("".as_bytes()));
-        assert_eq!(fbt_page.lower_bound("c".as_bytes()), Some("".as_bytes()));
-        assert_eq!(fbt_page.lower_bound("d".as_bytes()), Some("".as_bytes()));
-        assert_eq!(fbt_page.lower_bound("e".as_bytes()), Some("".as_bytes()));
-        assert_eq!(fbt_page.lower_bound("f".as_bytes()), Some("".as_bytes()));
-        assert_eq!(fbt_page.lower_bound("g".as_bytes()), Some("".as_bytes()));
-        assert_eq!(fbt_page.lower_bound("h".as_bytes()), Some("".as_bytes()));
-        assert_eq!(fbt_page.lower_bound("i".as_bytes()), Some("".as_bytes()));
-        assert_eq!(fbt_page.find("a".as_bytes()), None);
-        assert_eq!(fbt_page.find("b".as_bytes()), None);
-        assert_eq!(fbt_page.find("c".as_bytes()), None);
-        assert_eq!(fbt_page.find("d".as_bytes()), None);
-        assert_eq!(fbt_page.find("e".as_bytes()), None);
-        assert_eq!(fbt_page.find("f".as_bytes()), None);
-        assert_eq!(fbt_page.find("g".as_bytes()), None);
-        assert_eq!(fbt_page.find("h".as_bytes()), None);
-        assert_eq!(fbt_page.find("i".as_bytes()), None);
+            assert_eq!(fbt_page.lower_bound("a".as_bytes()), Some("".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("b".as_bytes()), Some("".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("c".as_bytes()), Some("".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("d".as_bytes()), Some("".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("e".as_bytes()), Some("".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("f".as_bytes()), Some("".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("g".as_bytes()), Some("".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("h".as_bytes()), Some("".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("i".as_bytes()), Some("".as_bytes()));
+            assert_eq!(fbt_page.find("a".as_bytes()), None);
+            assert_eq!(fbt_page.find("b".as_bytes()), None);
+            assert_eq!(fbt_page.find("c".as_bytes()), None);
+            assert_eq!(fbt_page.find("d".as_bytes()), None);
+            assert_eq!(fbt_page.find("e".as_bytes()), None);
+            assert_eq!(fbt_page.find("f".as_bytes()), None);
+            assert_eq!(fbt_page.find("g".as_bytes()), None);
+            assert_eq!(fbt_page.find("h".as_bytes()), None);
+            assert_eq!(fbt_page.find("i".as_bytes()), None);
 
-        fbt_page.insert("c".as_bytes(), "cc".as_bytes(), false);
-        fbt_page.check_keys_are_sorted();
-        fbt_page.check_slot_data_start();
-        assert!(fbt_page.header().active_slot_count() == 3);
-        fbt_page.insert("e".as_bytes(), "ee".as_bytes(), false);
-        fbt_page.check_keys_are_sorted();
-        fbt_page.check_slot_data_start();
-        assert!(fbt_page.header().active_slot_count() == 4);
+            fbt_page.insert("c".as_bytes(), "cc".as_bytes(), false);
+            fbt_page.check_keys_are_sorted();
+            fbt_page.check_slot_data_start();
+            assert!(fbt_page.header().active_slot_count() == 3);
+            fbt_page.insert("e".as_bytes(), "ee".as_bytes(), false);
+            fbt_page.check_keys_are_sorted();
+            fbt_page.check_slot_data_start();
+            assert!(fbt_page.header().active_slot_count() == 4);
 
-        assert_eq!(fbt_page.lower_bound("a".as_bytes()), Some("".as_bytes()));
-        assert_eq!(fbt_page.lower_bound("b".as_bytes()), Some("".as_bytes()));
-        assert_eq!(fbt_page.lower_bound("c".as_bytes()), Some("c".as_bytes()));
-        assert_eq!(fbt_page.lower_bound("d".as_bytes()), Some("c".as_bytes()));
-        assert_eq!(fbt_page.lower_bound("e".as_bytes()), Some("e".as_bytes()));
-        assert_eq!(fbt_page.lower_bound("f".as_bytes()), Some("e".as_bytes()));
-        assert_eq!(fbt_page.lower_bound("g".as_bytes()), Some("e".as_bytes()));
-        assert_eq!(fbt_page.lower_bound("h".as_bytes()), Some("e".as_bytes()));
-        assert_eq!(fbt_page.lower_bound("i".as_bytes()), Some("e".as_bytes()));
-        assert_eq!(fbt_page.find("a".as_bytes()), None);
-        assert_eq!(fbt_page.find("b".as_bytes()), None);
-        assert_eq!(fbt_page.find("c".as_bytes()), Some("cc".as_bytes()));
-        assert_eq!(fbt_page.find("d".as_bytes()), None);
-        assert_eq!(fbt_page.find("e".as_bytes()), Some("ee".as_bytes()));
-        assert_eq!(fbt_page.find("f".as_bytes()), None);
-        assert_eq!(fbt_page.find("g".as_bytes()), None);
-        assert_eq!(fbt_page.find("h".as_bytes()), None);
-        assert_eq!(fbt_page.find("i".as_bytes()), None);
+            assert_eq!(fbt_page.lower_bound("a".as_bytes()), Some("".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("b".as_bytes()), Some("".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("c".as_bytes()), Some("c".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("d".as_bytes()), Some("c".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("e".as_bytes()), Some("e".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("f".as_bytes()), Some("e".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("g".as_bytes()), Some("e".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("h".as_bytes()), Some("e".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("i".as_bytes()), Some("e".as_bytes()));
+            assert_eq!(fbt_page.find("a".as_bytes()), None);
+            assert_eq!(fbt_page.find("b".as_bytes()), None);
+            assert_eq!(fbt_page.find("c".as_bytes()), Some("cc".as_bytes()));
+            assert_eq!(fbt_page.find("d".as_bytes()), None);
+            assert_eq!(fbt_page.find("e".as_bytes()), Some("ee".as_bytes()));
+            assert_eq!(fbt_page.find("f".as_bytes()), None);
+            assert_eq!(fbt_page.find("g".as_bytes()), None);
+            assert_eq!(fbt_page.find("h".as_bytes()), None);
+            assert_eq!(fbt_page.find("i".as_bytes()), None);
+        }
+
+        {
+            // Left most page
+            let mut page = Page::new();
+            let low_fence = "".as_bytes();
+            let high_fence = "g".as_bytes();
+            FosterBtreePage::init(&mut page);
+            let mut fbt_page = FosterBtreePage::new(&mut page);
+            fbt_page.insert_low_fence(low_fence);
+            fbt_page.insert_high_fence(high_fence);
+            let mut header = fbt_page.header();
+            header.set_left_most(true);
+            fbt_page.update_header(header);
+
+            assert_eq!(fbt_page.lower_bound("a".as_bytes()), Some("".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("b".as_bytes()), Some("".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("c".as_bytes()), Some("".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("d".as_bytes()), Some("".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("e".as_bytes()), Some("".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("f".as_bytes()), Some("".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("g".as_bytes()), None);
+            assert_eq!(fbt_page.lower_bound("h".as_bytes()), None);
+            assert_eq!(fbt_page.lower_bound("i".as_bytes()), None);
+            assert_eq!(fbt_page.find("a".as_bytes()), None);
+            assert_eq!(fbt_page.find("b".as_bytes()), None);
+            assert_eq!(fbt_page.find("c".as_bytes()), None);
+            assert_eq!(fbt_page.find("d".as_bytes()), None);
+            assert_eq!(fbt_page.find("e".as_bytes()), None);
+            assert_eq!(fbt_page.find("f".as_bytes()), None);
+            assert_eq!(fbt_page.find("g".as_bytes()), None);
+            assert_eq!(fbt_page.find("h".as_bytes()), None);
+            assert_eq!(fbt_page.find("i".as_bytes()), None);
+
+            fbt_page.insert("c".as_bytes(), "cc".as_bytes(), false);
+            fbt_page.check_keys_are_sorted();
+            fbt_page.check_slot_data_start();
+            assert!(fbt_page.header().active_slot_count() == 3);
+            fbt_page.insert("e".as_bytes(), "ee".as_bytes(), false);
+            fbt_page.check_keys_are_sorted();
+            fbt_page.check_slot_data_start();
+            assert!(fbt_page.header().active_slot_count() == 4);
+
+            assert_eq!(fbt_page.lower_bound("a".as_bytes()), Some("".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("b".as_bytes()), Some("".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("c".as_bytes()), Some("c".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("d".as_bytes()), Some("c".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("e".as_bytes()), Some("e".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("f".as_bytes()), Some("e".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("g".as_bytes()), None);
+            assert_eq!(fbt_page.lower_bound("h".as_bytes()), None);
+            assert_eq!(fbt_page.lower_bound("i".as_bytes()), None);
+            assert_eq!(fbt_page.find("a".as_bytes()), None);
+            assert_eq!(fbt_page.find("b".as_bytes()), None);
+            assert_eq!(fbt_page.find("c".as_bytes()), Some("cc".as_bytes()));
+            assert_eq!(fbt_page.find("d".as_bytes()), None);
+            assert_eq!(fbt_page.find("e".as_bytes()), Some("ee".as_bytes()));
+            assert_eq!(fbt_page.find("f".as_bytes()), None);
+            assert_eq!(fbt_page.find("g".as_bytes()), None);
+            assert_eq!(fbt_page.find("h".as_bytes()), None);
+            assert_eq!(fbt_page.find("i".as_bytes()), None);
+        }
+
+        {
+            // Right most page
+            let mut page = Page::new();
+            let low_fence = "b".as_bytes();
+            let high_fence = "".as_bytes();
+            FosterBtreePage::init(&mut page);
+            let mut fbt_page = FosterBtreePage::new(&mut page);
+            fbt_page.insert_low_fence(low_fence);
+            fbt_page.insert_high_fence(high_fence);
+            let mut header = fbt_page.header();
+            header.set_right_most(true);
+            fbt_page.update_header(header);
+
+            assert_eq!(fbt_page.lower_bound("a".as_bytes()), None);
+            assert_eq!(fbt_page.lower_bound("b".as_bytes()), Some("b".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("c".as_bytes()), Some("b".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("d".as_bytes()), Some("b".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("e".as_bytes()), Some("b".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("f".as_bytes()), Some("b".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("g".as_bytes()), Some("b".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("h".as_bytes()), Some("b".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("i".as_bytes()), Some("b".as_bytes()));
+            assert_eq!(fbt_page.find("a".as_bytes()), None);
+            assert_eq!(fbt_page.find("b".as_bytes()), None);
+            assert_eq!(fbt_page.find("c".as_bytes()), None);
+            assert_eq!(fbt_page.find("d".as_bytes()), None);
+            assert_eq!(fbt_page.find("e".as_bytes()), None);
+            assert_eq!(fbt_page.find("f".as_bytes()), None);
+            assert_eq!(fbt_page.find("g".as_bytes()), None);
+            assert_eq!(fbt_page.find("h".as_bytes()), None);
+            assert_eq!(fbt_page.find("i".as_bytes()), None);
+
+            fbt_page.insert("c".as_bytes(), "cc".as_bytes(), false);
+            fbt_page.check_keys_are_sorted();
+            fbt_page.check_slot_data_start();
+            assert!(fbt_page.header().active_slot_count() == 3);
+            fbt_page.insert("e".as_bytes(), "ee".as_bytes(), false);
+            fbt_page.check_keys_are_sorted();
+            fbt_page.check_slot_data_start();
+            assert!(fbt_page.header().active_slot_count() == 4);
+
+            assert_eq!(fbt_page.lower_bound("a".as_bytes()), None);
+            assert_eq!(fbt_page.lower_bound("b".as_bytes()), Some("b".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("c".as_bytes()), Some("c".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("d".as_bytes()), Some("c".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("e".as_bytes()), Some("e".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("f".as_bytes()), Some("e".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("g".as_bytes()), Some("e".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("h".as_bytes()), Some("e".as_bytes()));
+            assert_eq!(fbt_page.lower_bound("i".as_bytes()), Some("e".as_bytes()));
+            assert_eq!(fbt_page.find("a".as_bytes()), None);
+            assert_eq!(fbt_page.find("b".as_bytes()), None);
+            assert_eq!(fbt_page.find("c".as_bytes()), Some("cc".as_bytes()));
+            assert_eq!(fbt_page.find("d".as_bytes()), None);
+            assert_eq!(fbt_page.find("e".as_bytes()), Some("ee".as_bytes()));
+            assert_eq!(fbt_page.find("f".as_bytes()), None);
+            assert_eq!(fbt_page.find("g".as_bytes()), None);
+            assert_eq!(fbt_page.find("h".as_bytes()), None);
+            assert_eq!(fbt_page.find("i".as_bytes()), None);
+        }
     }
 }
