@@ -785,7 +785,7 @@ mod tests {
     */
 
     #[test]
-    fn test_lower_bound_and_find_for_normal_fence_node() {
+    fn test_lower_bound_and_find_for_normal_fence_page() {
         let mut page = Page::new();
         let low_fence = "b".as_bytes();
         let high_fence = "g".as_bytes();
@@ -870,7 +870,13 @@ mod tests {
         assert_eq!(fbt_page.find("i".as_bytes()), None);
 
         fbt_page.insert("c".as_bytes(), "cc".as_bytes(), false);
+        fbt_page.check_keys_are_sorted();
+        fbt_page.check_slot_data_start();
+        assert!(fbt_page.header().active_slot_count() == 3);
         fbt_page.insert("e".as_bytes(), "ee".as_bytes(), false);
+        fbt_page.check_keys_are_sorted();
+        fbt_page.check_slot_data_start();
+        assert!(fbt_page.header().active_slot_count() == 4);
 
         assert_eq!(fbt_page.lower_bound("a".as_bytes()), Some("".as_bytes()));
         assert_eq!(fbt_page.lower_bound("b".as_bytes()), Some("".as_bytes()));
