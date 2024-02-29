@@ -692,6 +692,7 @@ impl<'a> FosterBtreePage<'a> {
 // Public methods
 impl<'a> FosterBtreePage<'a> {
     pub fn init(page: &'a mut Page) {
+        // Default is non-root, non-leaf, non-leftmost, non-rightmost, non-foster_children
         let header = PageHeader::new(page.len() as u16);
         page[0..PAGE_HEADER_SIZE].copy_from_slice(&header.to_bytes());
     }
@@ -1126,7 +1127,7 @@ mod tests {
     #[test]
     fn test_lower_bound_and_find() {
         {
-            // Normal fence page
+            // Non-left-most and non-right-most page
             let mut page = Page::new();
             let low_fence = "b".as_bytes();
             let high_fence = "d".as_bytes();
@@ -1135,6 +1136,8 @@ mod tests {
             fbt_page.insert_low_fence(low_fence);
             fbt_page.insert_high_fence(high_fence);
             fbt_page.check_fence_slots_exists();
+            assert!(!fbt_page.header().is_left_most());
+            assert!(!fbt_page.header().is_right_most());
 
             assert_eq!(fbt_page.lower_bound("a".as_bytes()), None);
             assert_eq!(fbt_page.lower_bound("b".as_bytes()), Some("b".as_bytes()));
