@@ -3,7 +3,8 @@ use log::debug;
 use crate::{
     buffer_frame::{BufferFrame, FrameReadGuard, FrameWriteGuard},
     eviction_policy::EvictionPolicy,
-    page::{FileManager, Page},
+    file_manager::FileManager,
+    page::Page,
     utils::init_logger,
 };
 use std::{
