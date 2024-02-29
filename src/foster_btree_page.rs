@@ -121,6 +121,10 @@ mod page_header {
             self.active_slot_count
         }
 
+        pub fn set_active_slot_count(&mut self, active_slot_count: u16) {
+            self.active_slot_count = active_slot_count;
+        }
+
         pub fn increment_active_slots(&mut self) {
             self.active_slot_count += 1;
         }
@@ -954,13 +958,39 @@ impl<'a> FosterBtreePage<'a> {
             foster_child.insert(key, value, make_ghost);
         }
 
+        let foster_key = { self.get_slot_key(mid).unwrap().unwrap().to_owned() };
+
         // Decrement the active_slot_count of this page.
         // Run compaction to dissolve defragmented space.
+        let mut header = self.header();
+        header.set_active_slot_count(mid);
+        self.update_header(header);
+        self.compact_space();
+
+        // Insert the foster_child slot
+        let foster_child_page_id = foster_child.get_id();
+        let foster_child_page_id = foster_child_page_id.to_be_bytes();
+        self.insert(&foster_key, &foster_child_page_id, false);
+
+        #[cfg(debug_assertions)]
+        {
+            self.run_consistency_checks(true);
+            foster_child.run_consistency_checks(true);
+        }
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
 impl FosterBtreePage<'_> {
+    pub fn run_consistency_checks(&self, include_no_garbage_checks: bool) {
+        self.check_keys_are_sorted();
+        self.check_fence_slots_exists();
+        if include_no_garbage_checks {
+            self.check_slot_data_start_match_slot_metadata();
+            self.check_ideal_space_usage();
+        }
+    }
+
     pub fn check_keys_are_sorted(&self) {
         // debug print all the keys
         // for i in 0..self.header().active_slot_count() {
@@ -979,7 +1009,11 @@ impl FosterBtreePage<'_> {
         }
     }
 
-    pub fn check_slot_data_start(&self) {
+    pub fn check_fence_slots_exists(&self) {
+        assert!(self.header().active_slot_count() >= 2);
+    }
+
+    pub fn check_slot_data_start_match_slot_metadata(&self) {
         let mut slot_data_start = u16::MAX;
         for i in 0..self.header().active_slot_count() {
             let slot_metadata = self.slot_metadata(i).unwrap();
@@ -989,10 +1023,6 @@ impl FosterBtreePage<'_> {
             }
         }
         assert_eq!(slot_data_start, self.header().slot_data_start_offset());
-    }
-
-    pub fn check_fence_slots_exists(&self) {
-        assert!(self.header().active_slot_count() >= 2);
     }
 
     pub fn check_ideal_space_usage(&self) {
@@ -1151,13 +1181,11 @@ mod tests {
             assert_eq!(fbt_page.find("e".as_bytes()), None);
 
             assert!(fbt_page.insert("b".as_bytes(), "bb".as_bytes(), false));
-            fbt_page.check_keys_are_sorted();
-            fbt_page.check_slot_data_start();
+            fbt_page.run_consistency_checks(true);
             assert!(fbt_page.header().active_slot_count() == 3);
 
             assert!(fbt_page.insert("c".as_bytes(), "cc".as_bytes(), false));
-            fbt_page.check_keys_are_sorted();
-            fbt_page.check_slot_data_start();
+            fbt_page.run_consistency_checks(true);
             assert!(fbt_page.header().active_slot_count() == 4);
 
             assert_eq!(fbt_page.lower_bound("a".as_bytes()), None);
@@ -1190,12 +1218,10 @@ mod tests {
             assert_eq!(fbt_page.find("e".as_bytes()), None);
 
             fbt_page.insert("b".as_bytes(), "bb".as_bytes(), false);
-            fbt_page.check_keys_are_sorted();
-            fbt_page.check_slot_data_start();
+            fbt_page.run_consistency_checks(true);
             assert!(fbt_page.header().active_slot_count() == 3);
             fbt_page.insert("c".as_bytes(), "cc".as_bytes(), false);
-            fbt_page.check_keys_are_sorted();
-            fbt_page.check_slot_data_start();
+            fbt_page.run_consistency_checks(true);
             assert!(fbt_page.header().active_slot_count() == 4);
 
             assert_eq!(fbt_page.lower_bound("a".as_bytes()), Some("".as_bytes()));
@@ -1236,12 +1262,10 @@ mod tests {
             assert_eq!(fbt_page.find("e".as_bytes()), None);
 
             fbt_page.insert("b".as_bytes(), "bb".as_bytes(), false);
-            fbt_page.check_keys_are_sorted();
-            fbt_page.check_slot_data_start();
+            fbt_page.run_consistency_checks(true);
             assert!(fbt_page.header().active_slot_count() == 3);
             fbt_page.insert("c".as_bytes(), "cc".as_bytes(), false);
-            fbt_page.check_keys_are_sorted();
-            fbt_page.check_slot_data_start();
+            fbt_page.run_consistency_checks(true);
             assert!(fbt_page.header().active_slot_count() == 4);
 
             assert_eq!(fbt_page.lower_bound("a".as_bytes()), Some("".as_bytes()));
@@ -1282,12 +1306,10 @@ mod tests {
             assert_eq!(fbt_page.find("e".as_bytes()), None);
 
             fbt_page.insert("b".as_bytes(), "bb".as_bytes(), false);
-            fbt_page.check_keys_are_sorted();
-            fbt_page.check_slot_data_start();
+            fbt_page.run_consistency_checks(true);
             assert!(fbt_page.header().active_slot_count() == 3);
             fbt_page.insert("c".as_bytes(), "cc".as_bytes(), false);
-            fbt_page.check_keys_are_sorted();
-            fbt_page.check_slot_data_start();
+            fbt_page.run_consistency_checks(true);
             assert!(fbt_page.header().active_slot_count() == 4);
 
             assert_eq!(fbt_page.lower_bound("a".as_bytes()), None);
@@ -1312,17 +1334,18 @@ mod tests {
         let mut fbt_page = FosterBtreePage::new(&mut page);
         fbt_page.insert_low_fence(low_fence);
         fbt_page.insert_high_fence(high_fence);
-        fbt_page.check_fence_slots_exists();
+        fbt_page.run_consistency_checks(true);
 
         fbt_page.insert("b".as_bytes(), "bb".as_bytes(), false);
         assert_eq!(fbt_page.header().active_slot_count(), 3);
-        fbt_page.check_ideal_space_usage();
+        fbt_page.run_consistency_checks(true);
 
         fbt_page.insert("c".as_bytes(), "cc".as_bytes(), false);
         assert_eq!(fbt_page.header().active_slot_count(), 4);
-        fbt_page.check_ideal_space_usage();
+        fbt_page.run_consistency_checks(true);
 
         fbt_page.remove("c".as_bytes());
+        fbt_page.run_consistency_checks(false);
         assert_eq!(fbt_page.header().active_slot_count(), 3);
         assert_eq!(fbt_page.lower_bound("a".as_bytes()), None);
         assert_eq!(fbt_page.lower_bound("b".as_bytes()), Some("b".as_bytes()));
@@ -1336,7 +1359,7 @@ mod tests {
         assert_eq!(fbt_page.find("e".as_bytes()), None);
 
         fbt_page.compact_space();
-        fbt_page.check_ideal_space_usage();
+        fbt_page.run_consistency_checks(true);
         assert_eq!(fbt_page.header().active_slot_count(), 3);
         assert_eq!(fbt_page.lower_bound("a".as_bytes()), None);
         assert_eq!(fbt_page.lower_bound("b".as_bytes()), Some("b".as_bytes()));
@@ -1350,6 +1373,7 @@ mod tests {
         assert_eq!(fbt_page.find("e".as_bytes()), None);
 
         fbt_page.remove("b".as_bytes());
+        fbt_page.run_consistency_checks(false);
         assert_eq!(fbt_page.header().active_slot_count(), 2);
         assert_eq!(fbt_page.lower_bound("a".as_bytes()), None);
         assert_eq!(fbt_page.lower_bound("b".as_bytes()), Some("b".as_bytes())); // Low fence
@@ -1362,14 +1386,21 @@ mod tests {
         assert_eq!(fbt_page.find("d".as_bytes()), None);
         assert_eq!(fbt_page.find("e".as_bytes()), None);
 
+        fbt_page.compact_space();
+        fbt_page.run_consistency_checks(true);
+
         // Remove low fence, high fence, removed slot, non-existing slot
         fbt_page.remove("b".as_bytes());
+        fbt_page.run_consistency_checks(true);
         assert_eq!(fbt_page.header().active_slot_count(), 2);
         fbt_page.remove("g".as_bytes());
+        fbt_page.run_consistency_checks(true);
         assert_eq!(fbt_page.header().active_slot_count(), 2);
         fbt_page.remove("c".as_bytes());
+        fbt_page.run_consistency_checks(true);
         assert_eq!(fbt_page.header().active_slot_count(), 2);
         fbt_page.remove("random".as_bytes());
+        fbt_page.run_consistency_checks(true);
         assert_eq!(fbt_page.header().active_slot_count(), 2);
         assert_eq!(fbt_page.lower_bound("a".as_bytes()), None);
         assert_eq!(fbt_page.lower_bound("b".as_bytes()), Some("b".as_bytes())); // Low fence
