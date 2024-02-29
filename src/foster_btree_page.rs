@@ -233,6 +233,10 @@ pub struct FosterBtreePage<'a> {
 
 // Private methods
 impl<'a> FosterBtreePage<'a> {
+    fn get_id(&self) -> u32 {
+        self.page.get_id()
+    }
+
     fn header(&self) -> PageHeader {
         let header_bytes: &[u8; PAGE_HEADER_SIZE] =
             &self.page[0..PAGE_HEADER_SIZE].try_into().unwrap();
@@ -372,7 +376,7 @@ impl<'a> FosterBtreePage<'a> {
     // [ [slotmeta1][slotmeta2'][slotmeta2][slotmeta3] ]
     //
     // This function implicitly increments the active_slot_count of the page.
-    fn shift_slot_meta(&mut self, slot_id: u16) {
+    fn shift_slot_meta_right(&mut self, slot_id: u16) {
         let start = FosterBtreePage::slot_metadata_offset(slot_id);
         let end = FosterBtreePage::slot_metadata_offset(self.header().active_slot_count());
         if start > end {
@@ -392,6 +396,44 @@ impl<'a> FosterBtreePage<'a> {
             // Update the active_slot_count of the page
             let mut header = self.header();
             header.increment_active_slots();
+            self.update_header(header);
+        }
+    }
+
+    // Shift the slot metadata to the left by shift_size.
+    // [ [slotmeta1][slotmeta2][slotmeta3] ]
+    //                         ^
+    //
+    // Want to delete slotmeta2.
+    // Need to shift slotmeta3 to the left by 1 SLOT_METADATA_SIZE.
+    //
+    // [ [slotmeta1][slotmeta3] ]
+    //              ^
+    //
+    // This function implicitly decrements the active_slot_count of the page.
+    fn shift_slot_meta_left(&mut self, slot_id: u16) {
+        let start = FosterBtreePage::slot_metadata_offset(slot_id);
+        let end = FosterBtreePage::slot_metadata_offset(self.header().active_slot_count());
+        if start == 0 {
+            panic!("Cannot shift slot metadata to the left if start == 0");
+        } else if start > end {
+            panic!("Slot metadata does not exist at the given slot_id");
+        } else if start == end {
+            // No need to shift if start == end. Just decrement the active_slot_count of the page.
+            let mut header = self.header();
+            header.decrement_active_slots();
+            self.update_header(header);
+        } else {
+            let data = self.page[start..end].to_vec();
+
+            let new_start = start - SLOT_METADATA_SIZE as usize;
+            let new_end = end - SLOT_METADATA_SIZE as usize;
+
+            self.page[new_start..new_end].copy_from_slice(&data);
+
+            // Update the active_slot_count of the page
+            let mut header = self.header();
+            header.decrement_active_slots();
             self.update_header(header);
         }
     }
@@ -427,19 +469,17 @@ impl<'a> FosterBtreePage<'a> {
     where
         F: Fn(KeyInternal) -> bool,
     {
-        let low_fence = self.get_slot_key(0).unwrap();
+        let low_fence = self.get_slot_key(self.low_fence_slot_id()).unwrap();
         let mut ng = if !f(low_fence) {
-            0
+            self.low_fence_slot_id()
         } else {
-            return 0;
+            return self.low_fence_slot_id();
         };
-        let high_fence = self
-            .get_slot_key(self.header().active_slot_count() - 1)
-            .unwrap();
+        let high_fence = self.get_slot_key(self.high_fence_slot_id()).unwrap();
         let mut ok = if f(high_fence) {
-            self.header().active_slot_count() - 1
+            self.high_fence_slot_id()
         } else {
-            return self.header().active_slot_count();
+            return self.high_fence_slot_id() + 1; // equals to active_slot_count
         };
 
         // Invariant: f(ng) = false, f(ok) = true
@@ -460,6 +500,17 @@ enum KeyInternal<'a> {
     MinusInfty,
     Normal(&'a [u8]),
     PlusInfty,
+}
+
+// implement unwrap
+impl<'a> KeyInternal<'a> {
+    fn unwrap(&self) -> &'a [u8] {
+        match self {
+            KeyInternal::MinusInfty => panic!("Cannot unwrap MinusInfty"),
+            KeyInternal::Normal(key) => key,
+            KeyInternal::PlusInfty => panic!("Cannot unwrap PlusInfty"),
+        }
+    }
 }
 
 impl<'a> PartialEq for KeyInternal<'a> {
@@ -507,7 +558,7 @@ impl<'a> FosterBtreePage<'a> {
         if self.header().is_left_most() {
             KeyInternal::MinusInfty
         } else {
-            let slot_metadata = self.slot_metadata(0).unwrap();
+            let slot_metadata = self.slot_metadata(self.low_fence_slot_id()).unwrap();
             let offset = slot_metadata.offset() as usize;
             let key_size = slot_metadata.key_size() as usize;
             KeyInternal::Normal(&self.page[offset..offset + key_size])
@@ -518,9 +569,7 @@ impl<'a> FosterBtreePage<'a> {
         if self.header().is_right_most() {
             KeyInternal::PlusInfty
         } else {
-            let slot_metadata = self
-                .slot_metadata(self.header().active_slot_count() - 1)
-                .unwrap();
+            let slot_metadata = self.slot_metadata(self.high_fence_slot_id()).unwrap();
             let offset = slot_metadata.offset() as usize;
             let key_size = slot_metadata.key_size() as usize;
             KeyInternal::Normal(&self.page[offset..offset + key_size])
@@ -528,15 +577,15 @@ impl<'a> FosterBtreePage<'a> {
     }
 
     fn get_slot_key(&self, slot_id: u16) -> Option<KeyInternal> {
-        if slot_id == 0 {
+        if slot_id == self.low_fence_slot_id() {
             Some(self.get_low_fence())
-        } else if slot_id == self.header().active_slot_count() - 1 {
-            Some(self.get_high_fence())
-        } else if slot_id < self.header().active_slot_count() - 1 {
+        } else if slot_id < self.high_fence_slot_id() {
             let slot_metadata = self.slot_metadata(slot_id).unwrap();
             let offset = slot_metadata.offset() as usize;
             let key_size = slot_metadata.key_size() as usize;
             Some(KeyInternal::Normal(&self.page[offset..offset + key_size]))
+        } else if slot_id == self.high_fence_slot_id() {
+            Some(self.get_high_fence())
         } else {
             None
         }
@@ -548,6 +597,18 @@ impl<'a> FosterBtreePage<'a> {
         (low_fence, high_fence)
     }
 
+    fn foster_child_slot_id(&self) -> u16 {
+        self.header().active_slot_count() - 2
+    }
+
+    fn high_fence_slot_id(&self) -> u16 {
+        self.header().active_slot_count() - 1
+    }
+
+    fn low_fence_slot_id(&self) -> u16 {
+        0
+    }
+
     fn is_in_range(&self, key: &[u8]) -> bool {
         let (low_fence, high_fence) = self.range();
         low_fence <= KeyInternal::Normal(key) && KeyInternal::Normal(key) < high_fence
@@ -557,7 +618,10 @@ impl<'a> FosterBtreePage<'a> {
         // TODO: optimize
         if self.is_in_range(key) {
             let slot_id = self.binary_search(|slot_key| KeyInternal::Normal(key) < slot_key);
-            assert!(1 <= slot_id && slot_id <= self.header().active_slot_count() - 1);
+            assert!(
+                self.low_fence_slot_id() + 1 <= slot_id && slot_id <= self.high_fence_slot_id()
+            );
+
             let slot_metadata = self.slot_metadata(slot_id).unwrap();
             let key_offset = slot_metadata.offset() as usize;
             let key_size = slot_metadata.key_size() as usize;
@@ -565,6 +629,62 @@ impl<'a> FosterBtreePage<'a> {
             slot_key == key
         } else {
             false
+        }
+    }
+
+    fn compact_space(&mut self) {
+        let mut slot_data_mem_usage = 0;
+        for i in 0..self.header().active_slot_count() {
+            if let Some(slot_metadata) = self.slot_metadata(i) {
+                slot_data_mem_usage += slot_metadata.key_size() + slot_metadata.value_size();
+            }
+        }
+        let ideal_start_offset = self.page.len() as u16 - slot_data_mem_usage;
+        let slot_data_start_offset = self.header().slot_data_start_offset();
+
+        if slot_data_start_offset > ideal_start_offset {
+            panic!("corrupted page");
+        } else if slot_data_start_offset == ideal_start_offset {
+            // No need to compact
+        } else {
+            let mut slot_data = vec![0; slot_data_mem_usage as usize];
+            let mut current_size = 0;
+
+            for i in 0..self.header().active_slot_count() {
+                if let Some(mut slot_metadata) = self.slot_metadata(i) {
+                    let offset = slot_metadata.offset() as usize;
+                    let key_size = slot_metadata.key_size() as usize;
+                    let value_size = slot_metadata.value_size() as usize;
+                    let size = key_size + value_size;
+                    current_size += size;
+
+                    // Page       [.....    [                Slot data                 ]]
+                    // Slot data            [[.............][key2][value2][key1][value1]]
+                    //                                       <-----------> size
+                    //                                       <-------------------------> current_size
+                    //                                      ^
+                    //                       <-------------> local_offset
+                    //             <-----------------------> global_offset
+                    //             <-------> ideal_start_offset
+
+                    let local_offset = slot_data_mem_usage as usize - current_size;
+                    slot_data[local_offset..local_offset + size]
+                        .copy_from_slice(&self.page[offset..offset + size]);
+
+                    // Update the slot metadata
+                    let global_offset = (self.page.len() - current_size) as u16;
+                    slot_metadata.set_offset(global_offset);
+                    self.update_slot_metadata(i, &slot_metadata);
+                }
+            }
+
+            // Update the page
+            self.page[ideal_start_offset as usize..].copy_from_slice(&slot_data);
+
+            // Update the header
+            let mut header = self.header();
+            header.set_slot_data_start_offset(ideal_start_offset);
+            self.update_header(header);
         }
     }
 }
@@ -633,11 +753,13 @@ impl<'a> FosterBtreePage<'a> {
                 false
             } else {
                 let slot_id = self.binary_search(|slot_key| KeyInternal::Normal(key) < slot_key);
-                assert!(1 <= slot_id && slot_id <= self.header().active_slot_count() - 1);
+                assert!(
+                    self.low_fence_slot_id() + 1 <= slot_id && slot_id <= self.high_fence_slot_id()
+                );
 
                 // We want to shift [slot_id..] to [slot_id+1..] and overwrite the slot at slot_id.
                 // Note that low_fence will never be shifted.
-                self.shift_slot_meta(slot_id);
+                self.shift_slot_meta_right(slot_id);
 
                 // Place the slot data
                 let start_offset = self.header().slot_data_start_offset();
@@ -664,6 +786,7 @@ impl<'a> FosterBtreePage<'a> {
     }
 
     /// Returns the right-most key that is less than or equal to the given key.
+    /// This could return a lower fence key.
     pub fn lower_bound(&self, key: &[u8]) -> Option<&[u8]> {
         if !self.is_in_range(key) {
             None
@@ -671,7 +794,10 @@ impl<'a> FosterBtreePage<'a> {
             let slot_id = self.binary_search(|slot_key| KeyInternal::Normal(key) < slot_key);
             // If the key is in range, that means binary search will done on array with [false, ..., true]
             // Therefore, the first true is at 1 <= slot_id <= active_slot_count-1
-            assert!(1 <= slot_id && slot_id <= self.header().active_slot_count() - 1);
+            assert!(
+                self.low_fence_slot_id() + 1 <= slot_id && slot_id <= self.high_fence_slot_id()
+            );
+
             let slot_id = slot_id - 1;
             let slot_metadata = self.slot_metadata(slot_id).unwrap();
             let key_offset = slot_metadata.offset() as usize;
@@ -687,9 +813,11 @@ impl<'a> FosterBtreePage<'a> {
             None
         } else {
             let slot_id = self.binary_search(|slot_key| KeyInternal::Normal(key) < slot_key);
-            assert!(1 <= slot_id && slot_id <= self.header().active_slot_count() - 1);
+            assert!(
+                self.low_fence_slot_id() + 1 <= slot_id && slot_id <= self.high_fence_slot_id()
+            );
             let slot_id = slot_id - 1;
-            if slot_id == 0 {
+            if slot_id == self.low_fence_slot_id() {
                 // The key is the low fence
                 None
             } else {
@@ -713,21 +841,105 @@ impl<'a> FosterBtreePage<'a> {
     /// Mark the slot with the given key as a ghost slot.
     pub fn mark_ghost(&mut self, key: &[u8]) {
         if self.is_in_range(key) {
-            let equal_or_greater =
-                self.binary_search(|slot_key| KeyInternal::Normal(key) <= slot_key);
-            let greater = self.binary_search(|slot_key| KeyInternal::Normal(key) < slot_key);
-            assert!(greater - equal_or_greater <= 1); // There should be at most 1 slot with the same key.
-            for i in equal_or_greater..greater {
-                if i == 0 || i == self.header().active_slot_count() {
-                    // Skip the low and high fences
-                    continue;
+            let slot_id = self.binary_search(|slot_key| KeyInternal::Normal(key) < slot_key);
+            assert!(
+                self.low_fence_slot_id() + 1 <= slot_id && slot_id <= self.high_fence_slot_id()
+            );
+            let slot_id = slot_id - 1;
+            if slot_id == self.low_fence_slot_id() {
+                // The key is the low fence
+                return;
+            } else {
+                let slot_metadata = self.slot_metadata(slot_id).unwrap();
+                let key_offset = slot_metadata.offset() as usize;
+                let key_size = slot_metadata.key_size() as usize;
+                let slot_key = &self.page[key_offset..key_offset + key_size];
+                if slot_key == key {
+                    let mut slot_metadata = self.slot_metadata(slot_id).unwrap();
+                    slot_metadata.set_ghost(true);
+                    self.update_slot_metadata(slot_id, &slot_metadata);
+                } else {
+                    // The key does not exist
+                    return;
                 }
-                let mut slot_metadata = self.slot_metadata(i).unwrap();
-                // Set the slot to be a ghost slot
-                slot_metadata.set_ghost(true);
-                self.update_slot_metadata(i, &slot_metadata);
             }
         }
+    }
+
+    /// Remove the slot_metadata.
+    /// To reclaim the space, run `compact_space`
+    pub fn remove(&mut self, key: &[u8]) {
+        if self.is_in_range(key) {
+            let slot_id = self.binary_search(|slot_key| KeyInternal::Normal(key) < slot_key);
+            assert!(
+                self.low_fence_slot_id() + 1 <= slot_id && slot_id <= self.high_fence_slot_id()
+            );
+            let slot_id = slot_id - 1;
+            if slot_id == self.low_fence_slot_id() {
+                // The key is the low fence
+                return;
+            } else {
+                let slot_metadata = self.slot_metadata(slot_id).unwrap();
+                let key_offset = slot_metadata.offset() as usize;
+                let key_size = slot_metadata.key_size() as usize;
+                let slot_key = &self.page[key_offset..key_offset + key_size];
+                if slot_key == key {
+                    // Shift [slot_id+1..] to [slot_id..]
+                    self.shift_slot_meta_left(slot_id + 1);
+                } else {
+                    // The key does not exist
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Move half of the slots to the foster_child
+    /// [this]->[foster_child]
+    /// If this is the right-most page, then the foster child will also be the right-most page.
+    /// * This means that the high fence of the foster child will be the same as the high fence of this page.
+    /// If this is the left-most page, then the foster child will **NOT** be the left-most page.
+    /// * This means that the low fence of the foster child will **NOT** be the same as the low fence of this page.
+    pub fn split(&mut self, foster_child: &mut FosterBtreePage) {
+        // Assumes foster_child is already initialized.
+
+        if self.header().active_slot_count() - 2 < 2 {
+            // -2 to exclude the low and high fences
+            panic!("Cannot split a page with less than 2 real slots");
+        }
+        // This page keeps [0, mid) slots + [mid] to point to foster_child
+        // Foster child keeps [mid, active_slot_count) slots.
+
+        // Set the foster_child's low and high fence
+        let mid = self.header().active_slot_count() / 2;
+        let mid_key = self.get_slot_key(mid).unwrap().unwrap();
+        foster_child.insert_low_fence(&mid_key);
+        if self.header().is_right_most() {
+            // If this is the right-most page, then the foster child will also be the right-most page.
+            foster_child.insert_high_fence(&[]);
+            let mut header = foster_child.header();
+            header.set_right_most(true);
+            foster_child.update_header(header);
+        } else {
+            let high_fence = self.get_high_fence().unwrap();
+            foster_child.insert_high_fence(&high_fence);
+        }
+        assert!(foster_child.header().active_slot_count() == 2);
+
+        for i in mid..self.high_fence_slot_id() {
+            let slot_metadata = self.slot_metadata(i).unwrap();
+            let key_offset = slot_metadata.offset() as usize;
+            let key_size = slot_metadata.key_size() as usize;
+            let value_offset = key_offset + key_size;
+            let value_size = slot_metadata.value_size() as usize;
+            let key = &self.page[key_offset..key_offset + key_size];
+            let value = &self.page[value_offset..value_offset + value_size];
+            let make_ghost = slot_metadata.is_ghost();
+            foster_child.insert(key, value, make_ghost);
+        }
+
+        // Decrement the active_slot_count of this page.
+        // Run compaction to dissolve defragmented space.
     }
 }
 
@@ -756,6 +968,21 @@ impl FosterBtreePage<'_> {
             }
         }
         assert_eq!(slot_data_start, self.header().slot_data_start_offset());
+    }
+
+    pub fn check_fence_slots_exists(&self) {
+        assert!(self.header().active_slot_count() >= 2);
+    }
+
+    pub fn check_ideal_space_usage(&self) {
+        let mut slot_data_mem_usage = 0;
+        for i in 0..self.header().active_slot_count() {
+            if let Some(slot_metadata) = self.slot_metadata(i) {
+                slot_data_mem_usage += slot_metadata.key_size() + slot_metadata.value_size();
+            }
+        }
+        let ideal_start_offset = self.page.len() as u16 - slot_data_mem_usage;
+        assert_eq!(ideal_start_offset, self.header().slot_data_start_offset());
     }
 }
 
@@ -795,6 +1022,7 @@ mod tests {
             let mut fbt_page = FosterBtreePage::new(&mut page);
             fbt_page.insert_low_fence(low_fence);
             fbt_page.insert_high_fence(high_fence);
+            fbt_page.check_fence_slots_exists();
 
             assert_eq!(fbt_page.lower_bound("a".as_bytes()), None);
             assert_eq!(fbt_page.lower_bound("b".as_bytes()), Some("b".as_bytes()));
@@ -851,6 +1079,7 @@ mod tests {
             let mut page = Page::new();
             FosterBtreePage::init_as_root(&mut page);
             let mut fbt_page = FosterBtreePage::new(&mut page);
+            fbt_page.check_fence_slots_exists();
 
             assert_eq!(fbt_page.lower_bound("a".as_bytes()), Some("".as_bytes()));
             assert_eq!(fbt_page.lower_bound("b".as_bytes()), Some("".as_bytes()));
@@ -912,6 +1141,7 @@ mod tests {
             let mut header = fbt_page.header();
             header.set_left_most(true);
             fbt_page.update_header(header);
+            fbt_page.check_fence_slots_exists();
 
             assert_eq!(fbt_page.lower_bound("a".as_bytes()), Some("".as_bytes()));
             assert_eq!(fbt_page.lower_bound("b".as_bytes()), Some("".as_bytes()));
@@ -973,6 +1203,7 @@ mod tests {
             let mut header = fbt_page.header();
             header.set_right_most(true);
             fbt_page.update_header(header);
+            fbt_page.check_fence_slots_exists();
 
             assert_eq!(fbt_page.lower_bound("a".as_bytes()), None);
             assert_eq!(fbt_page.lower_bound("b".as_bytes()), Some("b".as_bytes()));
@@ -1021,5 +1252,87 @@ mod tests {
             assert_eq!(fbt_page.find("h".as_bytes()), None);
             assert_eq!(fbt_page.find("i".as_bytes()), None);
         }
+    }
+
+    #[test]
+    fn test_remove_and_compact_space() {
+        let mut page = Page::new();
+        let low_fence = "b".as_bytes();
+        let high_fence = "g".as_bytes();
+        FosterBtreePage::init(&mut page);
+        let mut fbt_page = FosterBtreePage::new(&mut page);
+        fbt_page.insert_low_fence(low_fence);
+        fbt_page.insert_high_fence(high_fence);
+        fbt_page.check_fence_slots_exists();
+
+        fbt_page.insert("c".as_bytes(), "cc".as_bytes(), false);
+        fbt_page.check_ideal_space_usage();
+
+        fbt_page.insert("e".as_bytes(), "ee".as_bytes(), false);
+        fbt_page.check_ideal_space_usage();
+
+        fbt_page.remove("c".as_bytes());
+        assert_eq!(fbt_page.lower_bound("a".as_bytes()), None);
+        assert_eq!(fbt_page.lower_bound("b".as_bytes()), Some("b".as_bytes()));
+        assert_eq!(fbt_page.lower_bound("c".as_bytes()), Some("b".as_bytes()));
+        assert_eq!(fbt_page.lower_bound("d".as_bytes()), Some("b".as_bytes()));
+        assert_eq!(fbt_page.lower_bound("e".as_bytes()), Some("e".as_bytes()));
+        assert_eq!(fbt_page.lower_bound("f".as_bytes()), Some("e".as_bytes()));
+        assert_eq!(fbt_page.lower_bound("g".as_bytes()), None);
+        assert_eq!(fbt_page.lower_bound("h".as_bytes()), None);
+        assert_eq!(fbt_page.lower_bound("i".as_bytes()), None);
+        assert_eq!(fbt_page.find("a".as_bytes()), None);
+        assert_eq!(fbt_page.find("b".as_bytes()), None);
+        assert_eq!(fbt_page.find("c".as_bytes()), None);
+        assert_eq!(fbt_page.find("d".as_bytes()), None);
+        assert_eq!(fbt_page.find("e".as_bytes()), Some("ee".as_bytes()));
+        assert_eq!(fbt_page.find("f".as_bytes()), None);
+        assert_eq!(fbt_page.find("g".as_bytes()), None);
+        assert_eq!(fbt_page.find("h".as_bytes()), None);
+        assert_eq!(fbt_page.find("i".as_bytes()), None);
+
+        fbt_page.compact_space();
+        fbt_page.check_ideal_space_usage();
+
+        assert_eq!(fbt_page.lower_bound("a".as_bytes()), None);
+        assert_eq!(fbt_page.lower_bound("b".as_bytes()), Some("b".as_bytes()));
+        assert_eq!(fbt_page.lower_bound("c".as_bytes()), Some("b".as_bytes()));
+        assert_eq!(fbt_page.lower_bound("d".as_bytes()), Some("b".as_bytes()));
+        assert_eq!(fbt_page.lower_bound("e".as_bytes()), Some("e".as_bytes()));
+        assert_eq!(fbt_page.lower_bound("f".as_bytes()), Some("e".as_bytes()));
+        assert_eq!(fbt_page.lower_bound("g".as_bytes()), None);
+        assert_eq!(fbt_page.lower_bound("h".as_bytes()), None);
+        assert_eq!(fbt_page.lower_bound("i".as_bytes()), None);
+        assert_eq!(fbt_page.find("a".as_bytes()), None);
+        assert_eq!(fbt_page.find("b".as_bytes()), None);
+        assert_eq!(fbt_page.find("c".as_bytes()), None);
+        assert_eq!(fbt_page.find("d".as_bytes()), None);
+        assert_eq!(fbt_page.find("e".as_bytes()), Some("ee".as_bytes()));
+        assert_eq!(fbt_page.find("f".as_bytes()), None);
+        assert_eq!(fbt_page.find("g".as_bytes()), None);
+        assert_eq!(fbt_page.find("h".as_bytes()), None);
+        assert_eq!(fbt_page.find("i".as_bytes()), None);
+
+        // Removing low or high fence key is not possible
+        fbt_page.remove("b".as_bytes());
+        fbt_page.remove("g".as_bytes());
+        assert_eq!(fbt_page.lower_bound("a".as_bytes()), None);
+        assert_eq!(fbt_page.lower_bound("b".as_bytes()), Some("b".as_bytes()));
+        assert_eq!(fbt_page.lower_bound("c".as_bytes()), Some("b".as_bytes()));
+        assert_eq!(fbt_page.lower_bound("d".as_bytes()), Some("b".as_bytes()));
+        assert_eq!(fbt_page.lower_bound("e".as_bytes()), Some("e".as_bytes()));
+        assert_eq!(fbt_page.lower_bound("f".as_bytes()), Some("e".as_bytes()));
+        assert_eq!(fbt_page.lower_bound("g".as_bytes()), None);
+        assert_eq!(fbt_page.lower_bound("h".as_bytes()), None);
+        assert_eq!(fbt_page.lower_bound("i".as_bytes()), None);
+        assert_eq!(fbt_page.find("a".as_bytes()), None);
+        assert_eq!(fbt_page.find("b".as_bytes()), None);
+        assert_eq!(fbt_page.find("c".as_bytes()), None);
+        assert_eq!(fbt_page.find("d".as_bytes()), None);
+        assert_eq!(fbt_page.find("e".as_bytes()), Some("ee".as_bytes()));
+        assert_eq!(fbt_page.find("f".as_bytes()), None);
+        assert_eq!(fbt_page.find("g".as_bytes()), None);
+        assert_eq!(fbt_page.find("h".as_bytes()), None);
+        assert_eq!(fbt_page.find("i".as_bytes()), None);
     }
 }
