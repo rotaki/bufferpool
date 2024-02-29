@@ -5,38 +5,38 @@ use crate::page::Page;
 mod page_header {
     pub const PAGE_HEADER_SIZE: usize = 4;
     pub struct PageHeader {
-        active_slots: u16, // Monotonically increasing counter. Slot deletion does not decrement this counter.
+        active_slot_count: u16, // Monotonically increasing counter. Slot deletion does not decrement this counter.
         slot_data_start_offset: u16,
     }
 
     impl PageHeader {
         pub fn from_bytes(data: [u8; PAGE_HEADER_SIZE]) -> Self {
             Self {
-                active_slots: u16::from_be_bytes(data[..2].try_into().unwrap()),
+                active_slot_count: u16::from_be_bytes(data[..2].try_into().unwrap()),
                 slot_data_start_offset: u16::from_be_bytes(data[2..4].try_into().unwrap()),
             }
         }
 
         pub fn to_bytes(&self) -> [u8; PAGE_HEADER_SIZE] {
             let mut buf = [0; PAGE_HEADER_SIZE];
-            buf[..2].copy_from_slice(&self.active_slots.to_be_bytes());
+            buf[..2].copy_from_slice(&self.active_slot_count.to_be_bytes());
             buf[2..4].copy_from_slice(&self.slot_data_start_offset.to_be_bytes());
             buf
         }
 
         pub fn new(slot_data_start_offset: u16) -> Self {
             Self {
-                active_slots: 0,
+                active_slot_count: 0,
                 slot_data_start_offset,
             }
         }
 
-        pub fn active_slots(&self) -> u16 {
-            self.active_slots
+        pub fn active_slot_count(&self) -> u16 {
+            self.active_slot_count
         }
 
         pub fn increment_active_slots(&mut self) {
-            self.active_slots += 1;
+            self.active_slot_count += 1;
         }
 
         pub fn slot_data_start_offset(&self) -> u16 {
@@ -129,7 +129,7 @@ impl<'a> HeapPage<'a> {
     }
 
     fn slot_metadata(&self, slot_id: u16) -> Option<SlotMetadata> {
-        if slot_id < self.header().active_slots() {
+        if slot_id < self.header().active_slot_count() {
             let offset = HeapPage::slot_metadata_offset(slot_id);
             let slot_metadata_bytes: [u8; SLOT_METADATA_SIZE] = self.page
                 [offset..offset + SLOT_METADATA_SIZE]
@@ -143,7 +143,7 @@ impl<'a> HeapPage<'a> {
 
     fn insert_slot_metadata(&mut self, size: usize) -> (u16, SlotMetadata) {
         let mut page_header = self.header();
-        let slot_id = page_header.active_slots();
+        let slot_id = page_header.active_slot_count();
         page_header.increment_active_slots();
         let slot_offset = page_header.slot_data_start_offset() - size as u16;
         page_header.set_slot_data_start_offset(slot_offset);
@@ -156,7 +156,7 @@ impl<'a> HeapPage<'a> {
     }
 
     fn update_slot_metadata(&mut self, slot_id: u16, slot_metadata: &SlotMetadata) -> bool {
-        if slot_id < self.header().active_slots() {
+        if slot_id < self.header().active_slot_count() {
             let offset = HeapPage::slot_metadata_offset(slot_id);
             self.page[offset..offset + SLOT_METADATA_SIZE]
                 .copy_from_slice(&slot_metadata.to_bytes());
@@ -166,8 +166,9 @@ impl<'a> HeapPage<'a> {
         }
     }
 
+    // Returns the first invalid slot
     fn invalid_slot(&self) -> Option<u16> {
-        for slot_id in 0..self.header().active_slots() {
+        for slot_id in 0..self.header().active_slot_count() {
             if let Some(slot_metadata) = self.slot_metadata(slot_id) {
                 if !slot_metadata.is_valid() {
                     return Some(slot_id);
@@ -179,12 +180,20 @@ impl<'a> HeapPage<'a> {
 
     fn free_space(&self) -> usize {
         let next_slot_metadata_offset =
-            HeapPage::slot_metadata_offset(self.header().active_slots());
+            HeapPage::slot_metadata_offset(self.header().active_slot_count());
         let slot_data_start_offset = self.header().slot_data_start_offset();
         slot_data_start_offset as usize - next_slot_metadata_offset
     }
 
     // [ [slot4][slot3][slot2][slot1] ]
+    //   ^             ^     ^
+    //   |             |     |
+    //   slot_data_start_offset
+    //                 |     |
+    //                 shift_start_offset
+    //                       |
+    //                  <----> shift_size
+    //    <------------> data to be shifted
     //
     // Delete slot2. Shift [slot4][slot3] to the right by slot2.size
     //
@@ -203,7 +212,10 @@ impl<'a> HeapPage<'a> {
         );
         let start = self.header().slot_data_start_offset() as usize;
         let end = shift_start_offset as usize;
-        assert!(start <= end, "start should be less than or equal to end");
+        // No need to shift if start >= end OR shift_size == 0
+        if start >= end || shift_size == 0 {
+            return;
+        }
         let data = self.page[start..end].to_vec();
 
         let new_start = start + shift_size as usize;
@@ -211,7 +223,7 @@ impl<'a> HeapPage<'a> {
         self.page[new_start..new_end].copy_from_slice(&data);
 
         // For each valid slot shifted, update the slot metadata
-        for slot_id in 0..self.header().active_slots() {
+        for slot_id in 0..self.header().active_slot_count() {
             if let Some(mut slot_metadata) = self.slot_metadata(slot_id) {
                 let current_offset = slot_metadata.offset();
                 if current_offset < shift_start_offset as u16 && slot_metadata.is_valid() {
@@ -288,7 +300,7 @@ impl<'a> HeapPage<'a> {
     }
 
     pub fn get_value(&self, slot_id: u16) -> Option<&[u8]> {
-        if slot_id < self.header().active_slots() {
+        if slot_id < self.header().active_slot_count() {
             if let Some(slot_metadata) = self.slot_metadata(slot_id) {
                 if slot_metadata.is_valid() {
                     trace!(
@@ -312,7 +324,7 @@ impl<'a> HeapPage<'a> {
     }
 
     pub fn delete_value(&mut self, slot_id: u16) -> Option<()> {
-        if slot_id < self.header().active_slots() {
+        if slot_id < self.header().active_slot_count() {
             if let Some(mut slot_metadata) = self.slot_metadata(slot_id) {
                 if slot_metadata.is_valid() {
                     trace!(
