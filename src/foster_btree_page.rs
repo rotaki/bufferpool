@@ -530,9 +530,9 @@ impl<'a> FosterBtreePage<'a> {
     fn get_slot_key(&self, slot_id: u16) -> Option<KeyInternal> {
         if slot_id == 0 {
             Some(self.get_low_fence())
-        } else if slot_id == self.header().active_slot_count() {
+        } else if slot_id == self.header().active_slot_count() - 1 {
             Some(self.get_high_fence())
-        } else if slot_id < self.header().active_slot_count() {
+        } else if slot_id < self.header().active_slot_count() - 1 {
             let slot_metadata = self.slot_metadata(slot_id).unwrap();
             let offset = slot_metadata.offset() as usize;
             let key_size = slot_metadata.key_size() as usize;
@@ -785,7 +785,7 @@ mod tests {
     */
 
     #[test]
-    fn test_find_lower_bound_and_find() {
+    fn test_lower_bound_and_find_for_normal_fence_node() {
         let mut page = Page::new();
         let low_fence = "b".as_bytes();
         let high_fence = "g".as_bytes();
@@ -813,7 +813,7 @@ mod tests {
         assert_eq!(fbt_page.find("h".as_bytes()), None);
         assert_eq!(fbt_page.find("i".as_bytes()), None);
 
-        // Push two keys "c" and "e
+        // Push two keys "c" and "e"
         assert!(fbt_page.insert("c".as_bytes(), "cc".as_bytes(), false));
         fbt_page.check_keys_are_sorted();
         fbt_page.check_slot_data_start();
@@ -833,6 +833,54 @@ mod tests {
         assert_eq!(fbt_page.lower_bound("g".as_bytes()), None);
         assert_eq!(fbt_page.lower_bound("h".as_bytes()), None);
         assert_eq!(fbt_page.lower_bound("i".as_bytes()), None);
+        assert_eq!(fbt_page.find("a".as_bytes()), None);
+        assert_eq!(fbt_page.find("b".as_bytes()), None);
+        assert_eq!(fbt_page.find("c".as_bytes()), Some("cc".as_bytes()));
+        assert_eq!(fbt_page.find("d".as_bytes()), None);
+        assert_eq!(fbt_page.find("e".as_bytes()), Some("ee".as_bytes()));
+        assert_eq!(fbt_page.find("f".as_bytes()), None);
+        assert_eq!(fbt_page.find("g".as_bytes()), None);
+        assert_eq!(fbt_page.find("h".as_bytes()), None);
+        assert_eq!(fbt_page.find("i".as_bytes()), None);
+    }
+
+    #[test]
+    fn test_lower_bound_and_find_for_root_page() {
+        let mut page = Page::new();
+        FosterBtreePage::init_as_root(&mut page);
+        let mut fbt_page = FosterBtreePage::new(&mut page);
+
+        assert_eq!(fbt_page.lower_bound("a".as_bytes()), Some("".as_bytes()));
+        assert_eq!(fbt_page.lower_bound("b".as_bytes()), Some("".as_bytes()));
+        assert_eq!(fbt_page.lower_bound("c".as_bytes()), Some("".as_bytes()));
+        assert_eq!(fbt_page.lower_bound("d".as_bytes()), Some("".as_bytes()));
+        assert_eq!(fbt_page.lower_bound("e".as_bytes()), Some("".as_bytes()));
+        assert_eq!(fbt_page.lower_bound("f".as_bytes()), Some("".as_bytes()));
+        assert_eq!(fbt_page.lower_bound("g".as_bytes()), Some("".as_bytes()));
+        assert_eq!(fbt_page.lower_bound("h".as_bytes()), Some("".as_bytes()));
+        assert_eq!(fbt_page.lower_bound("i".as_bytes()), Some("".as_bytes()));
+        assert_eq!(fbt_page.find("a".as_bytes()), None);
+        assert_eq!(fbt_page.find("b".as_bytes()), None);
+        assert_eq!(fbt_page.find("c".as_bytes()), None);
+        assert_eq!(fbt_page.find("d".as_bytes()), None);
+        assert_eq!(fbt_page.find("e".as_bytes()), None);
+        assert_eq!(fbt_page.find("f".as_bytes()), None);
+        assert_eq!(fbt_page.find("g".as_bytes()), None);
+        assert_eq!(fbt_page.find("h".as_bytes()), None);
+        assert_eq!(fbt_page.find("i".as_bytes()), None);
+
+        fbt_page.insert("c".as_bytes(), "cc".as_bytes(), false);
+        fbt_page.insert("e".as_bytes(), "ee".as_bytes(), false);
+
+        assert_eq!(fbt_page.lower_bound("a".as_bytes()), Some("".as_bytes()));
+        assert_eq!(fbt_page.lower_bound("b".as_bytes()), Some("".as_bytes()));
+        assert_eq!(fbt_page.lower_bound("c".as_bytes()), Some("c".as_bytes()));
+        assert_eq!(fbt_page.lower_bound("d".as_bytes()), Some("c".as_bytes()));
+        assert_eq!(fbt_page.lower_bound("e".as_bytes()), Some("e".as_bytes()));
+        assert_eq!(fbt_page.lower_bound("f".as_bytes()), Some("e".as_bytes()));
+        assert_eq!(fbt_page.lower_bound("g".as_bytes()), Some("e".as_bytes()));
+        assert_eq!(fbt_page.lower_bound("h".as_bytes()), Some("e".as_bytes()));
+        assert_eq!(fbt_page.lower_bound("i".as_bytes()), Some("e".as_bytes()));
         assert_eq!(fbt_page.find("a".as_bytes()), None);
         assert_eq!(fbt_page.find("b".as_bytes()), None);
         assert_eq!(fbt_page.find("c".as_bytes()), Some("cc".as_bytes()));
