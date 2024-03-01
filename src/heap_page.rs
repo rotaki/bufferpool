@@ -6,28 +6,28 @@ mod page_header {
     pub const PAGE_HEADER_SIZE: usize = 4;
     pub struct PageHeader {
         active_slot_count: u16, // Monotonically increasing counter. Slot deletion does not decrement this counter.
-        slot_data_start_offset: u16,
+        rec_start_offset: u16,
     }
 
     impl PageHeader {
         pub fn from_bytes(data: [u8; PAGE_HEADER_SIZE]) -> Self {
             Self {
                 active_slot_count: u16::from_be_bytes(data[..2].try_into().unwrap()),
-                slot_data_start_offset: u16::from_be_bytes(data[2..4].try_into().unwrap()),
+                rec_start_offset: u16::from_be_bytes(data[2..4].try_into().unwrap()),
             }
         }
 
         pub fn to_bytes(&self) -> [u8; PAGE_HEADER_SIZE] {
             let mut buf = [0; PAGE_HEADER_SIZE];
             buf[..2].copy_from_slice(&self.active_slot_count.to_be_bytes());
-            buf[2..4].copy_from_slice(&self.slot_data_start_offset.to_be_bytes());
+            buf[2..4].copy_from_slice(&self.rec_start_offset.to_be_bytes());
             buf
         }
 
-        pub fn new(slot_data_start_offset: u16) -> Self {
+        pub fn new(rec_start_offset: u16) -> Self {
             Self {
                 active_slot_count: 0,
-                slot_data_start_offset,
+                rec_start_offset,
             }
         }
 
@@ -39,34 +39,34 @@ mod page_header {
             self.active_slot_count += 1;
         }
 
-        pub fn slot_data_start_offset(&self) -> u16 {
-            self.slot_data_start_offset
+        pub fn rec_start_offset(&self) -> u16 {
+            self.rec_start_offset
         }
 
-        pub fn set_slot_data_start_offset(&mut self, offset: u16) {
-            self.slot_data_start_offset = offset;
+        pub fn set_rec_start_offset(&mut self, offset: u16) {
+            self.rec_start_offset = offset;
         }
     }
 }
 
-mod slot_metadata {
-    pub const SLOT_METADATA_SIZE: usize = 4;
+mod slot {
+    pub const SLOT_SIZE: usize = 4;
 
-    pub struct SlotMetadata {
+    pub struct Slot {
         offset: u16, // First bit is used to indicate if the slot is valid
         size: u16,
     }
 
-    impl SlotMetadata {
-        pub fn from_bytes(data: [u8; SLOT_METADATA_SIZE]) -> Self {
+    impl Slot {
+        pub fn from_bytes(data: [u8; SLOT_SIZE]) -> Self {
             Self {
                 offset: u16::from_be_bytes(data[..2].try_into().unwrap()),
                 size: u16::from_be_bytes(data[2..4].try_into().unwrap()),
             }
         }
 
-        pub fn to_bytes(&self) -> [u8; SLOT_METADATA_SIZE] {
-            let mut buf = [0; SLOT_METADATA_SIZE];
+        pub fn to_bytes(&self) -> [u8; SLOT_SIZE] {
+            let mut buf = [0; SLOT_SIZE];
             buf[..2].copy_from_slice(&self.offset.to_be_bytes());
             buf[2..4].copy_from_slice(&self.size.to_be_bytes());
             buf
@@ -107,7 +107,7 @@ mod slot_metadata {
 }
 
 use page_header::{PageHeader, PAGE_HEADER_SIZE};
-use slot_metadata::{SlotMetadata, SLOT_METADATA_SIZE};
+use slot::{Slot, SLOT_SIZE};
 
 pub struct HeapPage<'a> {
     page: &'a mut Page,
@@ -124,42 +124,39 @@ impl<'a> HeapPage<'a> {
         self.page[0..PAGE_HEADER_SIZE].copy_from_slice(&page_header.to_bytes());
     }
 
-    fn slot_metadata_offset(slot_id: u16) -> usize {
-        PAGE_HEADER_SIZE + SLOT_METADATA_SIZE * slot_id as usize
+    fn slot_offset(slot_id: u16) -> usize {
+        PAGE_HEADER_SIZE + SLOT_SIZE * slot_id as usize
     }
 
-    fn slot_metadata(&self, slot_id: u16) -> Option<SlotMetadata> {
+    fn slot(&self, slot_id: u16) -> Option<Slot> {
         if slot_id < self.header().active_slot_count() {
-            let offset = HeapPage::slot_metadata_offset(slot_id);
-            let slot_metadata_bytes: [u8; SLOT_METADATA_SIZE] = self.page
-                [offset..offset + SLOT_METADATA_SIZE]
-                .try_into()
-                .unwrap();
-            Some(SlotMetadata::from_bytes(slot_metadata_bytes))
+            let offset = HeapPage::slot_offset(slot_id);
+            let slot_bytes: [u8; SLOT_SIZE] =
+                self.page[offset..offset + SLOT_SIZE].try_into().unwrap();
+            Some(Slot::from_bytes(slot_bytes))
         } else {
             None
         }
     }
 
-    fn insert_slot_metadata(&mut self, size: usize) -> (u16, SlotMetadata) {
+    fn insert_slot(&mut self, size: usize) -> (u16, Slot) {
         let mut page_header = self.header();
         let slot_id = page_header.active_slot_count();
         page_header.increment_active_slots();
-        let slot_offset = page_header.slot_data_start_offset() - size as u16;
-        page_header.set_slot_data_start_offset(slot_offset);
+        let slot_offset = page_header.rec_start_offset() - size as u16;
+        page_header.set_rec_start_offset(slot_offset);
         self.update_header(page_header);
 
-        let slot_metadata = SlotMetadata::new(slot_offset, size as u16);
-        let res = self.update_slot_metadata(slot_id, &slot_metadata);
+        let slot = Slot::new(slot_offset, size as u16);
+        let res = self.update_slot(slot_id, &slot);
         assert!(res);
-        (slot_id, slot_metadata)
+        (slot_id, slot)
     }
 
-    fn update_slot_metadata(&mut self, slot_id: u16, slot_metadata: &SlotMetadata) -> bool {
+    fn update_slot(&mut self, slot_id: u16, slot: &Slot) -> bool {
         if slot_id < self.header().active_slot_count() {
-            let offset = HeapPage::slot_metadata_offset(slot_id);
-            self.page[offset..offset + SLOT_METADATA_SIZE]
-                .copy_from_slice(&slot_metadata.to_bytes());
+            let offset = HeapPage::slot_offset(slot_id);
+            self.page[offset..offset + SLOT_SIZE].copy_from_slice(&slot.to_bytes());
             true
         } else {
             false
@@ -169,8 +166,8 @@ impl<'a> HeapPage<'a> {
     // Returns the first invalid slot
     fn invalid_slot(&self) -> Option<u16> {
         for slot_id in 0..self.header().active_slot_count() {
-            if let Some(slot_metadata) = self.slot_metadata(slot_id) {
-                if !slot_metadata.is_valid() {
+            if let Some(slot) = self.slot(slot_id) {
+                if !slot.is_valid() {
                     return Some(slot_id);
                 }
             }
@@ -179,38 +176,37 @@ impl<'a> HeapPage<'a> {
     }
 
     fn free_space(&self) -> usize {
-        let next_slot_metadata_offset =
-            HeapPage::slot_metadata_offset(self.header().active_slot_count());
-        let slot_data_start_offset = self.header().slot_data_start_offset();
-        slot_data_start_offset as usize - next_slot_metadata_offset
+        let next_slot_offset = HeapPage::slot_offset(self.header().active_slot_count());
+        let rec_start_offset = self.header().rec_start_offset();
+        rec_start_offset as usize - next_slot_offset
     }
 
-    // [ [slot4][slot3][slot2][slot1] ]
+    // [ [rec4 ][rec3 ][rec2 ][rec1 ] ]
     //   ^             ^     ^
     //   |             |     |
-    //   slot_data_start_offset
+    //   rec_start_offset
     //                 |     |
     //                 shift_start_offset
     //                       |
     //                  <----> shift_size
-    //    <------------> data to be shifted
+    //    <------------> recs to be shifted
     //
-    // Delete slot2. Shift [slot4][slot3] to the right by slot2.size
+    // Delete slot2. Shift [rec4 ][rec3 ] to the right by rec2.size
     //
-    // [        [slot4][slot3][slot1] ]
+    // [        [rec4 ][rec3 ][rec1 ] ]
     //
-    // The left offset of slot4 is `slot_data_start_offset`.
+    // The left offset of slot4 is `rec_start_offset`.
     // The left offset of slot2 is `shift_start_offset`.
     // The size of slot2 is `shift_size`.
-    fn shift_slot_data(&mut self, shift_start_offset: u16, shift_size: u16) {
-        // Chunks of data to be shifted is in the range of [start..end)
+    fn shift_recs(&mut self, shift_start_offset: u16, shift_size: u16) {
+        // Chunks of recs to be shifted is in the range of [start..end)
         // The new range is [new_start..new_end)
         trace!(
-            "Shifting slot data. Start offset: {}, size: {}",
+            "Shifting recs. Start offset: {}, size: {}",
             shift_start_offset,
             shift_size
         );
-        let start = self.header().slot_data_start_offset() as usize;
+        let start = self.header().rec_start_offset() as usize;
         let end = shift_start_offset as usize;
         // No need to shift if start >= end OR shift_size == 0
         if start >= end || shift_size == 0 {
@@ -222,24 +218,24 @@ impl<'a> HeapPage<'a> {
         let new_end = end + shift_size as usize;
         self.page[new_start..new_end].copy_from_slice(&data);
 
-        // For each valid slot shifted, update the slot metadata
+        // For each valid slot shifted, update the slot
         for slot_id in 0..self.header().active_slot_count() {
-            if let Some(mut slot_metadata) = self.slot_metadata(slot_id) {
-                let current_offset = slot_metadata.offset();
-                if current_offset < shift_start_offset as u16 && slot_metadata.is_valid() {
-                    // Update slot metadata
+            if let Some(mut slot) = self.slot(slot_id) {
+                let current_offset = slot.offset();
+                if current_offset < shift_start_offset as u16 && slot.is_valid() {
+                    // Update slot
                     let new_offset = current_offset + shift_size;
-                    slot_metadata.set_offset(new_offset);
-                    self.update_slot_metadata(slot_id, &slot_metadata);
+                    slot.set_offset(new_offset);
+                    self.update_slot(slot_id, &slot);
                 }
             } else {
-                panic!("Slot metadata should be available");
+                panic!("Slot should be available");
             }
         }
 
-        // Update the slot_data_start_offset of the page
+        // Update the rec_start_offset of the page
         let mut page_header = self.header();
-        page_header.set_slot_data_start_offset(new_start as u16);
+        page_header.set_rec_start_offset(new_start as u16);
         self.update_header(page_header);
     }
 }
@@ -264,36 +260,36 @@ impl<'a> HeapPage<'a> {
                 return None;
             }
 
-            // Copy the bytes into the address before the slot_data_start_offset
-            let slot_offset = self.header().slot_data_start_offset() as usize - slot_size;
+            // Copy the bytes into the address before the rec_start_offset
+            let slot_offset = self.header().rec_start_offset() as usize - slot_size;
             self.page[slot_offset..slot_offset + slot_size].copy_from_slice(bytes);
 
-            // Update slot metadata
-            let mut slot_metadata = self.slot_metadata(slot_id).unwrap();
-            slot_metadata.set_offset(slot_offset as u16);
-            slot_metadata.set_size(slot_size as u16);
-            slot_metadata.set_valid(true);
-            self.update_slot_metadata(slot_id, &slot_metadata);
+            // Update slot
+            let mut slot = self.slot(slot_id).unwrap();
+            slot.set_offset(slot_offset as u16);
+            slot.set_size(slot_size as u16);
+            slot.set_valid(true);
+            self.update_slot(slot_id, &slot);
 
             // Update header
             let mut page_header = self.header();
-            page_header.set_slot_data_start_offset(slot_offset as u16);
+            page_header.set_rec_start_offset(slot_offset as u16);
             self.update_header(page_header);
 
             Some(slot_id)
         } else {
-            if SLOT_METADATA_SIZE + slot_size > self.free_space() {
+            if SLOT_SIZE + slot_size > self.free_space() {
                 trace!("[Add] Not enough space for new slot");
                 return None;
             }
-            let (slot_id, slot_metadata) = self.insert_slot_metadata(slot_size);
+            let (slot_id, slot) = self.insert_slot(slot_size);
             trace!(
                 "[Add] New slot {}, offset: {}, size: {}",
                 slot_id,
-                slot_metadata.offset(),
-                slot_metadata.size()
+                slot.offset(),
+                slot.size()
             );
-            let offset = slot_metadata.offset() as usize;
+            let offset = slot.offset() as usize;
             self.page[offset..offset + slot_size].copy_from_slice(bytes);
             Some(slot_id)
         }
@@ -301,16 +297,16 @@ impl<'a> HeapPage<'a> {
 
     pub fn get_value(&self, slot_id: u16) -> Option<&[u8]> {
         if slot_id < self.header().active_slot_count() {
-            if let Some(slot_metadata) = self.slot_metadata(slot_id) {
-                if slot_metadata.is_valid() {
+            if let Some(slot) = self.slot(slot_id) {
+                if slot.is_valid() {
                     trace!(
                         "[Get] Slot {}, offset: {}, size: {}",
                         slot_id,
-                        slot_metadata.offset(),
-                        slot_metadata.size()
+                        slot.offset(),
+                        slot.size()
                     );
-                    let offset = slot_metadata.offset() as usize;
-                    let size = slot_metadata.size() as usize;
+                    let offset = slot.offset() as usize;
+                    let size = slot.size() as usize;
                     Some(&self.page[offset..offset + size])
                 } else {
                     None
@@ -325,19 +321,19 @@ impl<'a> HeapPage<'a> {
 
     pub fn delete_value(&mut self, slot_id: u16) -> Option<()> {
         if slot_id < self.header().active_slot_count() {
-            if let Some(mut slot_metadata) = self.slot_metadata(slot_id) {
-                if slot_metadata.is_valid() {
+            if let Some(mut slot) = self.slot(slot_id) {
+                if slot.is_valid() {
                     trace!(
                         "[Delete] Slot {}, offset: {}, size: {}",
                         slot_id,
-                        slot_metadata.offset(),
-                        slot_metadata.size()
+                        slot.offset(),
+                        slot.size()
                     );
-                    slot_metadata.set_valid(false);
-                    self.update_slot_metadata(slot_id, &slot_metadata);
-                    let shift_start_offset = slot_metadata.offset();
-                    let shift_size = slot_metadata.size();
-                    self.shift_slot_data(shift_start_offset, shift_size);
+                    slot.set_valid(false);
+                    self.update_slot(slot_id, &slot);
+                    let shift_start_offset = slot.offset();
+                    let shift_size = slot.size();
+                    self.shift_recs(shift_start_offset, shift_size);
                     Some(())
                 } else {
                     None
