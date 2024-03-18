@@ -29,7 +29,7 @@ impl Entry {
 
 pub struct SieveEvictionPolicy {
     map: HashMap<usize, Box<Entry>>,
-    unallocated: BinaryHeap<usize>,
+    next_to_allocate: usize,
     head: Option<NonNull<Entry>>,
     tail: Option<NonNull<Entry>>,
     hand: Option<NonNull<Entry>>,
@@ -43,12 +43,9 @@ impl SieveEvictionPolicy {
             .map(|i| (i, Box::new(Entry::new(i))))
             .collect();
 
-        // max-heap only used when the buffer pool is not full yet
-        let unallocated: BinaryHeap<usize> = (0..num_pages).collect();
-
         SieveEvictionPolicy {
             map,
-            unallocated,
+            next_to_allocate: 0,
             head: None,
             tail: None,
             hand: None,
@@ -125,8 +122,10 @@ impl SieveEvictionPolicy {
 impl EvictionPolicy for SieveEvictionPolicy {
     fn choose_victim(&mut self) -> usize {
         let index: usize = if self.len < self.capacity {
-            debug_assert!(!self.unallocated.is_empty());
-            self.unallocated.pop().unwrap()
+            debug_assert!(self.next_to_allocate < self.capacity);
+            let next_idx = self.next_to_allocate;
+            self.next_to_allocate += 1;
+            next_idx
         } else {
             self.evict()
         };
@@ -154,21 +153,21 @@ mod tests {
     #[test]
     fn test_sieve_eviction_policy_simple1() {
         let mut policy = SieveEvictionPolicy::new(3);
-        assert_eq!(policy.choose_victim(), 2);
-        assert_eq!(policy.choose_victim(), 1);
         assert_eq!(policy.choose_victim(), 0);
+        assert_eq!(policy.choose_victim(), 1);
+        assert_eq!(policy.choose_victim(), 2);
         policy.update(0);
         policy.update(1);
         policy.update(2);
-        assert_eq!(policy.choose_victim(), 2);
+        assert_eq!(policy.choose_victim(), 0);
     }
 
     #[test]
     fn test_sieve_eviction_policy_simple2() {
         let mut policy = SieveEvictionPolicy::new(3);
-        assert_eq!(policy.choose_victim(), 2);
-        assert_eq!(policy.choose_victim(), 1);
         assert_eq!(policy.choose_victim(), 0);
+        assert_eq!(policy.choose_victim(), 1);
+        assert_eq!(policy.choose_victim(), 2);
         policy.update(1);
         policy.update(2);
         assert_eq!(policy.choose_victim(), 0);
@@ -177,9 +176,9 @@ mod tests {
     #[test]
     fn test_sieve_eviction_policy_simple3() {
         let mut policy = SieveEvictionPolicy::new(3);
-        assert_eq!(policy.choose_victim(), 2);
-        assert_eq!(policy.choose_victim(), 1);
         assert_eq!(policy.choose_victim(), 0);
+        assert_eq!(policy.choose_victim(), 1);
+        assert_eq!(policy.choose_victim(), 2);
         policy.update(0);
         policy.update(2);
         assert_eq!(policy.choose_victim(), 1);
@@ -188,15 +187,38 @@ mod tests {
     #[test]
     fn test_sieve_eviction_policy_simple4() {
         let mut policy = SieveEvictionPolicy::new(3);
-        assert_eq!(policy.choose_victim(), 2);
-        assert_eq!(policy.choose_victim(), 1);
         assert_eq!(policy.choose_victim(), 0);
+        assert_eq!(policy.choose_victim(), 1);
+        assert_eq!(policy.choose_victim(), 2);
         policy.update(0);
         policy.update(1);
         policy.update(2);
-        assert_eq!(policy.choose_victim(), 2);
-        policy.reset(2);
-        policy.update(1);
         assert_eq!(policy.choose_victim(), 0);
+        policy.reset(0);
+        policy.update(1);
+        assert_eq!(policy.choose_victim(), 2);
+        assert_eq!(policy.choose_victim(), 0);
+    }
+
+    #[test]
+    fn test_sieve_eviction_policy_simple5() {
+        // Example from official website
+        let mut policy = SieveEvictionPolicy::new(7);
+        assert_eq!(policy.choose_victim(), 0);
+        assert_eq!(policy.choose_victim(), 1);
+        assert_eq!(policy.choose_victim(), 2);
+        assert_eq!(policy.choose_victim(), 3);
+        assert_eq!(policy.choose_victim(), 4);
+        assert_eq!(policy.choose_victim(), 5);
+        assert_eq!(policy.choose_victim(), 6);
+        policy.update(0);
+        policy.update(1);
+        policy.update(6);
+        assert_eq!(policy.choose_victim(), 2);
+        policy.update(0);
+        policy.update(3);
+        assert_eq!(policy.choose_victim(), 4);
+        policy.update(1);
+        assert_eq!(policy.choose_victim(), 5);
     }
 }
