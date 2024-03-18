@@ -5,9 +5,9 @@ use crate::page::Page;
 // 2 byte: active slot count (generally >=2  because of low and high fences)
 // 2 byte: free space
 // Slotted page layout:
-// * slot_metadata [offset: u16, key_size: u16, value_size: u16]. The first bit of the offset is used to indicate if the slot is a ghost slot.
-//  The slot metadata should be sorted based on the key.
-// * slot_data [key: [u8], value: [u8]] // value should be a page id if the page is a non-leaf page, otherwise it should be a value.
+// * slot [offset: u16, key_size: u16, value_size: u16]. The first bit of the offset is used to indicate if the slot is a ghost slot.
+//  The slots are sorted based on the key.
+// * recs [key: [u8], value: [u8]] // value should be a page id if the page is a non-leaf page, otherwise it should be a value.
 // The first slot is the low fence and the last slot is the high fence.
 
 // Assumptions
@@ -16,44 +16,48 @@ use crate::page::Page;
 // [slot0] -- low_fence. If the page is the leftmost page, then the low_fence is offset 0, size 0. Should not be referenced.
 // [slotN] -- high_fence. If the page is the rightmost page, then the high_fence is offset 0, size 0. Should not be referenced.
 
+// Words
+// * A slot refers to the metadata of a record in the page. It specifies the offset of the record, the size of the key, and the size of the value.
+// * A record refers to the key-value pair in the page.
+
 mod page_header {
     pub const PAGE_HEADER_SIZE: usize = 5;
 
     pub struct PageHeader {
         flags: u8,
         active_slot_count: u16,
-        slot_data_start_offset: u16,
+        rec_start_offset: u16,
     }
 
     impl PageHeader {
         pub fn from_bytes(bytes: &[u8; 5]) -> Self {
             let flags = bytes[0];
             let active_slot_count = u16::from_be_bytes([bytes[1], bytes[2]]);
-            let slot_data_start_offset = u16::from_be_bytes([bytes[3], bytes[4]]);
+            let rec_start_offset = u16::from_be_bytes([bytes[3], bytes[4]]);
             PageHeader {
                 flags,
                 active_slot_count,
-                slot_data_start_offset,
+                rec_start_offset,
             }
         }
 
         pub fn to_bytes(&self) -> [u8; 5] {
             let active_slot_count_bytes = self.active_slot_count.to_be_bytes();
-            let slot_data_start_offset_bytes = self.slot_data_start_offset.to_be_bytes();
+            let rec_start_offset_bytes = self.rec_start_offset.to_be_bytes();
             [
                 self.flags,
                 active_slot_count_bytes[0],
                 active_slot_count_bytes[1],
-                slot_data_start_offset_bytes[0],
-                slot_data_start_offset_bytes[1],
+                rec_start_offset_bytes[0],
+                rec_start_offset_bytes[1],
             ]
         }
 
-        pub fn new(slot_data_start_offset: u16) -> Self {
+        pub fn new(rec_start_offset: u16) -> Self {
             PageHeader {
                 flags: 0,
                 active_slot_count: 0,
-                slot_data_start_offset,
+                rec_start_offset,
             }
         }
 
@@ -133,38 +137,38 @@ mod page_header {
             self.active_slot_count -= 1;
         }
 
-        pub fn slot_data_start_offset(&self) -> u16 {
-            self.slot_data_start_offset
+        pub fn rec_start_offset(&self) -> u16 {
+            self.rec_start_offset
         }
 
-        pub fn set_slot_data_start_offset(&mut self, slot_data_start_offset: u16) {
-            self.slot_data_start_offset = slot_data_start_offset;
+        pub fn set_rec_start_offset(&mut self, rec_start_offset: u16) {
+            self.rec_start_offset = rec_start_offset;
         }
     }
 }
 
-mod slot_metadata {
-    pub const SLOT_METADATA_SIZE: usize = 6;
+mod slot {
+    pub const SLOT_SIZE: usize = 6;
 
-    pub struct SlotMetadata {
+    pub struct Slot {
         offset: u16, // The first bit of the offset is used to indicate if the slot is a ghost slot.
         key_size: u16, // The size of the key
         value_size: u16, // The size of the value
     }
 
-    impl SlotMetadata {
-        pub fn from_bytes(bytes: [u8; SLOT_METADATA_SIZE]) -> Self {
+    impl Slot {
+        pub fn from_bytes(bytes: [u8; SLOT_SIZE]) -> Self {
             let offset = u16::from_be_bytes([bytes[0], bytes[1]]);
             let key_size = u16::from_be_bytes([bytes[2], bytes[3]]);
             let value_size = u16::from_be_bytes([bytes[4], bytes[5]]);
-            SlotMetadata {
+            Slot {
                 offset,
                 key_size,
                 value_size,
             }
         }
 
-        pub fn to_bytes(&self) -> [u8; SLOT_METADATA_SIZE] {
+        pub fn to_bytes(&self) -> [u8; SLOT_SIZE] {
             let offset_bytes = self.offset.to_be_bytes();
             let key_size_bytes = self.key_size.to_be_bytes();
             let value_size_bytes = self.value_size.to_be_bytes();
@@ -182,7 +186,7 @@ mod slot_metadata {
             // Always clear the first bit of the offset.
             // i.e. Always assume that the slot is not a ghost slot on new.
             let offset = offset & 0b0111_1111_1111_1111;
-            SlotMetadata {
+            Slot {
                 offset,
                 key_size,
                 value_size,
@@ -229,7 +233,7 @@ mod slot_metadata {
 
 use log::trace;
 use page_header::{PageHeader, PAGE_HEADER_SIZE};
-use slot_metadata::{SlotMetadata, SLOT_METADATA_SIZE};
+use slot::{Slot, SLOT_SIZE};
 
 pub struct FosterBtreePage<'a> {
     page: &'a mut Page,
@@ -251,42 +255,39 @@ impl<'a> FosterBtreePage<'a> {
         self.page[0..PAGE_HEADER_SIZE].copy_from_slice(&header.to_bytes());
     }
 
-    fn slot_metadata_offset(slot_id: u16) -> usize {
-        PAGE_HEADER_SIZE + slot_id as usize * SLOT_METADATA_SIZE
+    fn slot_offset(slot_id: u16) -> usize {
+        PAGE_HEADER_SIZE + slot_id as usize * SLOT_SIZE
     }
 
-    fn slot_metadata(&self, slot_id: u16) -> Option<SlotMetadata> {
+    fn slot(&self, slot_id: u16) -> Option<Slot> {
         if slot_id < self.header().active_slot_count() {
-            let offset = FosterBtreePage::slot_metadata_offset(slot_id);
-            let slot_metadata_bytes: [u8; SLOT_METADATA_SIZE] = self.page
-                [offset..offset + SLOT_METADATA_SIZE]
-                .try_into()
-                .unwrap();
-            Some(SlotMetadata::from_bytes(slot_metadata_bytes))
+            let offset = FosterBtreePage::slot_offset(slot_id);
+            let slot_bytes: [u8; SLOT_SIZE] =
+                self.page[offset..offset + SLOT_SIZE].try_into().unwrap();
+            Some(Slot::from_bytes(slot_bytes))
         } else {
             None
         }
     }
 
-    fn insert_slot_metadata(&mut self, key_size: u16, value_size: u16) -> (u16, SlotMetadata) {
+    fn insert_slot(&mut self, key_size: u16, value_size: u16) -> (u16, Slot) {
         let mut page_header = self.header();
         let slot_id = page_header.active_slot_count();
         page_header.increment_active_slots();
-        let slot_offset = page_header.slot_data_start_offset() - key_size - value_size;
-        page_header.set_slot_data_start_offset(slot_offset);
+        let slot_offset = page_header.rec_start_offset() - key_size - value_size;
+        page_header.set_rec_start_offset(slot_offset);
         self.update_header(page_header);
 
-        let slot_metadata = SlotMetadata::new(slot_offset, key_size, value_size);
-        let res = self.update_slot_metadata(slot_id, &slot_metadata);
+        let slot = Slot::new(slot_offset, key_size, value_size);
+        let res = self.update_slot(slot_id, &slot);
         assert!(res);
-        (slot_id, slot_metadata)
+        (slot_id, slot)
     }
 
-    fn update_slot_metadata(&mut self, slot_id: u16, slot_metadata: &SlotMetadata) -> bool {
+    fn update_slot(&mut self, slot_id: u16, slot: &Slot) -> bool {
         if slot_id < self.header().active_slot_count() {
-            let offset = FosterBtreePage::slot_metadata_offset(slot_id);
-            self.page[offset..offset + SLOT_METADATA_SIZE]
-                .copy_from_slice(&slot_metadata.to_bytes());
+            let offset = FosterBtreePage::slot_offset(slot_id);
+            self.page[offset..offset + SLOT_SIZE].copy_from_slice(&slot.to_bytes());
             true
         } else {
             false
@@ -294,49 +295,48 @@ impl<'a> FosterBtreePage<'a> {
     }
 
     // Returns the first ghost slot if it exists.
-    fn ghost_slot(&self) -> Option<(u16, SlotMetadata)> {
+    fn ghost_slot(&self) -> Option<(u16, Slot)> {
         for i in 0..self.header().active_slot_count() {
-            let slot_metadata = self.slot_metadata(i).unwrap();
-            if slot_metadata.is_ghost() {
-                return Some((i, slot_metadata));
+            let slot = self.slot(i).unwrap();
+            if slot.is_ghost() {
+                return Some((i, slot));
             }
         }
         None
     }
 
     fn free_space(&self) -> usize {
-        let next_slot_metadata_offset =
-            FosterBtreePage::slot_metadata_offset(self.header().active_slot_count());
-        let slot_data_start_offset = self.header().slot_data_start_offset();
-        slot_data_start_offset as usize - next_slot_metadata_offset
+        let next_slot_offset = FosterBtreePage::slot_offset(self.header().active_slot_count());
+        let rec_start_offset = self.header().rec_start_offset();
+        rec_start_offset as usize - next_slot_offset
     }
 
-    // [ [slot4][slot3][slot2][slot1] ]
+    // [ [rec4 ][rec3 ][rec2 ][rec1 ] ]
     //   ^             ^     ^
     //   |             |     |
-    //   slot_data_start_offset
+    //   rec_start_offset
     //                 |     |
     //                 shift_start_offset
     //                       |
     //                  <----> shift_size
-    //    <------------> data to be shifted
+    //    <------------> recs to be shifted
     //
-    // Delete slot2. Shift [slot4][slot3] to the right by slot2.size
+    // Delete slot2. Shift [rec4 ][rec3 ] to the right by rec2.size
     //
-    // [        [slot4][slot3][slot1] ]
+    // [        [rec4 ][rec3 ][rec1 ] ]
     //
-    // The left offset of slot4 is `slot_data_start_offset`.
-    // The left offset of slot2 is `shift_start_offset`.
-    // The size of slot2 is `shift_size`.
-    fn shift_slot_data(&mut self, shift_start_offset: u16, shift_size: u16) {
-        // Chunks of data to be shifted is in the range of [start..end)
+    // The left offset of rec4 is `rec_start_offset`.
+    // The left offset of rec2 is `shift_start_offset`.
+    // The size of rec2 is `shift_size`.
+    fn shift_records(&mut self, shift_start_offset: u16, shift_size: u16) {
+        // Chunks of records to be shifted is in the range of [start..end)
         // The new range is [new_start..new_end)
         trace!(
-            "Shifting slot data. Start offset: {}, size: {}",
+            "Shifting records. Start offset: {}, size: {}",
             shift_start_offset,
             shift_size
         );
-        let start = self.header().slot_data_start_offset() as usize;
+        let start = self.header().rec_start_offset() as usize;
         let end = shift_start_offset as usize;
         // No need to shift if start >= end OR shift_size == 0
         if start >= end || shift_size == 0 {
@@ -348,52 +348,52 @@ impl<'a> FosterBtreePage<'a> {
         let new_end = end + shift_size as usize;
         self.page[new_start..new_end].copy_from_slice(&data);
 
-        // For each slot shifted, update the slot metadata
+        // For each slot shifted, update the slot.
         // Shifting includes the ghost slots.
         for slot_id in 0..self.header().active_slot_count() {
-            if let Some(mut slot_metadata) = self.slot_metadata(slot_id) {
-                let current_offset = slot_metadata.offset();
+            if let Some(mut slot) = self.slot(slot_id) {
+                let current_offset = slot.offset();
                 if current_offset < shift_start_offset as u16 {
-                    // Update slot metadata
+                    // Update slot.
                     let new_offset = current_offset + shift_size;
-                    slot_metadata.set_offset(new_offset);
-                    self.update_slot_metadata(slot_id, &slot_metadata);
+                    slot.set_offset(new_offset);
+                    self.update_slot(slot_id, &slot);
                 }
             } else {
-                panic!("Slot metadata should be available");
+                panic!("Slot should be available");
             }
         }
 
-        // Update the slot_data_start_offset of the page
+        // Update the rec_start_offset of the page
         let mut page_header = self.header();
-        page_header.set_slot_data_start_offset(new_start as u16);
+        page_header.set_rec_start_offset(new_start as u16);
         self.update_header(page_header);
     }
 
-    // Shift the slot metadata to the right by shift_size.
-    // [ [slotmeta1][slotmeta2][slotmeta3] ]
+    // Shift the slot to the right by shift_size.
+    // [ [slot1][slot2][slot3] ]
     //
     //
-    // Want to insert a new slot at slotmeta2.
-    // Need to shift slotmeta2 and slotmeta3 to the right by 1 SLOT_METADATA_SIZE.
+    // Want to insert a new slot at slot2.
+    // Need to shift slot2 and slot3 to the right by 1 SLOT_SIZE.
     //
-    // [ [slotmeta1][slotmeta2'][slotmeta2][slotmeta3] ]
+    // [ [slot1][slot2'][slot2][slot3] ]
     //
     // This function implicitly increments the active_slot_count of the page.
-    fn shift_slot_meta_right(&mut self, slot_id: u16) {
-        let start = FosterBtreePage::slot_metadata_offset(slot_id);
-        let end = FosterBtreePage::slot_metadata_offset(self.header().active_slot_count());
+    fn shift_slot_right(&mut self, slot_id: u16) {
+        let start = FosterBtreePage::slot_offset(slot_id);
+        let end = FosterBtreePage::slot_offset(self.header().active_slot_count());
         if start > end {
-            panic!("Slot metadata does not exist at the given slot_id");
+            panic!("Slot does not exist at the given slot_id");
         } else if start == end {
-            // No need to shift if start == end. Just add a new slot metadata at the end.
-            let (new_slot_id, _) = self.insert_slot_metadata(0, 0);
+            // No need to shift if start == end. Just add a new slot at the end.
+            let (new_slot_id, _) = self.insert_slot(0, 0);
             assert!(new_slot_id == slot_id);
         } else {
             let data = self.page[start..end].to_vec();
 
-            let new_start = start + SLOT_METADATA_SIZE as usize;
-            let new_end = end + SLOT_METADATA_SIZE as usize;
+            let new_start = start + SLOT_SIZE as usize;
+            let new_end = end + SLOT_SIZE as usize;
 
             self.page[new_start..new_end].copy_from_slice(&data);
 
@@ -404,24 +404,24 @@ impl<'a> FosterBtreePage<'a> {
         }
     }
 
-    // Shift the slot metadata to the left by shift_size.
-    // [ [slotmeta1][slotmeta2][slotmeta3] ]
-    //                         ^
+    // Shift the slot to the left by shift_size.
+    // [ [slot1][slot2][slot3] ]
+    //                 ^
     //
-    // Want to delete slotmeta2.
-    // Need to shift slotmeta3 to the left by 1 SLOT_METADATA_SIZE.
+    // Want to delete slot2.
+    // Need to shift slot3 to the left by 1 SLOT_SIZE.
     //
-    // [ [slotmeta1][slotmeta3] ]
-    //              ^
+    // [ [slot1][slot3] ]
+    //          ^
     //
     // This function implicitly decrements the active_slot_count of the page.
-    fn shift_slot_meta_left(&mut self, slot_id: u16) {
-        let start = FosterBtreePage::slot_metadata_offset(slot_id);
-        let end = FosterBtreePage::slot_metadata_offset(self.header().active_slot_count());
+    fn shift_slot_left(&mut self, slot_id: u16) {
+        let start = FosterBtreePage::slot_offset(slot_id);
+        let end = FosterBtreePage::slot_offset(self.header().active_slot_count());
         if start == 0 {
-            panic!("Cannot shift slot metadata to the left if start == 0");
+            panic!("Cannot shift slot to the left if start == 0");
         } else if start > end {
-            panic!("Slot metadata does not exist at the given slot_id");
+            panic!("Slot does not exist at the given slot_id");
         } else if start == end {
             // No need to shift if start == end. Just decrement the active_slot_count of the page.
             let mut header = self.header();
@@ -430,8 +430,8 @@ impl<'a> FosterBtreePage<'a> {
         } else {
             let data = self.page[start..end].to_vec();
 
-            let new_start = start - SLOT_METADATA_SIZE as usize;
-            let new_end = end - SLOT_METADATA_SIZE as usize;
+            let new_start = start - SLOT_SIZE as usize;
+            let new_end = end - SLOT_SIZE as usize;
 
             self.page[new_start..new_end].copy_from_slice(&data);
 
@@ -562,9 +562,9 @@ impl<'a> FosterBtreePage<'a> {
         if self.header().is_left_most() {
             KeyInternal::MinusInfty
         } else {
-            let slot_metadata = self.slot_metadata(self.low_fence_slot_id()).unwrap();
-            let offset = slot_metadata.offset() as usize;
-            let key_size = slot_metadata.key_size() as usize;
+            let slot = self.slot(self.low_fence_slot_id()).unwrap();
+            let offset = slot.offset() as usize;
+            let key_size = slot.key_size() as usize;
             KeyInternal::Normal(&self.page[offset..offset + key_size])
         }
     }
@@ -573,9 +573,9 @@ impl<'a> FosterBtreePage<'a> {
         if self.header().is_right_most() {
             KeyInternal::PlusInfty
         } else {
-            let slot_metadata = self.slot_metadata(self.high_fence_slot_id()).unwrap();
-            let offset = slot_metadata.offset() as usize;
-            let key_size = slot_metadata.key_size() as usize;
+            let slot = self.slot(self.high_fence_slot_id()).unwrap();
+            let offset = slot.offset() as usize;
+            let key_size = slot.key_size() as usize;
             KeyInternal::Normal(&self.page[offset..offset + key_size])
         }
     }
@@ -584,12 +584,24 @@ impl<'a> FosterBtreePage<'a> {
         if slot_id == self.low_fence_slot_id() {
             Some(self.get_low_fence())
         } else if slot_id < self.high_fence_slot_id() {
-            let slot_metadata = self.slot_metadata(slot_id).unwrap();
-            let offset = slot_metadata.offset() as usize;
-            let key_size = slot_metadata.key_size() as usize;
+            let slot = self.slot(slot_id).unwrap();
+            let offset = slot.offset() as usize;
+            let key_size = slot.key_size() as usize;
             Some(KeyInternal::Normal(&self.page[offset..offset + key_size]))
         } else if slot_id == self.high_fence_slot_id() {
             Some(self.get_high_fence())
+        } else {
+            None
+        }
+    }
+
+    fn get_slot_value(&self, slot_id: u16) -> Option<&[u8]> {
+        if slot_id < self.header().active_slot_count() {
+            let slot = self.slot(slot_id).unwrap();
+            let offset = slot.offset() as usize;
+            let key_size = slot.key_size() as usize;
+            let value_size = slot.value_size() as usize;
+            Some(&self.page[offset + key_size..offset + key_size + value_size])
         } else {
             None
         }
@@ -609,6 +621,10 @@ impl<'a> FosterBtreePage<'a> {
         self.header().active_slot_count() - 1
     }
 
+    fn is_fence(&self, slot_id: u16) -> bool {
+        slot_id == self.low_fence_slot_id() || slot_id == self.high_fence_slot_id()
+    }
+
     fn low_fence_slot_id(&self) -> u16 {
         0
     }
@@ -626,9 +642,9 @@ impl<'a> FosterBtreePage<'a> {
                 self.low_fence_slot_id() + 1 <= slot_id && slot_id <= self.high_fence_slot_id()
             );
 
-            let slot_metadata = self.slot_metadata(slot_id).unwrap();
-            let key_offset = slot_metadata.offset() as usize;
-            let key_size = slot_metadata.key_size() as usize;
+            let slot = self.slot(slot_id).unwrap();
+            let key_offset = slot.offset() as usize;
+            let key_size = slot.key_size() as usize;
             let slot_key = &self.page[key_offset..key_offset + key_size];
             slot_key == key
         } else {
@@ -637,33 +653,33 @@ impl<'a> FosterBtreePage<'a> {
     }
 
     fn compact_space(&mut self) {
-        let mut slot_data_mem_usage = 0;
+        let mut rec_mem_usage = 0;
         for i in 0..self.header().active_slot_count() {
-            if let Some(slot_metadata) = self.slot_metadata(i) {
-                slot_data_mem_usage += slot_metadata.key_size() + slot_metadata.value_size();
+            if let Some(slot) = self.slot(i) {
+                rec_mem_usage += slot.key_size() + slot.value_size();
             }
         }
-        let ideal_start_offset = self.page.len() as u16 - slot_data_mem_usage;
-        let slot_data_start_offset = self.header().slot_data_start_offset();
+        let ideal_start_offset = self.page.len() as u16 - rec_mem_usage;
+        let rec_start_offset = self.header().rec_start_offset();
 
-        if slot_data_start_offset > ideal_start_offset {
+        if rec_start_offset > ideal_start_offset {
             panic!("corrupted page");
-        } else if slot_data_start_offset == ideal_start_offset {
+        } else if rec_start_offset == ideal_start_offset {
             // No need to compact
         } else {
-            let mut slot_data = vec![0; slot_data_mem_usage as usize];
+            let mut recs = vec![0; rec_mem_usage as usize];
             let mut current_size = 0;
 
             for i in 0..self.header().active_slot_count() {
-                if let Some(mut slot_metadata) = self.slot_metadata(i) {
-                    let offset = slot_metadata.offset() as usize;
-                    let key_size = slot_metadata.key_size() as usize;
-                    let value_size = slot_metadata.value_size() as usize;
+                if let Some(mut slot) = self.slot(i) {
+                    let offset = slot.offset() as usize;
+                    let key_size = slot.key_size() as usize;
+                    let value_size = slot.value_size() as usize;
                     let size = key_size + value_size;
                     current_size += size;
 
-                    // Page       [.....    [                Slot data                 ]]
-                    // Slot data            [[.............][key2][value2][key1][value1]]
+                    // Page       [.....    [                Records                   ]]
+                    // Records              [[.............][key2][value2][key1][value1]]
                     //                                       <-----------> size
                     //                                       <-------------------------> current_size
                     //                                      ^
@@ -671,23 +687,23 @@ impl<'a> FosterBtreePage<'a> {
                     //             <-----------------------> global_offset
                     //             <-------> ideal_start_offset
 
-                    let local_offset = slot_data_mem_usage as usize - current_size;
-                    slot_data[local_offset..local_offset + size]
+                    let local_offset = rec_mem_usage as usize - current_size;
+                    recs[local_offset..local_offset + size]
                         .copy_from_slice(&self.page[offset..offset + size]);
 
-                    // Update the slot metadata
+                    // Update the slot
                     let global_offset = (self.page.len() - current_size) as u16;
-                    slot_metadata.set_offset(global_offset);
-                    self.update_slot_metadata(i, &slot_metadata);
+                    slot.set_offset(global_offset);
+                    self.update_slot(i, &slot);
                 }
             }
 
             // Update the page
-            self.page[ideal_start_offset as usize..].copy_from_slice(&slot_data);
+            self.page[ideal_start_offset as usize..].copy_from_slice(&recs);
 
             // Update the header
             let mut header = self.header();
-            header.set_slot_data_start_offset(ideal_start_offset);
+            header.set_rec_start_offset(ideal_start_offset);
             self.update_header(header);
         }
     }
@@ -724,11 +740,11 @@ impl<'a> FosterBtreePage<'a> {
             panic!("Cannot insert low fence when active_slot_count != 0");
         }
 
-        let (slot_id, mut slot_meta) = self.insert_slot_metadata(key.len() as u16, 0);
+        let (slot_id, mut slot) = self.insert_slot(key.len() as u16, 0);
         assert!(slot_id == 0);
-        slot_meta.set_ghost(true);
-        self.update_slot_metadata(0, &slot_meta);
-        let offset = slot_meta.offset();
+        slot.set_ghost(true);
+        self.update_slot(0, &slot);
+        let offset = slot.offset();
         self.page[offset as usize..offset as usize + key.len()].copy_from_slice(key);
     }
 
@@ -738,11 +754,11 @@ impl<'a> FosterBtreePage<'a> {
             // Assumes that the low fence is already inserted but no other slots are inserted.
             panic!("Cannot insert high fence when active_slot_count != 1");
         }
-        let (slot_id, mut slot_meta) = self.insert_slot_metadata(key.len() as u16, 0);
+        let (slot_id, mut slot) = self.insert_slot(key.len() as u16, 0);
         assert!(slot_id == 1);
-        slot_meta.set_ghost(true);
-        self.update_slot_metadata(1, &slot_meta);
-        let offset = slot_meta.offset();
+        slot.set_ghost(true);
+        self.update_slot(1, &slot);
+        let offset = slot.offset();
         self.page[offset as usize..offset as usize + key.len()].copy_from_slice(key);
     }
 
@@ -751,7 +767,7 @@ impl<'a> FosterBtreePage<'a> {
     /// Otherwise two keys with the same value will be inserted.
     pub fn insert(&mut self, key: &[u8], value: &[u8], make_ghost: bool) -> bool {
         let slot_size = key.len() + value.len();
-        if SLOT_METADATA_SIZE + slot_size > self.free_space() {
+        if SLOT_SIZE + slot_size > self.free_space() {
             false
         } else {
             if !self.is_in_range(key) {
@@ -767,9 +783,9 @@ impl<'a> FosterBtreePage<'a> {
                     // Read the previous key. If the previous key is the same as the given key, then return false.
                     let prev_slot_id = slot_id - 1;
                     if prev_slot_id != self.low_fence_slot_id() {
-                        let prev_slot_metadata = self.slot_metadata(prev_slot_id).unwrap();
-                        let prev_key_offset = prev_slot_metadata.offset() as usize;
-                        let prev_key_size = prev_slot_metadata.key_size() as usize;
+                        let prev_slot = self.slot(prev_slot_id).unwrap();
+                        let prev_key_offset = prev_slot.offset() as usize;
+                        let prev_key_size = prev_slot.key_size() as usize;
                         let prev_key = &self.page[prev_key_offset..prev_key_offset + prev_key_size];
                         if prev_key == key {
                             return false;
@@ -779,25 +795,24 @@ impl<'a> FosterBtreePage<'a> {
 
                 // We want to shift [slot_id..] to [slot_id+1..] and overwrite the slot at slot_id.
                 // Note that low_fence will never be shifted.
-                self.shift_slot_meta_right(slot_id);
+                self.shift_slot_right(slot_id);
 
-                // Place the slot data
-                let start_offset = self.header().slot_data_start_offset();
+                // Place the record
+                let start_offset = self.header().rec_start_offset();
                 let offset = start_offset - slot_size as u16;
                 self.page[offset as usize..offset as usize + key.len()].copy_from_slice(key);
                 self.page[offset as usize + key.len()..offset as usize + slot_size]
                     .copy_from_slice(value);
 
-                // Update the slot metadata
-                let mut slot_metadata =
-                    SlotMetadata::new(offset, key.len() as u16, value.len() as u16);
-                slot_metadata.set_ghost(make_ghost);
-                let res = self.update_slot_metadata(slot_id, &slot_metadata);
+                // Update the slot
+                let mut slot = Slot::new(offset, key.len() as u16, value.len() as u16);
+                slot.set_ghost(make_ghost);
+                let res = self.update_slot(slot_id, &slot);
                 assert!(res);
 
                 // Update the header
                 let mut header = self.header();
-                header.set_slot_data_start_offset(offset);
+                header.set_rec_start_offset(offset);
                 self.update_header(header);
 
                 true
@@ -819,9 +834,9 @@ impl<'a> FosterBtreePage<'a> {
             );
 
             let slot_id = slot_id - 1;
-            let slot_metadata = self.slot_metadata(slot_id).unwrap();
-            let key_offset = slot_metadata.offset() as usize;
-            let key_size = slot_metadata.key_size() as usize;
+            let slot = self.slot(slot_id).unwrap();
+            let key_offset = slot.offset() as usize;
+            let key_size = slot.key_size() as usize;
             let key = &self.page[key_offset..key_offset + key_size];
             Some(key)
         }
@@ -841,14 +856,13 @@ impl<'a> FosterBtreePage<'a> {
                 // The key is the low fence
                 None
             } else {
-                let slot_metadata = self.slot_metadata(slot_id).unwrap();
-                let key_offset = slot_metadata.offset() as usize;
-                let key_size = slot_metadata.key_size() as usize;
+                let slot = self.slot(slot_id).unwrap();
+                let key_offset = slot.offset() as usize;
+                let key_size = slot.key_size() as usize;
                 let slot_key = &self.page[key_offset..key_offset + key_size];
                 if slot_key == key {
-                    let value_offset =
-                        slot_metadata.offset() as usize + slot_metadata.key_size() as usize;
-                    let value_size = slot_metadata.value_size() as usize;
+                    let value_offset = slot.offset() as usize + slot.key_size() as usize;
+                    let value_size = slot.value_size() as usize;
                     let value = &self.page[value_offset..value_offset + value_size];
                     Some(value)
                 } else {
@@ -870,14 +884,14 @@ impl<'a> FosterBtreePage<'a> {
                 // The key is the low fence
                 return;
             } else {
-                let slot_metadata = self.slot_metadata(slot_id).unwrap();
-                let key_offset = slot_metadata.offset() as usize;
-                let key_size = slot_metadata.key_size() as usize;
+                let slot = self.slot(slot_id).unwrap();
+                let key_offset = slot.offset() as usize;
+                let key_size = slot.key_size() as usize;
                 let slot_key = &self.page[key_offset..key_offset + key_size];
                 if slot_key == key {
-                    let mut slot_metadata = self.slot_metadata(slot_id).unwrap();
-                    slot_metadata.set_ghost(true);
-                    self.update_slot_metadata(slot_id, &slot_metadata);
+                    let mut slot = self.slot(slot_id).unwrap();
+                    slot.set_ghost(true);
+                    self.update_slot(slot_id, &slot);
                 } else {
                     // The key does not exist
                     return;
@@ -886,7 +900,7 @@ impl<'a> FosterBtreePage<'a> {
         }
     }
 
-    /// Remove the slot_metadata.
+    /// Remove the slot.
     /// To reclaim the space, run `compact_space`
     pub fn remove(&mut self, key: &[u8]) {
         if self.is_in_range(key) {
@@ -899,13 +913,13 @@ impl<'a> FosterBtreePage<'a> {
                 // The key is the low fence
                 return;
             } else {
-                let slot_metadata = self.slot_metadata(slot_id).unwrap();
-                let key_offset = slot_metadata.offset() as usize;
-                let key_size = slot_metadata.key_size() as usize;
+                let slot = self.slot(slot_id).unwrap();
+                let key_offset = slot.offset() as usize;
+                let key_size = slot.key_size() as usize;
                 let slot_key = &self.page[key_offset..key_offset + key_size];
                 if slot_key == key {
                     // Shift [slot_id+1..] to [slot_id..]
-                    self.shift_slot_meta_left(slot_id + 1);
+                    self.shift_slot_left(slot_id + 1);
                 } else {
                     // The key does not exist
                     return;
@@ -924,53 +938,65 @@ impl<'a> FosterBtreePage<'a> {
         // Assumes foster_child is already initialized.
 
         if self.header().active_slot_count() - 2 < 2 {
-            // -2 to exclude the low and high fences
+            // -2 to exclude the low and high fences.
+            // Minimum 4 slots are required to split.
             panic!("Cannot split a page with less than 2 real slots");
         }
-        // This page keeps [0, mid) slots + [mid] to point to foster_child
+        // This page keeps [0, mid) slots and mid key with foster_child_page_id.
         // Foster child keeps [mid, active_slot_count) slots.
 
-        // Set the foster_child's low and high fence
         let mid = self.header().active_slot_count() / 2;
-        let mid_key = self.get_slot_key(mid).unwrap().unwrap();
-        foster_child.insert_low_fence(&mid_key);
-        if self.header().is_right_most() {
-            // If this is the right-most page, then the foster child will also be the right-most page.
-            foster_child.insert_high_fence(&[]);
-            let mut header = foster_child.header();
-            header.set_right_most(true);
-            foster_child.update_header(header);
-        } else {
-            let high_fence = self.get_high_fence().unwrap();
-            foster_child.insert_high_fence(&high_fence);
-        }
-        assert!(foster_child.header().active_slot_count() == 2);
+        assert!(!self.is_fence(mid));
 
-        for i in mid..self.high_fence_slot_id() {
-            let slot_metadata = self.slot_metadata(i).unwrap();
-            let key_offset = slot_metadata.offset() as usize;
-            let key_size = slot_metadata.key_size() as usize;
-            let value_offset = key_offset + key_size;
-            let value_size = slot_metadata.value_size() as usize;
-            let key = &self.page[key_offset..key_offset + key_size];
-            let value = &self.page[value_offset..value_offset + value_size];
-            let make_ghost = slot_metadata.is_ghost();
-            foster_child.insert(key, value, make_ghost);
+        {
+            // Set the foster_child's low and high fence
+            let mid_key = self.get_slot_key(mid).unwrap().unwrap(); // unwrap is safe because the slot is not a fence
+            foster_child.insert_low_fence(&mid_key);
+            if self.header().is_right_most() {
+                // If this is the right-most page, then the foster child will also be the right-most page.
+                foster_child.insert_high_fence(&[]);
+                let mut header = foster_child.header();
+                header.set_right_most(true);
+                foster_child.update_header(header);
+            } else {
+                let high_fence = self.get_high_fence().unwrap();
+                foster_child.insert_high_fence(&high_fence);
+            }
+            assert!(foster_child.header().active_slot_count() == 2);
         }
 
-        let foster_key = { self.get_slot_key(mid).unwrap().unwrap().to_owned() };
+        {
+            // Move the half of the slots to the foster_child
+            for i in mid..self.high_fence_slot_id() {
+                // Does not include the high fence
+                let slot = self.slot(i).unwrap();
+                let make_ghost = slot.is_ghost();
+                let key = self.get_slot_key(i).unwrap().unwrap(); // unwrap is safe because the slot is not a fence
+                let value = self.get_slot_value(i).unwrap();
+                foster_child.insert(key, value, make_ghost);
+            }
+        }
 
-        // Decrement the active_slot_count of this page.
-        // Run compaction to dissolve defragmented space.
-        let mut header = self.header();
-        header.set_active_slot_count(mid);
-        self.update_header(header);
-        self.compact_space();
+        {
+            // Remove the moved slots from this page. Then place the foster_child_page_id in the mid slot of this page.
+            let foster_key = { self.get_slot_key(mid).unwrap().unwrap().to_owned() };
 
-        // Insert the foster_child slot
-        let foster_child_page_id = foster_child.get_id();
-        let foster_child_page_id = foster_child_page_id.to_be_bytes();
-        self.insert(&foster_key, &foster_child_page_id, false);
+            // Decrement the active_slot_count of this page and run compaction to dissolve defragmented space.
+            let mut header = self.header();
+            header.set_active_slot_count(mid); // Keep [0, mid)
+            self.update_header(header);
+            self.compact_space();
+
+            // Insert the foster_child slot
+            let foster_child_page_id = foster_child.get_id();
+            let foster_child_page_id = foster_child_page_id.to_be_bytes();
+            self.insert(&foster_key, &foster_child_page_id, false);
+
+            // Mark that this page contains foster children
+            let mut header = self.header();
+            header.set_foster_children(true);
+            self.update_header(header);
+        }
 
         #[cfg(debug_assertions)]
         {
@@ -986,7 +1012,7 @@ impl FosterBtreePage<'_> {
         self.check_keys_are_sorted();
         self.check_fence_slots_exists();
         if include_no_garbage_checks {
-            self.check_slot_data_start_match_slot_metadata();
+            self.check_rec_start_offset_match_slot();
             self.check_ideal_space_usage();
         }
     }
@@ -1013,27 +1039,27 @@ impl FosterBtreePage<'_> {
         assert!(self.header().active_slot_count() >= 2);
     }
 
-    pub fn check_slot_data_start_match_slot_metadata(&self) {
-        let mut slot_data_start = u16::MAX;
+    pub fn check_rec_start_offset_match_slot(&self) {
+        let mut rec_start_offset = u16::MAX;
         for i in 0..self.header().active_slot_count() {
-            let slot_metadata = self.slot_metadata(i).unwrap();
-            let offset = slot_metadata.offset();
-            if offset < slot_data_start {
-                slot_data_start = offset;
+            let slot = self.slot(i).unwrap();
+            let offset = slot.offset();
+            if offset < rec_start_offset {
+                rec_start_offset = offset;
             }
         }
-        assert_eq!(slot_data_start, self.header().slot_data_start_offset());
+        assert_eq!(rec_start_offset, self.header().rec_start_offset());
     }
 
     pub fn check_ideal_space_usage(&self) {
-        let mut slot_data_mem_usage = 0;
+        let mut rec_mem_usage = 0;
         for i in 0..self.header().active_slot_count() {
-            if let Some(slot_metadata) = self.slot_metadata(i) {
-                slot_data_mem_usage += slot_metadata.key_size() + slot_metadata.value_size();
+            if let Some(slot) = self.slot(i) {
+                rec_mem_usage += slot.key_size() + slot.value_size();
             }
         }
-        let ideal_start_offset = self.page.len() as u16 - slot_data_mem_usage;
-        assert_eq!(ideal_start_offset, self.header().slot_data_start_offset());
+        let ideal_start_offset = self.page.len() as u16 - rec_mem_usage;
+        assert_eq!(ideal_start_offset, self.header().rec_start_offset());
     }
 }
 
@@ -1054,7 +1080,7 @@ mod tests {
         fbt_page.insert_high_fence(high_fence);
 
         fbt_page.check_keys_are_sorted();
-        fbt_page.check_slot_data_start();
+        fbt_page.check_rec_start();
 
         assert_eq!(fbt_page.header().active_slot_count(), 2);
         assert_eq!(fbt_page.get_slot_key(0).unwrap(), low_fence);
