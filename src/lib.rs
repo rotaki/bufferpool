@@ -1,9 +1,11 @@
 pub mod buffer_frame;
 pub mod buffer_pool;
-mod eviction_policy;
+pub mod eviction_policy;
 mod file_manager;
 pub mod foster_btree_page;
 pub mod heap_page;
+pub mod lfu_eviction_policy;
 pub mod page;
 mod rwlatch;
+pub mod sieve_eviction_policy;
 mod utils;

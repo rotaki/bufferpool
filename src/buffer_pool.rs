@@ -2,8 +2,9 @@ use log::debug;
 
 use crate::{
     buffer_frame::{BufferFrame, FrameReadGuard, FrameWriteGuard},
-    eviction_policy::EvictionPolicy,
+    eviction_policy::{self, EvictionPolicy},
     file_manager::FileManager,
+    lfu_eviction_policy::LFUEvictionPolicy,
     page::Page,
     utils::init_logger,
 };
@@ -29,17 +30,20 @@ impl ContainerPageKey {
     }
 }
 
-pub struct BufferPool {
+pub struct BufferPool<T> {
     path: PathBuf,
     latch: AtomicBool,
     frames: UnsafeCell<Vec<BufferFrame>>,
     id_to_index: UnsafeCell<HashMap<ContainerPageKey, usize>>, // (container_id, page_id) -> index
     container_to_file: UnsafeCell<HashMap<usize, FileManager>>,
-    eviction_policy: UnsafeCell<EvictionPolicy>,
+    eviction_policy: UnsafeCell<T>,
 }
 
-impl BufferPool {
-    pub fn new<P: AsRef<std::path::Path>>(path: P, num_pages: usize) -> Self {
+impl<T> BufferPool<T>
+where
+    T: EvictionPolicy,
+{
+    pub fn new<P: AsRef<std::path::Path>>(path: P, num_pages: usize, eviction_policy: T) -> Self {
         init_logger();
         debug!("Buffer pool created: num_pages: {}", num_pages);
 
@@ -62,7 +66,7 @@ impl BufferPool {
             id_to_index: UnsafeCell::new(HashMap::new()),
             frames: UnsafeCell::new(frames),
             container_to_file: UnsafeCell::new(container),
-            eviction_policy: UnsafeCell::new(EvictionPolicy::new(num_pages)),
+            eviction_policy: UnsafeCell::new(eviction_policy),
         }
     }
 
@@ -77,10 +81,10 @@ impl BufferPool {
         self.latch.store(false, Ordering::Release);
     }
 
-    pub fn create_new_page<T: Fn(&mut Page)>(
+    pub fn create_new_page<P: Fn(&mut Page)>(
         &self,
         container_id: usize,
-        init: &T,
+        init: &P,
     ) -> ContainerPageKey {
         // Reading and writing to the following data structures must be done while holding the latch
         // on the buffer pool.
@@ -256,7 +260,7 @@ impl BufferPool {
 }
 
 #[cfg(test)]
-impl BufferPool {
+impl<T: EvictionPolicy> BufferPool<T> {
     pub fn check_all_frames_unlatched(&self) {
         let frames = unsafe { &*self.frames.get() };
         for frame in frames.iter() {
@@ -288,11 +292,12 @@ impl BufferPool {
     }
 }
 
-unsafe impl Sync for BufferPool {}
+unsafe impl<T: EvictionPolicy> Sync for BufferPool<T> {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::num;
     use std::thread;
     use tempfile::TempDir;
 
@@ -300,7 +305,9 @@ mod tests {
     fn test_bp_and_frame_latch() {
         let temp_dir = TempDir::new().unwrap();
         {
-            let bp = BufferPool::new(temp_dir.path(), 10);
+            let num_pages = 10;
+            let ep = LFUEvictionPolicy::new(num_pages);
+            let bp = BufferPool::new(temp_dir.path(), num_pages, ep);
             let key = bp.create_new_page(0, &|_: &mut Page| {});
             let num_threads = 3;
             let num_iterations = 80; // Note: u8 max value is 255
@@ -334,7 +341,9 @@ mod tests {
     fn test_bp_write_back_simple() {
         let tempdir = TempDir::new().unwrap();
         {
-            let bp = BufferPool::new(tempdir.path(), 1);
+            let num_pages = 1;
+            let ep = LFUEvictionPolicy::new(num_pages);
+            let bp = BufferPool::new(tempdir.path(), 1, ep);
             let container_id = 0;
             let key1 = {
                 let key = bp.create_new_page(container_id, &|page: &mut Page| {
@@ -373,7 +382,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         {
             let mut keys = Vec::new();
-            let bp = BufferPool::new(temp_dir.path(), 1);
+            let num_pages = 1;
+            let ep = LFUEvictionPolicy::new(num_pages);
+            let bp = BufferPool::new(temp_dir.path(), 1, ep);
             let container_id = 0;
             for i in 0..100 {
                 let key = bp.create_new_page(container_id, &|page: &mut Page| {
