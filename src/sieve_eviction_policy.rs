@@ -141,6 +141,12 @@ impl EvictionPolicy for SieveEvictionPolicy {
         entry.visited = false;
     }
 
+    fn reset_all(&mut self) {
+        for entry in self.map.values_mut() {
+            entry.visited = false;
+        }
+    }
+
     fn update(&mut self, index: usize) {
         let entry = self.map.get_mut(&index).unwrap();
         entry.visited = true;

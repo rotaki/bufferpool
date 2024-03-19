@@ -178,6 +178,10 @@ impl<'a> HeapPage<'a> {
     fn free_space(&self) -> usize {
         let next_slot_offset = HeapPage::slot_offset(self.header().active_slot_count());
         let rec_start_offset = self.header().rec_start_offset();
+        println!(
+            "next_slot_offset: {}, rec_start_offset: {}",
+            next_slot_offset, rec_start_offset
+        );
         rec_start_offset as usize - next_slot_offset
     }
 
@@ -296,21 +300,17 @@ impl<'a> HeapPage<'a> {
     }
 
     pub fn get_value(&self, slot_id: u16) -> Option<&[u8]> {
-        if slot_id < self.header().active_slot_count() {
-            if let Some(slot) = self.slot(slot_id) {
-                if slot.is_valid() {
-                    trace!(
-                        "[Get] Slot {}, offset: {}, size: {}",
-                        slot_id,
-                        slot.offset(),
-                        slot.size()
-                    );
-                    let offset = slot.offset() as usize;
-                    let size = slot.size() as usize;
-                    Some(&self.page[offset..offset + size])
-                } else {
-                    None
-                }
+        if let Some(slot) = self.slot(slot_id) {
+            if slot.is_valid() {
+                trace!(
+                    "[Get] Slot {}, offset: {}, size: {}",
+                    slot_id,
+                    slot.offset(),
+                    slot.size()
+                );
+                let offset = slot.offset() as usize;
+                let size = slot.size() as usize;
+                Some(&self.page[offset..offset + size])
             } else {
                 None
             }
@@ -320,30 +320,46 @@ impl<'a> HeapPage<'a> {
     }
 
     pub fn delete_value(&mut self, slot_id: u16) -> Option<()> {
-        if slot_id < self.header().active_slot_count() {
-            if let Some(mut slot) = self.slot(slot_id) {
-                if slot.is_valid() {
-                    trace!(
-                        "[Delete] Slot {}, offset: {}, size: {}",
-                        slot_id,
-                        slot.offset(),
-                        slot.size()
-                    );
-                    slot.set_valid(false);
-                    self.update_slot(slot_id, &slot);
-                    let shift_start_offset = slot.offset();
-                    let shift_size = slot.size();
-                    self.shift_recs(shift_start_offset, shift_size);
-                    Some(())
-                } else {
-                    None
-                }
+        if let Some(mut slot) = self.slot(slot_id) {
+            if slot.is_valid() {
+                trace!(
+                    "[Delete] Slot {}, offset: {}, size: {}",
+                    slot_id,
+                    slot.offset(),
+                    slot.size()
+                );
+                slot.set_valid(false);
+                self.update_slot(slot_id, &slot);
+                let shift_start_offset = slot.offset();
+                let shift_size = slot.size();
+                self.shift_recs(shift_start_offset, shift_size);
+                Some(())
             } else {
                 None
             }
         } else {
             None
         }
+    }
+
+    #[cfg(test)]
+    pub fn get_all_valid_records(&self) -> Vec<(u16, &[u8])> {
+        let mut records = vec![];
+        for slot_id in 0..self.header().active_slot_count() {
+            if let Some(rec) = self.get_value(slot_id) {
+                records.push((slot_id, rec));
+            }
+        }
+        records
+    }
+}
+
+#[cfg(any(test, debug_assertions))]
+impl HeapPage<'_> {
+    pub fn check_slot_offset_and_rec_start_offset(&self) {
+        let slot_offset = HeapPage::slot_offset(self.header().active_slot_count());
+        let rec_start_offset = self.header().rec_start_offset();
+        assert!(slot_offset <= rec_start_offset as usize);
     }
 }
 
@@ -357,7 +373,7 @@ mod tests {
     fn test_heap_page_simple() {
         init_test_logger();
 
-        let mut page = Page::new();
+        let mut page = Page::new_empty();
         HeapPage::init(&mut page);
         let mut heap_page = HeapPage::new(&mut page);
 
@@ -390,7 +406,7 @@ mod tests {
     fn test_heap_page_reuse_slot() {
         init_test_logger();
 
-        let mut page = Page::new();
+        let mut page = Page::new_empty();
         HeapPage::init(&mut page);
         let mut heap_page = HeapPage::new(&mut page);
 
@@ -432,7 +448,7 @@ mod tests {
     fn test_heap_page_no_space() {
         init_test_logger();
 
-        let mut page = Page::new();
+        let mut page = Page::new_empty();
         HeapPage::init(&mut page);
         let mut heap_page = HeapPage::new(&mut page);
 

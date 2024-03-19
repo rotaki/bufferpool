@@ -8,5 +8,6 @@
 pub trait EvictionPolicy {
     fn choose_victim(&mut self) -> usize;
     fn reset(&mut self, index: usize);
+    fn reset_all(&mut self);
     fn update(&mut self, index: usize);
 }

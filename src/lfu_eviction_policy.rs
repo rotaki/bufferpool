@@ -38,6 +38,12 @@ impl EvictionPolicy for LFUEvictionPolicy {
         self.frequency[index] = 0;
     }
 
+    fn reset_all(&mut self) {
+        for f in self.frequency.iter_mut() {
+            *f = 0;
+        }
+    }
+
     fn update(&mut self, index: usize) {
         self.frequency[index] += 1;
     }

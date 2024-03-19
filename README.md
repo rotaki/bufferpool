@@ -11,4 +11,7 @@
 * [] Add pointer swizzling
 
 ## Foster B-Tree
-* [] Add Foster B-tree
+* [] Add Foster B-tree Page
+
+## Add Logging
+* [] Add log buffer with append and flush capabilities
