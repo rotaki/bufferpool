@@ -3,7 +3,7 @@
  * https://github.com/jedisct1/rust-sieve-cache/blob/master/src/lib.rs
  */
 
-use crate::eviction_policy::EvictionPolicy;
+use super::eviction_policy::EvictionPolicy;
 use std::{
     collections::{BinaryHeap, HashMap},
     ptr::NonNull,

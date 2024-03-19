@@ -1,6 +1,6 @@
 use rand::Rng;
 
-use crate::eviction_policy::EvictionPolicy;
+use super::eviction_policy::EvictionPolicy;
 
 // Very simple LFU eviction policy
 pub struct LFUEvictionPolicy {

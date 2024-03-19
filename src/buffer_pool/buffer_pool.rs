@@ -1,10 +1,12 @@
 use log::debug;
 
-use crate::{
+use super::{
     buffer_frame::{BufferFrame, FrameReadGuard, FrameWriteGuard},
-    eviction_policy::EvictionPolicy,
+    EvictionPolicy,
+};
+
+use crate::{
     file_manager::{FMStatus, FileManager},
-    lfu_eviction_policy::LFUEvictionPolicy,
     page::{Page, PageId},
     utils::init_logger,
 };
@@ -398,8 +400,8 @@ unsafe impl<T: EvictionPolicy> Sync for BufferPool<T> {}
 
 #[cfg(test)]
 mod tests {
+    use super::super::LFUEvictionPolicy;
     use super::*;
-    use core::num;
     use std::thread;
     use tempfile::TempDir;
 

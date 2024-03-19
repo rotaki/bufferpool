@@ -1,4 +1,6 @@
-use crate::{buffer_pool::PageKey, page::Page, rwlatch::RwLatch};
+use super::buffer_pool::PageKey;
+use crate::page::Page;
+use crate::rwlatch::RwLatch;
 use std::{
     cell::UnsafeCell,
     ops::{Deref, DerefMut},
