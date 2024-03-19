@@ -34,6 +34,12 @@ impl EvictionPolicy {
         self.frequency[index] = 0;
     }
 
+    pub fn reset_all(&mut self) {
+        for f in self.frequency.iter_mut() {
+            *f = 0;
+        }
+    }
+
     pub fn update(&mut self, index: usize) {
         self.frequency[index] += 1;
     }

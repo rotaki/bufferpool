@@ -1,15 +1,14 @@
-use crate::{buffer_pool::ContainerPageKey, page::Page, rwlatch::RwLatch};
+use crate::{buffer_pool::PageKey, page::Page, rwlatch::RwLatch};
 use std::{
     cell::UnsafeCell,
     ops::{Deref, DerefMut},
-    sync::atomic::AtomicBool,
-    sync::atomic::Ordering,
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 pub struct BufferFrame {
     pub latch: RwLatch,
-    pub is_dirty: UnsafeCell<bool>,
-    pub key: UnsafeCell<Option<ContainerPageKey>>,
+    pub is_dirty: AtomicBool,
+    pub key: UnsafeCell<Option<PageKey>>,
     pub page: UnsafeCell<Page>,
 }
 
@@ -17,9 +16,9 @@ impl Default for BufferFrame {
     fn default() -> Self {
         BufferFrame {
             latch: RwLatch::default(),
-            is_dirty: UnsafeCell::new(false),
+            is_dirty: AtomicBool::new(false),
             key: UnsafeCell::new(None),
-            page: UnsafeCell::new(Page::new()),
+            page: UnsafeCell::new(Page::new_empty()),
         }
     }
 }
@@ -40,10 +39,10 @@ impl BufferFrame {
         }
     }
 
-    pub fn write(&self) -> FrameWriteGuard {
+    pub fn write(&self, make_dirty: bool) -> FrameWriteGuard {
         self.latch.exclusive();
-        unsafe {
-            *self.is_dirty.get() = true;
+        if make_dirty {
+            self.is_dirty.store(true, Ordering::Release);
         }
         FrameWriteGuard {
             downgraded: AtomicBool::new(false),
@@ -51,10 +50,10 @@ impl BufferFrame {
         }
     }
 
-    pub fn try_write(&self) -> Option<FrameWriteGuard> {
+    pub fn try_write(&self, make_dirty: bool) -> Option<FrameWriteGuard> {
         if self.latch.try_exclusive() {
-            unsafe {
-                *self.is_dirty.get() = true;
+            if make_dirty {
+                self.is_dirty.store(true, Ordering::Release);
             }
             Some(FrameWriteGuard {
                 downgraded: AtomicBool::new(false),
@@ -71,14 +70,13 @@ pub struct FrameReadGuard<'a> {
 }
 
 impl<'a> FrameReadGuard<'a> {
-    pub fn key(&self) -> &Option<ContainerPageKey> {
+    pub fn key(&self) -> &Option<PageKey> {
         // SAFETY: This is safe because the latch is held shared.
         unsafe { &*self.buffer_frame.key.get() }
     }
 
-    pub fn is_dirty(&self) -> bool {
-        // SAFETY: This is safe because the latch is held shared.
-        unsafe { *self.buffer_frame.is_dirty.get() }
+    pub fn dirty(&self) -> &AtomicBool {
+        &self.buffer_frame.is_dirty
     }
 }
 
@@ -103,14 +101,13 @@ pub struct FrameWriteGuard<'a> {
 }
 
 impl<'a> FrameWriteGuard<'a> {
-    pub fn key(&self) -> &mut Option<ContainerPageKey> {
+    pub fn key(&self) -> &mut Option<PageKey> {
         // SAFETY: This is safe because the latch is held exclusively.
         unsafe { &mut *self.buffer_frame.key.get() }
     }
 
-    pub fn is_dirty(&self) -> &mut bool {
-        // SAFETY: This is safe because the latch is held exclusively.
-        unsafe { &mut *self.buffer_frame.is_dirty.get() }
+    pub fn dirty(&self) -> &AtomicBool {
+        &self.buffer_frame.is_dirty
     }
 
     pub fn downgrade(self) -> FrameReadGuard<'a> {
@@ -119,6 +116,11 @@ impl<'a> FrameWriteGuard<'a> {
         FrameReadGuard {
             buffer_frame: self.buffer_frame,
         }
+    }
+
+    pub fn clear(&self) {
+        self.buffer_frame.is_dirty.store(false, Ordering::Release);
+        self.key().take();
     }
 }
 

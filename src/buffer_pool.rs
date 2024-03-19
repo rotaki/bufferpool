@@ -3,29 +3,85 @@ use log::debug;
 use crate::{
     buffer_frame::{BufferFrame, FrameReadGuard, FrameWriteGuard},
     eviction_policy::EvictionPolicy,
-    file_manager::FileManager,
-    page::Page,
+    file_manager::{FMStatus, FileManager},
+    page::{Page, PageId},
     utils::init_logger,
 };
+
 use std::{
     cell::UnsafeCell,
-    collections::{hash_map::Entry, HashMap},
+    collections::HashMap,
     path::PathBuf,
     sync::atomic::{AtomicBool, Ordering},
 };
 
+pub type DatabaseId = u16;
+pub type ContainerId = u16;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ContainerPageKey {
-    container_id: usize,
-    page_id: usize,
+pub struct ContainerKey {
+    db_id: DatabaseId,
+    c_id: ContainerId,
 }
 
-impl ContainerPageKey {
-    pub fn new(container_id: usize, page_id: usize) -> Self {
-        ContainerPageKey {
-            container_id,
-            page_id,
+impl ContainerKey {
+    pub fn new(db_id: DatabaseId, c_id: ContainerId) -> Self {
+        ContainerKey { db_id, c_id }
+    }
+}
+
+impl std::fmt::Display for ContainerKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "(db:{}, c:{})", self.db_id, self.c_id)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PageKey {
+    c_key: ContainerKey,
+    page_id: PageId,
+}
+
+impl PageKey {
+    pub fn new(c_key: ContainerKey, page_id: PageId) -> Self {
+        PageKey { c_key, page_id }
+    }
+}
+
+impl std::fmt::Display for PageKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "({}, p:{})", self.c_key, self.page_id)
+    }
+}
+
+#[derive(Debug)]
+pub enum BPStatus {
+    FileManagerNotFound,
+    FileManagerError(FMStatus),
+    PageNotFound,
+    FrameLatchGrantFailed,
+}
+
+impl From<FMStatus> for BPStatus {
+    fn from(s: FMStatus) -> Self {
+        BPStatus::FileManagerError(s)
+    }
+}
+
+impl std::fmt::Display for BPStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BPStatus::FileManagerNotFound => write!(f, "[BP] File manager not found"),
+            BPStatus::FileManagerError(s) => s.fmt(f),
+            BPStatus::PageNotFound => write!(f, "[BP] Page not found"),
+            BPStatus::FrameLatchGrantFailed => write!(f, "[BP] Frame latch grant failed"),
         }
+    }
+}
+
+impl From<BPStatus> for String {
+    fn from(s: BPStatus) -> Self {
+        s.to_string()
     }
 }
 
@@ -33,37 +89,46 @@ pub struct BufferPool {
     path: PathBuf,
     latch: AtomicBool,
     frames: UnsafeCell<Vec<BufferFrame>>,
-    id_to_index: UnsafeCell<HashMap<ContainerPageKey, usize>>, // (container_id, page_id) -> index
-    container_to_file: UnsafeCell<HashMap<usize, FileManager>>,
+    id_to_index: UnsafeCell<HashMap<PageKey, usize>>, // (c_id, page_id) -> index
+    container_to_file: UnsafeCell<HashMap<ContainerKey, FileManager>>,
     eviction_policy: UnsafeCell<EvictionPolicy>,
 }
 
 impl BufferPool {
-    pub fn new<P: AsRef<std::path::Path>>(path: P, num_pages: usize) -> Self {
+    pub fn new<P: AsRef<std::path::Path>>(path: P, num_frames: usize) -> Result<Self, BPStatus> {
         init_logger();
-        debug!("Buffer pool created: num_pages: {}", num_pages);
+        debug!("Buffer pool created: num_frames: {}", num_frames);
 
-        // Identify all the files in the directory. Parse the file name to a number.
+        // Identify all the directories. A directory corresponds to a database.
+        // A file in the directory corresponds to a container.
         // Create a FileManager for each file and store it in the container.
         let mut container = HashMap::new();
         for entry in std::fs::read_dir(&path).unwrap() {
             let entry = entry.unwrap();
             let path = entry.path();
-            let file_name = path.file_name().unwrap().to_str().unwrap();
-            let file_id = file_name.parse::<usize>().unwrap();
-            let file_manager = FileManager::new(path);
-            container.insert(file_id, file_manager);
+            if path.is_dir() {
+                let db_id = path.file_name().unwrap().to_str().unwrap().parse().unwrap();
+                for entry in std::fs::read_dir(&path).unwrap() {
+                    let entry = entry.unwrap();
+                    let path = entry.path();
+                    if path.is_file() {
+                        let c_id = path.file_name().unwrap().to_str().unwrap().parse().unwrap();
+                        let fm = FileManager::new(&path)?;
+                        container.insert(ContainerKey::new(db_id, c_id), fm);
+                    }
+                }
+            }
         }
 
-        let frames = (0..num_pages).map(|_| BufferFrame::default()).collect();
-        BufferPool {
+        let frames = (0..num_frames).map(|_| BufferFrame::default()).collect();
+        Ok(BufferPool {
             path: path.as_ref().to_path_buf(),
             latch: AtomicBool::new(false),
             id_to_index: UnsafeCell::new(HashMap::new()),
             frames: UnsafeCell::new(frames),
             container_to_file: UnsafeCell::new(container),
-            eviction_policy: UnsafeCell::new(EvictionPolicy::new(num_pages)),
-        }
+            eviction_policy: UnsafeCell::new(EvictionPolicy::new(num_frames)),
+        })
     }
 
     fn latch(&self) {
@@ -77,181 +142,209 @@ impl BufferPool {
         self.latch.store(false, Ordering::Release);
     }
 
-    pub fn create_new_page<T: Fn(&mut Page)>(
+    // Invariant: The latch must be held when calling this function
+    fn handle_page_fault(&self, key: PageKey) -> Result<FrameWriteGuard, BPStatus> {
+        let pages = unsafe { &mut *self.frames.get() };
+        let id_to_index = unsafe { &mut *self.id_to_index.get() };
+        let container_to_file = unsafe { &mut *self.container_to_file.get() };
+        let eviction_policy = unsafe { &mut *self.eviction_policy.get() };
+
+        let index = eviction_policy.choose_victim();
+        let mut guard = pages[index]
+            .try_write(false)
+            .ok_or(BPStatus::FrameLatchGrantFailed)?;
+
+        // Evict old page if necessary
+        if let Some(old_key) = guard.key() {
+            if guard.dirty().swap(false, Ordering::Acquire) {
+                let file = container_to_file
+                    .get(&old_key.c_key)
+                    .ok_or(BPStatus::FileManagerNotFound)?;
+                file.write_page(old_key.page_id, &*guard)?;
+            }
+            id_to_index.remove(&old_key);
+            debug!("Page evicted: {}", old_key);
+        }
+
+        // Load new page
+        let file = container_to_file
+            .get(&key.c_key)
+            .ok_or(BPStatus::FileManagerNotFound)?;
+        let page = file.read_page(key.page_id)?;
+        guard.copy(&page);
+        id_to_index.insert(key, index);
+        *guard.key() = Some(key);
+
+        eviction_policy.reset(index);
+        eviction_policy.update(index);
+
+        debug!("Page loaded: key: {}", key);
+        Ok(guard)
+    }
+
+    pub fn create_new_page<T: Fn(&mut Page)>(&self, c_key: ContainerKey, init: &T) -> PageKey {
+        self.latch();
+
+        let fm = (unsafe { &mut *self.container_to_file.get() })
+            .entry(c_key)
+            .or_insert_with(|| {
+                FileManager::new(
+                    &self
+                        .path
+                        .join(c_key.db_id.to_string())
+                        .join(c_key.c_id.to_string()),
+                )
+                .unwrap()
+            });
+
+        self.unlatch();
+
+        let page_id = fm.get_new_page_id();
+        let mut page = Page::new(page_id);
+        init(&mut page);
+        fm.write_page(page_id, &page).unwrap();
+        let p_key = PageKey::new(c_key, page_id);
+        debug!("New page created: {}", p_key);
+        p_key
+    }
+
+    pub fn get_page_for_write(&self, key: PageKey) -> Result<FrameWriteGuard, BPStatus> {
+        self.latch();
+
+        let result = match unsafe { &mut *self.id_to_index.get() }.get(&key) {
+            Some(&index) => {
+                let guard = (unsafe { &mut *self.frames.get() })[index].try_write(true);
+                if guard.is_some() {
+                    unsafe { &mut *self.eviction_policy.get() }.update(index);
+                }
+                guard.ok_or(BPStatus::FrameLatchGrantFailed)
+            }
+            None => {
+                let res = self.handle_page_fault(key);
+                // If guard is ok, mark the page as dirty
+                if let Ok(ref guard) = res {
+                    guard.dirty().store(true, Ordering::Release);
+                }
+                res
+            }
+        };
+        self.unlatch();
+        result
+    }
+
+    pub fn get_last_page_for_write(
         &self,
-        container_id: usize,
-        init: &T,
-    ) -> ContainerPageKey {
-        // Reading and writing to the following data structures must be done while holding the latch
-        // on the buffer pool.
-        let container_to_file = unsafe { &mut *self.container_to_file.get() };
-
+        c_key: ContainerKey,
+    ) -> Result<FrameWriteGuard, BPStatus> {
         self.latch();
 
-        match container_to_file.entry(container_id) {
-            Entry::Occupied(mut entry) => {
-                let file_manager = entry.get_mut();
-                self.unlatch();
+        let fm = if let Some(fm) = (unsafe { &mut *self.container_to_file.get() }).get(&c_key) {
+            fm
+        } else {
+            self.unlatch();
+            return Err(BPStatus::FileManagerNotFound);
+        };
 
-                let page_id = file_manager.get_new_page_id();
-                let mut page = Page::new();
-                init(&mut page);
-                // TODO: Write log
-                file_manager.write_page(page_id, &page);
-                debug!(
-                    "New page created: c_id: {}, p_id: {}",
-                    container_id, page_id
-                );
-                ContainerPageKey::new(container_id, page_id)
-            }
-            Entry::Vacant(entry) => {
-                let file_manager = FileManager::new(self.path.join(container_id.to_string()));
-                let file_manager = entry.insert(file_manager);
-                self.unlatch();
-
-                let page_id = file_manager.get_new_page_id();
-                let mut page = Page::new();
-                init(&mut page);
-                // TODO: Write log
-                file_manager.write_page(page_id, &page);
-                debug!(
-                    "New page created: c_id: {}, p_id: {}",
-                    container_id, page_id
-                );
-                ContainerPageKey::new(container_id, page_id)
-            }
+        let num_pages = fm.get_num_pages();
+        if num_pages == 0 {
+            panic!("Create at least one page before calling this function")
         }
+        let page_id = num_pages - 1;
+        let key = PageKey::new(c_key, page_id);
+        let result = match unsafe { &mut *self.id_to_index.get() }.get(&key) {
+            Some(&index) => {
+                let guard = (unsafe { &mut *self.frames.get() })[index].try_write(true);
+                if guard.is_some() {
+                    unsafe { &mut *self.eviction_policy.get() }.update(index);
+                }
+                guard.ok_or(BPStatus::FrameLatchGrantFailed)
+            }
+            None => {
+                let res = self.handle_page_fault(key);
+                // If guard is ok, mark the page as dirty
+                if let Ok(ref guard) = res {
+                    guard.dirty().store(true, Ordering::Release);
+                }
+                res
+            }
+        };
+        self.unlatch();
+        result
     }
 
-    pub fn get_page_for_write(&self, key: ContainerPageKey) -> Option<FrameWriteGuard> {
-        // Reading and writing to the following data structures must be done while holding the latch
-        // on the buffer pool.
-        let pages = unsafe { &mut *self.frames.get() };
-        let id_to_index = unsafe { &mut *self.id_to_index.get() };
-        let container_to_file = unsafe { &mut *self.container_to_file.get() };
-        let eviction_policy = unsafe { &mut *self.eviction_policy.get() };
-
+    pub fn get_page_for_read(&self, key: PageKey) -> Result<FrameReadGuard, BPStatus> {
         self.latch();
 
-        // Check if the page already exists
-        if let Some(index) = id_to_index.get(&key).copied() {
-            let res = pages[index].try_write();
-
-            eviction_policy.update(index);
-
-            self.unlatch();
-            res
-        } else {
-            let index = eviction_policy.choose_victim(); // Victim frame index
-
-            if let Some(mut guard) = pages[index].try_write() {
-                // Always get the frame latch before modifying the id_to_index map
-                let old_key = guard.key();
-                let is_dirty = guard.is_dirty();
-                if let Some(old_key_inner) = old_key {
-                    // If the page is dirty, write it to disk
-                    if *is_dirty {
-                        let file = container_to_file
-                            .get(&old_key_inner.container_id)
-                            .expect("file not found");
-                        file.write_page(old_key_inner.page_id, &*guard);
-                    }
-                    id_to_index.remove(&old_key_inner);
-                    debug!(
-                        "Page evicted: c_id: {}, p_id: {}",
-                        old_key_inner.container_id, old_key_inner.page_id
-                    );
+        let result = match unsafe { &mut *self.id_to_index.get() }.get(&key) {
+            Some(&index) => {
+                let guard = (unsafe { &mut *self.frames.get() })[index].try_read();
+                if guard.is_some() {
+                    unsafe { &mut *self.eviction_policy.get() }.update(index);
                 }
-                id_to_index.insert(key, index);
-                *old_key = Some(key);
-                *is_dirty = false;
-
-                eviction_policy.reset(index);
-                eviction_policy.update(index);
-
-                let file = container_to_file
-                    .get(&key.container_id)
-                    .expect("file not found");
-                self.unlatch();
-
-                let page = file.read_page(key.page_id);
-                guard.copy(&page);
-                debug!(
-                    "Page loaded: c_id: {}, p_id: {}",
-                    key.container_id, key.page_id
-                );
-                Some(guard)
-            } else {
-                self.unlatch();
-                None
+                guard.ok_or(BPStatus::FrameLatchGrantFailed)
             }
-        }
+            None => self.handle_page_fault(key).map(|guard| guard.downgrade()),
+        };
+        self.unlatch();
+        result
     }
 
-    pub fn get_page_for_read(&self, key: ContainerPageKey) -> Option<FrameReadGuard> {
-        // Modification to the following data structures must be done while holding the latch
-        // on the buffer pool.
-
-        let pages = unsafe { &mut *self.frames.get() };
-        let id_to_index = unsafe { &mut *self.id_to_index.get() };
-        let container_to_file = unsafe { &mut *self.container_to_file.get() };
-        let eviction_policy = unsafe { &mut *self.eviction_policy.get() };
-
+    pub fn flush_all(&self) -> Result<(), BPStatus> {
         self.latch();
 
-        // Check if the page already exists
-        if let Some(index) = id_to_index.get(&key).copied() {
-            let res = pages[index].try_read();
-
-            eviction_policy.update(index);
-
-            self.unlatch();
-            res
-        } else {
-            let index = eviction_policy.choose_victim();
-
-            if let Some(mut guard) = pages[index].try_write() {
-                // Always get the frame latch before modifying the id_to_index map
-                let old_key = guard.key();
-                let is_dirty = guard.is_dirty();
-                if let Some(old_key_inner) = old_key {
-                    // If the page is dirty, write it to disk
-                    if *is_dirty {
-                        let file = container_to_file
-                            .get(&old_key_inner.container_id)
-                            .expect("file not found");
-                        file.write_page(old_key_inner.page_id, &*guard);
-                    }
-                    id_to_index.remove(&old_key_inner);
-                    debug!(
-                        "Page evicted: c_id: {}, p_id: {}",
-                        old_key_inner.container_id, old_key_inner.page_id
-                    );
+        for frame in unsafe { &*self.frames.get() }.iter() {
+            let frame = loop {
+                if let Some(guard) = frame.try_read() {
+                    break guard;
                 }
-                id_to_index.insert(key, index);
-                *old_key = Some(key);
-                *is_dirty = false;
-
-                eviction_policy.reset(index);
-                eviction_policy.update(index);
-
-                let file = container_to_file
-                    .get(&key.container_id)
-                    .expect("file not found");
-                self.unlatch();
-
-                let page = file.read_page(key.page_id);
-                guard.copy(&page);
-                debug!(
-                    "Page loaded: c_id: {}, p_id: {}",
-                    key.container_id, key.page_id
-                );
-                Some(guard.downgrade())
-            } else {
-                self.unlatch();
-                None
+                // spin
+                std::hint::spin_loop();
+            };
+            if frame.dirty().swap(false, Ordering::Acquire) {
+                // swap is required to avoid concurrent flushes
+                let key = frame.key().unwrap();
+                if let Some(file) = (unsafe { &mut *self.container_to_file.get() }).get(&key.c_key)
+                {
+                    file.write_page(key.page_id, &*frame)?;
+                } else {
+                    self.unlatch();
+                    return Err(BPStatus::FileManagerNotFound);
+                }
             }
         }
+
+        self.unlatch();
+        Ok(())
+    }
+
+    /// Reset the buffer pool to its initial state.
+    /// This will not flush the dirty pages to disk.
+    /// This also removes all the files in disk.
+    pub fn reset(&self) {
+        self.latch();
+
+        unsafe { &mut *self.id_to_index.get() }.clear();
+        unsafe { &mut *self.container_to_file.get() }.clear();
+        unsafe { &mut *self.eviction_policy.get() }.reset_all();
+
+        for frame in unsafe { &mut *self.frames.get() }.iter_mut() {
+            let mut frame = loop {
+                if let Some(guard) = frame.try_write(false) {
+                    break guard;
+                }
+                // spin
+                std::hint::spin_loop();
+            };
+            frame.clear();
+        }
+
+        for entry in std::fs::read_dir(&self.path).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            std::fs::remove_file(path).unwrap();
+        }
+
+        self.unlatch();
     }
 }
 
@@ -265,6 +358,7 @@ impl BufferPool {
         }
     }
 
+    // Invariant: id_to_index contains all the pages in the buffer pool
     pub fn check_id_to_index(&self) {
         let id_to_index = unsafe { &*self.id_to_index.get() };
         let mut index_to_id = HashMap::new();
@@ -282,7 +376,17 @@ impl BufferPool {
         // println!("id_to_index: {:?}", id_to_index);
     }
 
-    pub fn is_in_buffer_pool(&self, key: ContainerPageKey) -> bool {
+    pub fn check_frame_id_and_page_id_match(&self) {
+        let frames = unsafe { &*self.frames.get() };
+        for frame in frames.iter() {
+            if let Some(key) = unsafe { *frame.key.get() } {
+                let page_id = unsafe { &*frame.page.get() }.get_id();
+                assert_eq!(key.page_id, page_id);
+            }
+        }
+    }
+
+    pub fn is_in_buffer_pool(&self, key: PageKey) -> bool {
         let id_to_index = unsafe { &*self.id_to_index.get() };
         id_to_index.contains_key(&key)
     }
@@ -299,9 +403,13 @@ mod tests {
     #[test]
     fn test_bp_and_frame_latch() {
         let temp_dir = TempDir::new().unwrap();
+        let db_id = 0;
+        // create a directory for the database
+        std::fs::create_dir(temp_dir.path().join(db_id.to_string())).unwrap();
         {
-            let bp = BufferPool::new(temp_dir.path(), 10);
-            let key = bp.create_new_page(0, &|_: &mut Page| {});
+            let bp = BufferPool::new(temp_dir.path(), 10).unwrap();
+            let c_key = ContainerKey::new(db_id, 0);
+            let key = bp.create_new_page(c_key, &|_: &mut Page| {});
             let num_threads = 3;
             let num_iterations = 80; // Note: u8 max value is 255
             thread::scope(|s| {
@@ -309,7 +417,7 @@ mod tests {
                     s.spawn(|| {
                         for _ in 0..num_iterations {
                             loop {
-                                if let Some(mut guard) = bp.get_page_for_write(key) {
+                                if let Ok(mut guard) = bp.get_page_for_write(key) {
                                     guard[0] += 1;
                                     break;
                                 } else {
@@ -332,12 +440,15 @@ mod tests {
 
     #[test]
     fn test_bp_write_back_simple() {
-        let tempdir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let db_id = 0;
+        // create a directory for the database
+        std::fs::create_dir(temp_dir.path().join(db_id.to_string())).unwrap();
         {
-            let bp = BufferPool::new(tempdir.path(), 1);
-            let container_id = 0;
+            let bp = BufferPool::new(temp_dir.path(), 1).unwrap();
+            let c_key = ContainerKey::new(db_id, 0);
             let key1 = {
-                let key = bp.create_new_page(container_id, &|page: &mut Page| {
+                let key = bp.create_new_page(c_key, &|page: &mut Page| {
                     page[0] = 0;
                 });
                 let mut guard = bp.get_page_for_write(key).unwrap();
@@ -346,7 +457,7 @@ mod tests {
                 key
             };
             let key2 = {
-                let new_key = bp.create_new_page(container_id, &|page: &mut Page| {
+                let new_key = bp.create_new_page(c_key, &|page: &mut Page| {
                     page[0] = 0;
                 });
                 let mut guard = bp.get_page_for_write(new_key).unwrap();
@@ -371,12 +482,15 @@ mod tests {
     #[test]
     fn test_bp_write_back_many() {
         let temp_dir = TempDir::new().unwrap();
+        let db_id = 0;
+        // create a directory for the database
+        std::fs::create_dir(temp_dir.path().join(db_id.to_string())).unwrap();
         {
             let mut keys = Vec::new();
-            let bp = BufferPool::new(temp_dir.path(), 1);
-            let container_id = 0;
+            let bp = BufferPool::new(temp_dir.path(), 1).unwrap();
+            let c_key = ContainerKey::new(db_id, 0);
             for i in 0..100 {
-                let key = bp.create_new_page(container_id, &|page: &mut Page| {
+                let key = bp.create_new_page(c_key, &|page: &mut Page| {
                     page[0] = 0;
                 });
                 let mut guard = bp.get_page_for_write(key).unwrap();
@@ -391,5 +505,11 @@ mod tests {
                 assert_eq!(guard[0], i as u8);
             }
         }
+    }
+
+    #[test]
+    fn test_bp_no_write_back_if_not_dirty() {
+        // TODO: Implement a mock file manager to check if write_page is called
+        // when replacing a non-dirty page with a new page.
     }
 }

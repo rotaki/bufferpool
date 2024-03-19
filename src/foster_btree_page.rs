@@ -1071,7 +1071,7 @@ mod tests {
     /*
     #[test]
     fn test_init() {
-        let mut page = Page::new();
+        let mut page = Page::new_empty();
         let low_fence = "a".as_bytes();
         let high_fence = "d".as_bytes();
         FosterBtreePage::init(&mut page);
@@ -1090,7 +1090,7 @@ mod tests {
 
     #[test]
     fn test_insert() {
-        let mut page = Page::new();
+        let mut page = Page::new_empty();
         let low_fence = "b".as_bytes();
         let high_fence = "d".as_bytes();
         FosterBtreePage::init(&mut page);
@@ -1184,7 +1184,7 @@ mod tests {
     fn test_lower_bound_and_find() {
         {
             // Non-left-most and non-right-most page
-            let mut page = Page::new();
+            let mut page = Page::new_empty();
             let low_fence = "b".as_bytes();
             let high_fence = "d".as_bytes();
             FosterBtreePage::init(&mut page);
@@ -1227,7 +1227,7 @@ mod tests {
         }
         {
             // Root page
-            let mut page = Page::new();
+            let mut page = Page::new_empty();
             FosterBtreePage::init_as_root(&mut page);
             let mut fbt_page = FosterBtreePage::new(&mut page);
             fbt_page.check_fence_slots_exists();
@@ -1264,7 +1264,7 @@ mod tests {
 
         {
             // Left most page
-            let mut page = Page::new();
+            let mut page = Page::new_empty();
             let low_fence = "".as_bytes();
             let high_fence = "d".as_bytes();
             FosterBtreePage::init(&mut page);
@@ -1308,7 +1308,7 @@ mod tests {
 
         {
             // Right most page
-            let mut page = Page::new();
+            let mut page = Page::new_empty();
             let low_fence = "b".as_bytes();
             let high_fence = "".as_bytes();
             FosterBtreePage::init(&mut page);
@@ -1353,7 +1353,7 @@ mod tests {
 
     #[test]
     fn test_remove_and_compact_space() {
-        let mut page = Page::new();
+        let mut page = Page::new_empty();
         let low_fence = "b".as_bytes();
         let high_fence = "d".as_bytes();
         FosterBtreePage::init(&mut page);

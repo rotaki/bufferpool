@@ -3,10 +3,18 @@ use std::ops::{Deref, DerefMut};
 pub const PAGE_SIZE: usize = 4096;
 const BASE_PAGE_HEADER_SIZE: usize = 12;
 
+pub type PageId = u32;
+
 pub struct Page([u8; PAGE_SIZE]);
 
 impl Page {
-    pub fn new() -> Self {
+    pub fn new(page_id: PageId) -> Self {
+        let mut page = Page([0; PAGE_SIZE]);
+        page.set_id(page_id);
+        page
+    }
+
+    pub fn new_empty() -> Self {
         Page([0; PAGE_SIZE])
     }
 
@@ -22,11 +30,11 @@ impl Page {
         BasePageHeader::from_bytes(&self.0[0..BASE_PAGE_HEADER_SIZE].try_into().unwrap())
     }
 
-    pub fn get_id(&self) -> u32 {
+    pub fn get_id(&self) -> PageId {
         self.base_header().id
     }
 
-    pub fn set_id(&mut self, id: u32) {
+    pub fn set_id(&mut self, id: PageId) {
         let mut header = self.base_header();
         header.id = id;
         self.0[0..BASE_PAGE_HEADER_SIZE].copy_from_slice(&header.to_bytes());
