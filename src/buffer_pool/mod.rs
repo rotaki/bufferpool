@@ -8,9 +8,10 @@ use eviction_policy::lfu_eviction_policy::LFUEvictionPolicy;
 
 use buffer_pool::BufferPool as TempBP;
 pub type BufferPool = TempBP<LFUEvictionPolicy>;
+pub type BufferPoolRef = std::sync::Arc<BufferPool>;
 
 pub mod prelude {
     pub use super::buffer_frame::{BufferFrame, FrameReadGuard, FrameWriteGuard};
     pub use super::buffer_pool::{BPStatus, ContainerKey, PageKey};
-    pub use super::BufferPool;
+    pub use super::{BufferPool, BufferPoolRef};
 }

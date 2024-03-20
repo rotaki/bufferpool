@@ -36,7 +36,6 @@ pub enum LogRecord<'a> {
     SysTxnAllocPage {
         txn_id: u64,
         page_id: u32,
-        temp_fence: &'a [u8],
     },
     SysTxnSplit {
         txn_id: u64,
@@ -60,5 +59,13 @@ impl LogRecord<'_> {
             } => vec![*page_id, *new_page_id],
             _ => vec![],
         }
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        bincode::serialize(self).unwrap()
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        bincode::deserialize(bytes).unwrap()
     }
 }

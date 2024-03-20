@@ -1,9 +1,10 @@
 use std::ops::{Deref, DerefMut};
 
-pub const PAGE_SIZE: usize = 4096;
-const BASE_PAGE_HEADER_SIZE: usize = 12;
+use crate::write_ahead_log::prelude::{Lsn, LsnSize};
 
+pub const PAGE_SIZE: usize = 4096;
 pub type PageId = u32;
+const BASE_PAGE_HEADER_SIZE: usize = 4 + LsnSize;
 
 pub struct Page([u8; PAGE_SIZE]);
 
@@ -11,7 +12,7 @@ impl Page {
     pub fn new(page_id: PageId) -> Self {
         let mut page = Page([0; PAGE_SIZE]);
         page.set_id(page_id);
-        page.set_lsn(0); // Nothing to flush
+        page.set_lsn(Lsn::new(0, 0));
         page
     }
 
@@ -41,11 +42,11 @@ impl Page {
         self.0[0..BASE_PAGE_HEADER_SIZE].copy_from_slice(&header.to_bytes());
     }
 
-    pub fn get_lsn(&self) -> u64 {
+    pub fn get_lsn(&self) -> Lsn {
         self.base_header().lsn
     }
 
-    pub fn set_lsn(&mut self, lsn: u64) {
+    pub fn set_lsn(&mut self, lsn: Lsn) {
         let mut header = self.base_header();
         header.lsn = lsn;
         self.0[0..BASE_PAGE_HEADER_SIZE].copy_from_slice(&header.to_bytes());
@@ -62,22 +63,22 @@ impl Page {
 
 struct BasePageHeader {
     id: u32,
-    lsn: u64,
+    lsn: Lsn,
 }
 
 impl BasePageHeader {
     fn from_bytes(bytes: &[u8; BASE_PAGE_HEADER_SIZE]) -> Self {
         let id = u32::from_be_bytes(bytes[0..4].try_into().unwrap());
-        let lsn = u64::from_be_bytes(bytes[4..12].try_into().unwrap());
+        let lsn = Lsn::from_bytes(&bytes[4..4 + LsnSize].try_into().unwrap());
         BasePageHeader { id, lsn }
     }
 
     fn to_bytes(&self) -> [u8; BASE_PAGE_HEADER_SIZE] {
         let id_bytes = self.id.to_be_bytes();
-        let lsn_bytes = self.lsn.to_be_bytes();
+        let lsn_bytes = self.lsn.to_bytes();
         let mut bytes = [0; BASE_PAGE_HEADER_SIZE];
         bytes[0..4].copy_from_slice(&id_bytes);
-        bytes[4..12].copy_from_slice(&lsn_bytes);
+        bytes[4..4 + LsnSize].copy_from_slice(&lsn_bytes);
         bytes
     }
 }

@@ -3,11 +3,10 @@ use std::sync::Arc;
 use crate::{
     buffer_pool::prelude::*,
     page::{Page, PageId},
+    write_ahead_log::{prelude::LogRecord, LogBufferRef},
 };
 
 use super::foster_btree_page::FosterBtreePage;
-
-type BufferPoolRef = Arc<BufferPool>;
 
 pub enum TreeStatus {
     Ok,
@@ -28,18 +27,37 @@ pub struct FosterBtree {
     pub c_key: ContainerKey,
     pub root_key: PageKey,
     pub bp: BufferPoolRef,
+    pub wal_buffer: LogBufferRef,
 }
 
 impl FosterBtree {
-    pub fn create_new(c_key: ContainerKey, bp: BufferPoolRef) -> Self {
+    pub fn create_new(
+        txn_id: u64,
+        c_key: ContainerKey,
+        bp: BufferPoolRef,
+        wal_buffer: LogBufferRef,
+    ) -> Self {
         // Create a root page
-        let mut page = bp.create_new_page_for_write(c_key).unwrap();
-        FosterBtreePage::init_as_root(&mut *page);
-        let root_key = page.key().unwrap();
+        let root_key = {
+            let mut root_page = bp.create_new_page_for_write(c_key).unwrap();
+            FosterBtreePage::init_as_root(&mut *root_page);
+            let root_key = root_page.key().unwrap();
+            // Write log
+            {
+                let log_record = LogRecord::SysTxnAllocPage {
+                    txn_id,
+                    page_id: root_key.page_id,
+                };
+                let lsn = wal_buffer.append_log(&log_record.to_bytes());
+                root_page.set_lsn(lsn);
+            }
+            root_key
+        };
         FosterBtree {
             c_key,
             root_key,
             bp: bp.clone(),
+            wal_buffer,
         }
     }
 

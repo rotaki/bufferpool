@@ -23,8 +23,8 @@ pub type ContainerId = u16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ContainerKey {
-    db_id: DatabaseId,
-    c_id: ContainerId,
+    pub db_id: DatabaseId,
+    pub c_id: ContainerId,
 }
 
 impl ContainerKey {
@@ -41,8 +41,8 @@ impl std::fmt::Display for ContainerKey {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PageKey {
-    c_key: ContainerKey,
-    page_id: PageId,
+    pub c_key: ContainerKey,
+    pub page_id: PageId,
 }
 
 impl PageKey {
