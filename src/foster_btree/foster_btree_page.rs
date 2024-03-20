@@ -451,7 +451,7 @@ impl<'a> FosterBtreePage<'a> {
     // If all keys are false, then return the len (i.e. active_slot_count)
     fn linear_search<F>(&self, mut f: F) -> u16
     where
-        F: Fn(KeyInternal) -> bool,
+        F: Fn(BTreeKey) -> bool,
     {
         for i in 0..self.header().active_slot_count() {
             let slot_key = self.get_slot_key(i).unwrap();
@@ -471,7 +471,7 @@ impl<'a> FosterBtreePage<'a> {
     // If all keys are false, then return the len (i.e. active_slot_count)
     fn binary_search<F>(&self, f: F) -> u16
     where
-        F: Fn(KeyInternal) -> bool,
+        F: Fn(BTreeKey) -> bool,
     {
         let low_fence = self.get_slot_key(self.low_fence_slot_id()).unwrap();
         let mut ng = if !f(low_fence) {
@@ -500,94 +500,94 @@ impl<'a> FosterBtreePage<'a> {
     }
 }
 
-enum KeyInternal<'a> {
+enum BTreeKey<'a> {
     MinusInfty,
     Normal(&'a [u8]),
     PlusInfty,
 }
 
 // implement unwrap
-impl<'a> KeyInternal<'a> {
+impl<'a> BTreeKey<'a> {
     fn unwrap(&self) -> &'a [u8] {
         match self {
-            KeyInternal::MinusInfty => panic!("Cannot unwrap MinusInfty"),
-            KeyInternal::Normal(key) => key,
-            KeyInternal::PlusInfty => panic!("Cannot unwrap PlusInfty"),
+            BTreeKey::MinusInfty => panic!("Cannot unwrap MinusInfty"),
+            BTreeKey::Normal(key) => key,
+            BTreeKey::PlusInfty => panic!("Cannot unwrap PlusInfty"),
         }
     }
 }
 
-impl<'a> PartialEq for KeyInternal<'a> {
+impl<'a> PartialEq for BTreeKey<'a> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (KeyInternal::MinusInfty, KeyInternal::MinusInfty) => true,
-            (KeyInternal::MinusInfty, KeyInternal::Normal(_)) => false,
-            (KeyInternal::MinusInfty, KeyInternal::PlusInfty) => false,
-            (KeyInternal::Normal(key1), KeyInternal::Normal(key2)) => key1 == key2,
-            (KeyInternal::Normal(_), KeyInternal::MinusInfty) => false,
-            (KeyInternal::Normal(_), KeyInternal::PlusInfty) => false,
-            (KeyInternal::PlusInfty, KeyInternal::MinusInfty) => false,
-            (KeyInternal::PlusInfty, KeyInternal::Normal(_)) => false,
-            (KeyInternal::PlusInfty, KeyInternal::PlusInfty) => true,
+            (BTreeKey::MinusInfty, BTreeKey::MinusInfty) => true,
+            (BTreeKey::MinusInfty, BTreeKey::Normal(_)) => false,
+            (BTreeKey::MinusInfty, BTreeKey::PlusInfty) => false,
+            (BTreeKey::Normal(key1), BTreeKey::Normal(key2)) => key1 == key2,
+            (BTreeKey::Normal(_), BTreeKey::MinusInfty) => false,
+            (BTreeKey::Normal(_), BTreeKey::PlusInfty) => false,
+            (BTreeKey::PlusInfty, BTreeKey::MinusInfty) => false,
+            (BTreeKey::PlusInfty, BTreeKey::Normal(_)) => false,
+            (BTreeKey::PlusInfty, BTreeKey::PlusInfty) => true,
         }
     }
 }
 
-impl Eq for KeyInternal<'_> {}
+impl Eq for BTreeKey<'_> {}
 
-impl<'a> PartialOrd for KeyInternal<'a> {
+impl<'a> PartialOrd for BTreeKey<'a> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         match (self, other) {
-            (KeyInternal::MinusInfty, KeyInternal::MinusInfty) => Some(std::cmp::Ordering::Equal),
-            (KeyInternal::MinusInfty, KeyInternal::Normal(_)) => Some(std::cmp::Ordering::Less),
-            (KeyInternal::MinusInfty, KeyInternal::PlusInfty) => Some(std::cmp::Ordering::Less),
-            (KeyInternal::Normal(_), KeyInternal::MinusInfty) => Some(std::cmp::Ordering::Greater),
-            (KeyInternal::Normal(key1), KeyInternal::Normal(key2)) => Some(key1.cmp(key2)),
-            (KeyInternal::Normal(_), KeyInternal::PlusInfty) => Some(std::cmp::Ordering::Less),
-            (KeyInternal::PlusInfty, KeyInternal::MinusInfty) => Some(std::cmp::Ordering::Greater),
-            (KeyInternal::PlusInfty, KeyInternal::Normal(_)) => Some(std::cmp::Ordering::Greater),
-            (KeyInternal::PlusInfty, KeyInternal::PlusInfty) => Some(std::cmp::Ordering::Equal),
+            (BTreeKey::MinusInfty, BTreeKey::MinusInfty) => Some(std::cmp::Ordering::Equal),
+            (BTreeKey::MinusInfty, BTreeKey::Normal(_)) => Some(std::cmp::Ordering::Less),
+            (BTreeKey::MinusInfty, BTreeKey::PlusInfty) => Some(std::cmp::Ordering::Less),
+            (BTreeKey::Normal(_), BTreeKey::MinusInfty) => Some(std::cmp::Ordering::Greater),
+            (BTreeKey::Normal(key1), BTreeKey::Normal(key2)) => Some(key1.cmp(key2)),
+            (BTreeKey::Normal(_), BTreeKey::PlusInfty) => Some(std::cmp::Ordering::Less),
+            (BTreeKey::PlusInfty, BTreeKey::MinusInfty) => Some(std::cmp::Ordering::Greater),
+            (BTreeKey::PlusInfty, BTreeKey::Normal(_)) => Some(std::cmp::Ordering::Greater),
+            (BTreeKey::PlusInfty, BTreeKey::PlusInfty) => Some(std::cmp::Ordering::Equal),
         }
     }
 }
 
-impl Ord for KeyInternal<'_> {
+impl Ord for BTreeKey<'_> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.partial_cmp(other).unwrap()
     }
 }
 
 impl<'a> FosterBtreePage<'a> {
-    fn get_low_fence(&self) -> KeyInternal {
+    fn get_low_fence(&self) -> BTreeKey {
         if self.header().is_left_most() {
-            KeyInternal::MinusInfty
+            BTreeKey::MinusInfty
         } else {
             let slot = self.slot(self.low_fence_slot_id()).unwrap();
             let offset = slot.offset() as usize;
             let key_size = slot.key_size() as usize;
-            KeyInternal::Normal(&self.page[offset..offset + key_size])
+            BTreeKey::Normal(&self.page[offset..offset + key_size])
         }
     }
 
-    fn get_high_fence(&self) -> KeyInternal {
+    fn get_high_fence(&self) -> BTreeKey {
         if self.header().is_right_most() {
-            KeyInternal::PlusInfty
+            BTreeKey::PlusInfty
         } else {
             let slot = self.slot(self.high_fence_slot_id()).unwrap();
             let offset = slot.offset() as usize;
             let key_size = slot.key_size() as usize;
-            KeyInternal::Normal(&self.page[offset..offset + key_size])
+            BTreeKey::Normal(&self.page[offset..offset + key_size])
         }
     }
 
-    fn get_slot_key(&self, slot_id: u16) -> Option<KeyInternal> {
+    fn get_slot_key(&self, slot_id: u16) -> Option<BTreeKey> {
         if slot_id == self.low_fence_slot_id() {
             Some(self.get_low_fence())
         } else if slot_id < self.high_fence_slot_id() {
             let slot = self.slot(slot_id).unwrap();
             let offset = slot.offset() as usize;
             let key_size = slot.key_size() as usize;
-            Some(KeyInternal::Normal(&self.page[offset..offset + key_size]))
+            Some(BTreeKey::Normal(&self.page[offset..offset + key_size]))
         } else if slot_id == self.high_fence_slot_id() {
             Some(self.get_high_fence())
         } else {
@@ -607,7 +607,7 @@ impl<'a> FosterBtreePage<'a> {
         }
     }
 
-    fn range(&self) -> (KeyInternal, KeyInternal) {
+    fn range(&self) -> (BTreeKey, BTreeKey) {
         let low_fence = self.get_low_fence();
         let high_fence = self.get_high_fence();
         (low_fence, high_fence)
@@ -631,13 +631,13 @@ impl<'a> FosterBtreePage<'a> {
 
     fn is_in_range(&self, key: &[u8]) -> bool {
         let (low_fence, high_fence) = self.range();
-        low_fence <= KeyInternal::Normal(key) && KeyInternal::Normal(key) < high_fence
+        low_fence <= BTreeKey::Normal(key) && BTreeKey::Normal(key) < high_fence
     }
 
     fn is_in_page(&self, key: &[u8]) -> bool {
         // TODO: optimize
         if self.is_in_range(key) {
-            let slot_id = self.binary_search(|slot_key| KeyInternal::Normal(key) < slot_key);
+            let slot_id = self.binary_search(|slot_key| BTreeKey::Normal(key) < slot_key);
             assert!(
                 self.low_fence_slot_id() + 1 <= slot_id && slot_id <= self.high_fence_slot_id()
             );
@@ -709,6 +709,13 @@ impl<'a> FosterBtreePage<'a> {
     }
 }
 
+pub struct Record<'a> {
+    pub is_ghost: bool,
+    pub is_lower_fence: bool,
+    pub key: &'a [u8], // If the record is a lower fence, then the key could be a minus-infty (empty) or normal key
+    pub value: &'a [u8], // If the record is a lower fence, then the value is empty.
+}
+
 // Public methods
 impl<'a> FosterBtreePage<'a> {
     pub fn init(page: &'a mut Page) {
@@ -732,6 +739,14 @@ impl<'a> FosterBtreePage<'a> {
 
     pub fn new(page: &'a mut Page) -> Self {
         FosterBtreePage { page }
+    }
+
+    pub fn is_leaf(&self) -> bool {
+        self.header().is_leaf()
+    }
+
+    pub fn is_root(&self) -> bool {
+        self.header().is_root()
     }
 
     pub fn insert_low_fence(&mut self, key: &[u8]) {
@@ -773,7 +788,7 @@ impl<'a> FosterBtreePage<'a> {
             if !self.is_in_range(key) {
                 false
             } else {
-                let slot_id = self.binary_search(|slot_key| KeyInternal::Normal(key) < slot_key);
+                let slot_id = self.binary_search(|slot_key| BTreeKey::Normal(key) < slot_key);
                 assert!(
                     self.low_fence_slot_id() + 1 <= slot_id && slot_id <= self.high_fence_slot_id()
                 );
@@ -820,13 +835,38 @@ impl<'a> FosterBtreePage<'a> {
         }
     }
 
+    pub fn lower_bound_rec(&self, key: &[u8]) -> Option<Record> {
+        if !self.is_in_range(key) {
+            None
+        } else {
+            let slot_id = self.binary_search(|slot_key| BTreeKey::Normal(key) < slot_key);
+            assert!(
+                self.low_fence_slot_id() + 1 <= slot_id && slot_id <= self.high_fence_slot_id()
+            );
+            let slot_id = slot_id - 1;
+            let slot = self.slot(slot_id).unwrap();
+            let key_offset = slot.offset() as usize;
+            let key_size = slot.key_size() as usize;
+            let slot_key = &self.page[key_offset..key_offset + key_size];
+            let value_offset = slot.offset() as usize + slot.key_size() as usize;
+            let value_size = slot.value_size() as usize;
+            let value = &self.page[value_offset..value_offset + value_size];
+            Some(Record {
+                is_ghost: slot.is_ghost(),
+                is_lower_fence: slot_id == self.low_fence_slot_id(),
+                key: slot_key,
+                value,
+            })
+        }
+    }
+
     /// Returns the right-most key that is less than or equal to the given key.
     /// This could return a lower fence key.
     pub fn lower_bound(&self, key: &[u8]) -> Option<&[u8]> {
         if !self.is_in_range(key) {
             None
         } else {
-            let slot_id = self.binary_search(|slot_key| KeyInternal::Normal(key) < slot_key);
+            let slot_id = self.binary_search(|slot_key| BTreeKey::Normal(key) < slot_key);
             // If the key is in range, that means binary search will done on array with [false, ..., true]
             // Therefore, the first true is at 1 <= slot_id <= active_slot_count-1
             assert!(
@@ -847,7 +887,7 @@ impl<'a> FosterBtreePage<'a> {
         if !self.is_in_range(key) {
             None
         } else {
-            let slot_id = self.binary_search(|slot_key| KeyInternal::Normal(key) < slot_key);
+            let slot_id = self.binary_search(|slot_key| BTreeKey::Normal(key) < slot_key);
             assert!(
                 self.low_fence_slot_id() + 1 <= slot_id && slot_id <= self.high_fence_slot_id()
             );
@@ -875,7 +915,7 @@ impl<'a> FosterBtreePage<'a> {
     /// Mark the slot with the given key as a ghost slot.
     pub fn mark_ghost(&mut self, key: &[u8]) {
         if self.is_in_range(key) {
-            let slot_id = self.binary_search(|slot_key| KeyInternal::Normal(key) < slot_key);
+            let slot_id = self.binary_search(|slot_key| BTreeKey::Normal(key) < slot_key);
             assert!(
                 self.low_fence_slot_id() + 1 <= slot_id && slot_id <= self.high_fence_slot_id()
             );
@@ -904,7 +944,7 @@ impl<'a> FosterBtreePage<'a> {
     /// To reclaim the space, run `compact_space`
     pub fn remove(&mut self, key: &[u8]) {
         if self.is_in_range(key) {
-            let slot_id = self.binary_search(|slot_key| KeyInternal::Normal(key) < slot_key);
+            let slot_id = self.binary_search(|slot_key| BTreeKey::Normal(key) < slot_key);
             assert!(
                 self.low_fence_slot_id() + 1 <= slot_id && slot_id <= self.high_fence_slot_id()
             );

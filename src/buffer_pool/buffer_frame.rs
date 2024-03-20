@@ -97,6 +97,15 @@ impl Deref for FrameReadGuard<'_> {
     }
 }
 
+impl DerefMut for FrameReadGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // The user should not modify the page while holding a read guard.
+        // This function is only provided to allow the user to instantiate a
+        // page reader.
+        unsafe { &mut *self.buffer_frame.page.get() }
+    }
+}
+
 pub struct FrameWriteGuard<'a> {
     downgraded: AtomicBool,
     buffer_frame: &'a BufferFrame,

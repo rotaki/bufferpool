@@ -11,5 +11,6 @@ pub type BufferPool = TempBP<LFUEvictionPolicy>;
 
 pub mod prelude {
     pub use super::buffer_frame::{BufferFrame, FrameReadGuard, FrameWriteGuard};
+    pub use super::buffer_pool::{BPStatus, ContainerKey, PageKey};
     pub use super::BufferPool;
 }

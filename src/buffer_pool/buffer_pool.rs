@@ -147,7 +147,7 @@ where
     }
 
     // Invariant: The latch must be held when calling this function
-    fn handle_page_fault(&self, key: PageKey) -> Result<FrameWriteGuard, BPStatus> {
+    fn handle_page_fault(&self, key: PageKey, new_page: bool) -> Result<FrameWriteGuard, BPStatus> {
         let pages = unsafe { &mut *self.frames.get() };
         let id_to_index = unsafe { &mut *self.id_to_index.get() };
         let container_to_file = unsafe { &mut *self.container_to_file.get() };
@@ -170,15 +170,19 @@ where
             debug!("Page evicted: {}", old_key);
         }
 
-        // Load new page
-        let file = container_to_file
-            .get(&key.c_key)
-            .ok_or(BPStatus::FileManagerNotFound)?;
-        let page = file.read_page(key.page_id)?;
+        // Create a new page or read from disk
+        let page = if new_page {
+            Page::new(key.page_id)
+        } else {
+            let file = container_to_file
+                .get(&key.c_key)
+                .ok_or(BPStatus::FileManagerNotFound)?;
+            file.read_page(key.page_id)?
+        };
+
         guard.copy(&page);
         id_to_index.insert(key, index);
         *guard.key() = Some(key);
-
         eviction_policy.reset(index);
         eviction_policy.update(index);
 
@@ -186,7 +190,10 @@ where
         Ok(guard)
     }
 
-    pub fn create_new_page<P: Fn(&mut Page)>(&self, c_key: ContainerKey, init: &P) -> PageKey {
+    pub fn create_new_page_for_write(
+        &self,
+        c_key: ContainerKey,
+    ) -> Result<FrameWriteGuard, BPStatus> {
         self.latch();
 
         let fm = (unsafe { &mut *self.container_to_file.get() })
@@ -201,15 +208,15 @@ where
                 .unwrap()
             });
 
-        self.unlatch();
-
         let page_id = fm.get_new_page_id();
-        let mut page = Page::new(page_id);
-        init(&mut page);
-        fm.write_page(page_id, &page).unwrap();
-        let p_key = PageKey::new(c_key, page_id);
-        debug!("New page created: {}", p_key);
-        p_key
+        let key = PageKey::new(c_key, page_id);
+        let res = self.handle_page_fault(key, true);
+        if let Ok(ref guard) = res {
+            guard.dirty().store(true, Ordering::Release);
+        }
+
+        self.unlatch();
+        res
     }
 
     pub fn get_page_for_write(&self, key: PageKey) -> Result<FrameWriteGuard, BPStatus> {
@@ -224,7 +231,7 @@ where
                 guard.ok_or(BPStatus::FrameLatchGrantFailed)
             }
             None => {
-                let res = self.handle_page_fault(key);
+                let res = self.handle_page_fault(key, false);
                 // If guard is ok, mark the page as dirty
                 if let Ok(ref guard) = res {
                     guard.dirty().store(true, Ordering::Release);
@@ -264,7 +271,7 @@ where
                 guard.ok_or(BPStatus::FrameLatchGrantFailed)
             }
             None => {
-                let res = self.handle_page_fault(key);
+                let res = self.handle_page_fault(key, false);
                 // If guard is ok, mark the page as dirty
                 if let Ok(ref guard) = res {
                     guard.dirty().store(true, Ordering::Release);
@@ -287,7 +294,9 @@ where
                 }
                 guard.ok_or(BPStatus::FrameLatchGrantFailed)
             }
-            None => self.handle_page_fault(key).map(|guard| guard.downgrade()),
+            None => self
+                .handle_page_fault(key, false)
+                .map(|guard| guard.downgrade()),
         };
         self.unlatch();
         result
@@ -416,7 +425,9 @@ mod tests {
             let ep = LFUEvictionPolicy::new(num_pages);
             let bp = BufferPool::new(temp_dir.path(), num_pages, ep).unwrap();
             let c_key = ContainerKey::new(db_id, 0);
-            let key = bp.create_new_page(c_key, &|_: &mut Page| {});
+            let frame = bp.create_new_page_for_write(c_key).unwrap();
+            let key = frame.key().unwrap();
+            drop(frame);
 
             let num_threads = 3;
             let num_iterations = 80; // Note: u8 max value is 255
@@ -459,22 +470,16 @@ mod tests {
             let c_key = ContainerKey::new(db_id, 0);
 
             let key1 = {
-                let key = bp.create_new_page(c_key, &|page: &mut Page| {
-                    page[0] = 0;
-                });
-                let mut guard = bp.get_page_for_write(key).unwrap();
+                let mut guard = bp.create_new_page_for_write(c_key).unwrap();
                 assert_eq!(guard[0], 0);
                 guard[0] = 1;
-                key
+                guard.key().unwrap()
             };
             let key2 = {
-                let new_key = bp.create_new_page(c_key, &|page: &mut Page| {
-                    page[0] = 0;
-                });
-                let mut guard = bp.get_page_for_write(new_key).unwrap();
+                let mut guard = bp.create_new_page_for_write(c_key).unwrap();
                 assert_eq!(guard[0], 0);
                 guard[0] = 2;
-                new_key
+                guard.key().unwrap()
             };
             bp.check_all_frames_unlatched();
             // check contents of evicted page
@@ -504,12 +509,9 @@ mod tests {
             let c_key = ContainerKey::new(db_id, 0);
 
             for i in 0..100 {
-                let key = bp.create_new_page(c_key, &|page: &mut Page| {
-                    page[0] = 0;
-                });
-                let mut guard = bp.get_page_for_write(key).unwrap();
+                let mut guard = bp.create_new_page_for_write(c_key).unwrap();
                 guard[0] = i;
-                keys.push(key);
+                keys.push(guard.key().unwrap());
 
                 bp.check_id_to_index();
             }

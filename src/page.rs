@@ -11,6 +11,7 @@ impl Page {
     pub fn new(page_id: PageId) -> Self {
         let mut page = Page([0; PAGE_SIZE]);
         page.set_id(page_id);
+        page.set_lsn(0); // Nothing to flush
         page
     }
 
