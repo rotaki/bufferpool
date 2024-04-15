@@ -40,7 +40,7 @@ impl FosterBtree {
         // Create a root page
         let root_key = {
             let mut root_page = bp.create_new_page_for_write(c_key).unwrap();
-            FosterBtreePage::init_as_root(&mut *root_page);
+            root_page.init_as_root();
             let root_key = root_page.key().unwrap();
             // Write log
             {
@@ -64,7 +64,7 @@ impl FosterBtree {
     fn traverse_to_leaf_for_read(&self, key: &[u8]) -> Result<FrameReadGuard, TreeStatus> {
         let mut current_page = self.bp.get_page_for_read(self.root_key)?;
         loop {
-            let foster_page = FosterBtreePage::new(&mut *current_page);
+            let foster_page = &current_page;
             if foster_page.is_leaf() {
                 break;
             }
@@ -87,7 +87,7 @@ impl FosterBtree {
     fn traverse_to_leaf_for_write(&self, key: &[u8]) -> Result<FrameWriteGuard, TreeStatus> {
         let mut current_page = self.bp.get_page_for_write(self.root_key)?;
         loop {
-            let foster_page = FosterBtreePage::new(&mut *current_page);
+            let foster_page = &current_page;
             if foster_page.is_leaf() {
                 break;
             }
@@ -108,8 +108,8 @@ impl FosterBtree {
     }
 
     pub fn get_key(&self, key: &[u8]) -> Result<Vec<u8>, TreeStatus> {
-        let mut leaf = self.traverse_to_leaf_for_read(key)?;
-        let foster_page = FosterBtreePage::new(&mut *leaf);
+        let leaf = self.traverse_to_leaf_for_read(key)?;
+        let foster_page = leaf;
         let rec = foster_page
             .lower_bound_rec(key)
             .ok_or(TreeStatus::NotInPageRange)?;
