@@ -334,12 +334,10 @@ pub trait FosterBtreePage {
     fn get_low_fence(&self) -> BTreeKey;
     fn get_high_fence(&self) -> BTreeKey;
     fn range(&self) -> (BTreeKey, BTreeKey);
-    fn foster_child_slot_id(&self) -> u16;
-    fn high_fence_slot_id(&self) -> u16;
-    fn is_fence(&self, slot_id: u16) -> bool;
     fn low_fence_slot_id(&self) -> u16;
-    fn is_in_range(&self, key: &[u8]) -> bool;
-    fn is_in_page(&self, key: &[u8]) -> bool;
+    fn high_fence_slot_id(&self) -> u16;
+    fn foster_child_slot_id(&self) -> u16;
+    fn is_fence(&self, slot_id: u16) -> bool;
     fn compact_space(&mut self);
 
     // Public methods
@@ -584,47 +582,10 @@ impl FosterBtreePage for Page {
         }
     }
 
-    /*
-    fn get_slot_key(&self, slot_id: u16) -> Option<BTreeKey> {
-        if slot_id == self.low_fence_slot_id() {
-            Some(self.get_low_fence())
-        } else if slot_id < self.high_fence_slot_id() {
-            let slot = self.slot(slot_id).unwrap();
-            let offset = slot.offset() as usize;
-            let key_size = slot.key_size() as usize;
-            Some(BTreeKey::Normal(&self[offset..offset + key_size]))
-        } else if slot_id == self.high_fence_slot_id() {
-            Some(self.get_high_fence())
-        } else {
-            None
-        }
-    }
-
-    fn get_slot_value(&self, slot_id: u16) -> Option<&[u8]> {
-        if slot_id < self.header().active_slot_count() {
-            let slot = self.slot(slot_id).unwrap();
-            let offset = slot.offset() as usize;
-            let key_size = slot.key_size() as usize;
-            let value_size = slot.value_size() as usize;
-            Some(&self[offset + key_size..offset + key_size + value_size])
-        } else {
-            None
-        }
-    }
-    */
-
     fn range(&self) -> (BTreeKey, BTreeKey) {
         let low_fence = self.get_low_fence();
         let high_fence = self.get_high_fence();
         (low_fence, high_fence)
-    }
-
-    fn foster_child_slot_id(&self) -> u16 {
-        self.header().active_slot_count() - 2
-    }
-
-    fn high_fence_slot_id(&self) -> u16 {
-        self.header().active_slot_count() - 1
     }
 
     fn is_fence(&self, slot_id: u16) -> bool {
@@ -635,27 +596,12 @@ impl FosterBtreePage for Page {
         0
     }
 
-    fn is_in_range(&self, key: &[u8]) -> bool {
-        let (low_fence, high_fence) = self.range();
-        low_fence <= BTreeKey::Normal(key) && BTreeKey::Normal(key) < high_fence
+    fn high_fence_slot_id(&self) -> u16 {
+        self.header().active_slot_count() - 1
     }
 
-    fn is_in_page(&self, key: &[u8]) -> bool {
-        // TODO: optimize
-        if self.is_in_range(key) {
-            let slot_id = self.binary_search(|slot_key| BTreeKey::Normal(key) < slot_key);
-            assert!(
-                self.low_fence_slot_id() + 1 <= slot_id && slot_id <= self.high_fence_slot_id()
-            );
-
-            let slot = self.slot(slot_id).unwrap();
-            let key_offset = slot.offset() as usize;
-            let key_size = slot.key_size() as usize;
-            let slot_key = &self[key_offset..key_offset + key_size];
-            slot_key == key
-        } else {
-            false
-        }
+    fn foster_child_slot_id(&self) -> u16 {
+        self.header().active_slot_count() - 2
     }
 
     fn compact_space(&mut self) {
