@@ -30,6 +30,7 @@ pub struct FosterBtree {
     pub wal_buffer: LogBufferRef,
 }
 
+/*
 impl FosterBtree {
     pub fn create_new(
         txn_id: u64,
@@ -225,3 +226,4 @@ impl FosterBtree {
 }
 
 mod tests {}
+*/
