@@ -27,7 +27,7 @@ pub struct FosterBtree {
     pub c_key: ContainerKey,
     pub root_key: PageKey,
     pub bp: BufferPoolRef,
-    pub wal_buffer: LogBufferRef,
+    // pub wal_buffer: LogBufferRef,
 }
 
 impl FosterBtree {
@@ -52,8 +52,8 @@ impl FosterBtree {
     /// * This means that the high fence of the foster child will be the same as the high fence of this page.
     /// If this is the left-most page, then the foster child iwll *NOT* be the left-most page.
     /// * This means that the high fence of the foster child will be the same as the low fence of the foster child.
-    fn split(&self, this: &mut FrameWriteGuard, foster_child: &mut FrameWriteGuard) {
-        if this.header().active_slot_count() - 2 < 2 {
+    fn split(&self, this: &mut Page, foster_child: &mut Page) {
+        if this.active_slot_count() - 2 < 2 {
             // -2 to exclude the low and high fences.
             // Minimum 4 slots are required to split.
             panic!("Cannot split the page with less than 2 real slots");
@@ -62,24 +62,30 @@ impl FosterBtree {
         // This page keeps [0, mid) slots and mid key with the foster_child_page_id
         // Foster child keeps [mid, active_slot_count) slots
 
-        let mid = this.header().active_slot_count() / 2;
+        let mid = this.active_slot_count() / 2;
         assert!(!this.is_fence(mid));
 
         {
-            // Set the foster_child's low and high fence
+            // Set the foster_child's low and high fence and foster children flag
             let mid_key = this.get_raw_key(mid);
             foster_child.insert_low_fence(mid_key);
-            if this.header().is_right_most() {
+            if this.is_right_most() {
                 // If this is the right-most page, then the foster child will also be the right most page.
                 foster_child.insert_high_fence(&[]);
-                let mut header = foster_child.header();
-                header.set_right_most(true);
-                foster_child.update_header(header);
+                foster_child.set_right_most(true);
             } else {
                 let high_fence = this.get_high_fence().unwrap();
                 foster_child.insert_high_fence(high_fence);
             }
-            assert!(foster_child.header().active_slot_count() == 2);
+            if this.has_foster_child() {
+                // If this page has foster children, then the foster child will also have foster children.
+                foster_child.set_foster_child(true);
+            }
+            if this.is_leaf() {
+                // If this page is a leaf, then the foster child will also be a leaf.
+                foster_child.set_leaf(true);
+            }
+            assert!(foster_child.active_slot_count() == 2);
         }
 
         {
@@ -112,9 +118,13 @@ impl FosterBtree {
             }
 
             // Mark that this page has foster children
-            let mut header = this.header();
-            header.set_foster_children(true);
-            this.update_header(header);
+            this.set_foster_child(true);
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            this.run_consistency_checks(true);
+            foster_child.run_consistency_checks(true);
         }
     }
 
@@ -122,7 +132,7 @@ impl FosterBtree {
         txn_id: u64,
         c_key: ContainerKey,
         bp: BufferPoolRef,
-        wal_buffer: LogBufferRef,
+        // wal_buffer: LogBufferRef,
     ) -> Self {
         // Create a root page
         let root_key = {
@@ -144,7 +154,7 @@ impl FosterBtree {
             c_key,
             root_key,
             bp: bp.clone(),
-            wal_buffer,
+            // wal_buffer,
         }
     }
 
@@ -186,7 +196,7 @@ impl FosterBtree {
 
             let next_page = self.bp.get_page_for_write(page_key)?;
             // Check if there is foster child in the next page.
-            if next_page.has_foster_children() {
+            if next_page.has_foster_child() {
                 let new_page_key = self.allocate_page();
                 let new_page = self.bp.get_page_for_write(new_page_key).unwrap();
             }
@@ -311,4 +321,29 @@ impl FosterBtree {
     */
 }
 
-mod tests {}
+mod tests {
+    use tempfile::TempDir;
+
+    use crate::buffer_pool::CacheEvictionPolicy;
+
+    use super::{BufferPool, BufferPoolRef, ContainerKey, FosterBtree};
+
+    fn get_buffer_pool(db_id: u16) -> (TempDir, BufferPoolRef) {
+        let temp_dir = TempDir::new().unwrap();
+        // create a directory for the database
+        std::fs::create_dir(temp_dir.path().join(db_id.to_string())).unwrap();
+        let num_frames = 10;
+        let ep = CacheEvictionPolicy::new(num_frames);
+        let bp = BufferPoolRef::new(BufferPool::new(temp_dir.path(), num_frames, ep).unwrap());
+        (temp_dir, bp)
+    }
+
+    #[test]
+    fn test_page_split() {
+        let db_id = 0;
+        let (temp_dir, bp) = get_buffer_pool(db_id);
+        let c_key = ContainerKey::new(db_id, 0);
+        let txn_id = 0;
+        let btree = FosterBtree::create_new(txn_id, c_key, bp.clone());
+    }
+}
