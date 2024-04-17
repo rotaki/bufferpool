@@ -190,6 +190,9 @@ where
         Ok(guard)
     }
 
+    /// Create a new page for write in memory.
+    /// NOTE: This function does not write the page to disk.
+    /// See more at `handle_page_fault(key, new_page=true)`
     pub fn create_new_page_for_write(
         &self,
         c_key: ContainerKey,
