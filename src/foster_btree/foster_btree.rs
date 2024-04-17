@@ -47,7 +47,6 @@ impl FosterBtree {
         page_key
     }
 
-    /*
     /// Move half of the slots to the foster child
     /// If this is the right-most page, then the foster child will also be the right most page.
     /// * This means that the high fence of the foster child will be the same as the high fence of this page.
@@ -85,27 +84,39 @@ impl FosterBtree {
 
         {
             // Move the half of the slots to the foster child
-            for i in mid..this.high_fence_slot_id() {
-                // Doe snot include the high fence
-                let key = this.get_raw_key(i);
-                let val = this.get_val(i);
-                foster_child.insert(key, val, false);
-            }
+            let recs = {
+                let mut recs = Vec::new();
+                for i in mid..this.high_fence_slot_id() {
+                    // Does snot include the high fence
+                    recs.push((this.get_raw_key(i), this.get_val(i)));
+                }
+                recs
+            };
+            let res = foster_child.insert_sorted(recs);
+            assert!(res);
         }
 
         {
             // Remove the moved slots from this page. Do not remove the high fence. Insert the foster key with the foster_child_page_id.
-            // Check that foster key is in the correct position.
-
             let foster_key = this.get_raw_key(mid).to_owned();
+            let foster_page_id_bytes = foster_child.get_id().to_be_bytes();
+            let end = this.high_fence_slot_id();
+            this.remove_range(mid, end);
+            this.insert(&foster_key, &foster_page_id_bytes, false);
 
-            foster_child.remove_at()
+            #[cfg(debug_assertions)]
+            {
+                // Check that foster key is in the correct position.
+                let foster_slot_id = this.lower_bound_slot_id(&BTreeKey::new(&foster_key));
+                assert!(foster_slot_id == this.foster_child_slot_id());
+            }
 
-
+            // Mark that this page has foster children
+            let mut header = this.header();
+            header.set_foster_children(true);
+            this.update_header(header);
         }
-
     }
-    */
 
     pub fn create_new(
         txn_id: u64,

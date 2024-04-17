@@ -352,6 +352,7 @@ pub trait FosterBtreePage {
     fn get_raw_key(&self, slot_id: u16) -> &[u8];
     fn get_btree_key(&self, slot_id: u16) -> BTreeKey;
     fn get_foster_key(&self) -> &[u8];
+    fn get_foster_page_id(&self) -> u32;
     fn get_val(&self, slot_id: u16) -> &[u8];
     fn inside_range(&self, key: &BTreeKey) -> bool;
     fn lower_bound_slot_id(&self, key: &BTreeKey) -> u16;
@@ -741,6 +742,18 @@ impl FosterBtreePage for Page {
         self.get_raw_key(foster_slot_id)
     }
 
+    fn get_foster_page_id(&self) -> u32 {
+        assert!(self.header().has_foster_children());
+        let foster_slot_id = self.foster_child_slot_id();
+        let slot = self.slot(foster_slot_id).unwrap();
+        let offset = slot.offset() as usize;
+        let key_size = slot.key_size() as usize;
+        let value_size = slot.value_size() as usize;
+        let value = &self[offset + key_size..offset + key_size + value_size];
+        let foster_page_id = u32::from_be_bytes([value[0], value[1], value[2], value[3]]);
+        foster_page_id
+    }
+
     fn get_val(&self, slot_id: u16) -> &[u8] {
         let slot = self.slot(slot_id).unwrap();
         let offset = slot.offset() as usize;
@@ -929,9 +942,9 @@ impl FosterBtreePage for Page {
     /// Otherwise two keys with the same value will be inserted.
     ///
     /// Insert fails in the following cases:
-    /// 1. The page does not have enough space to insert the key-value pair. (return false)
-    /// 2. The key is out of the range of the page. (panic)
-    /// 3. The key already exists in the page. (panic)
+    /// 1. Returns false if the page does not have enough space to insert the key-value pair.
+    /// 2. Panics if the key is out of the range of the page.
+    /// 3. Panics if the key already exists in the page.
     fn insert(&mut self, key: &[u8], value: &[u8], _make_ghost: bool) -> bool {
         let rec_size = key.len() + value.len();
         if SLOT_SIZE + rec_size > self.free_space() {
@@ -978,11 +991,34 @@ impl FosterBtreePage for Page {
     }
 
     /// Insert a sorted list of key-value pairs to a empty page.
-    /// Assumes that page is empty except for the low and high fences.
+    /// The input recs must be sorted.
+    /// The page must be empty except for the low and high fences.
     ///
+    /// This function fails in the following cases:
+    /// 1. Returns false if the page does not have enough space to insert the key-value pairs.
+    /// 2. Panics if the page is not empty except for the low and high fences.
+    /// 3. Panics if the range of the key-value pairs is out of the range of the page.
     fn insert_sorted(&mut self, recs: Vec<(&[u8], &[u8])>) -> bool {
-        assert!(self.header().active_slot_count() == 2); // low and high fences
-                                                         // Check free space
+        if recs.is_empty() {
+            return true;
+        }
+
+        #[cfg(any(test, debug_assertions))]
+        {
+            // lower fence < recs < high fence
+            let low_fence = self.get_low_fence();
+            let high_fence = self.get_high_fence();
+            assert!(low_fence <= BTreeKey::Normal(recs[0].0));
+            assert!(BTreeKey::Normal(recs[recs.len() - 1].0) < high_fence);
+            // Check sortedness of the input recs
+            for i in 1..recs.len() {
+                assert!(recs[i - 1].0 < recs[i].0);
+            }
+        }
+        if self.header().active_slot_count() != 2 {
+            panic!("Page must be empty except for the low and high fences");
+        }
+        // Calculate the inserting size and check if the page has enough space.
         let inserting_size =
             recs.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>() + recs.len() * SLOT_SIZE;
         if inserting_size > self.free_space() {
@@ -1022,7 +1058,7 @@ impl FosterBtreePage for Page {
     }
 
     /// Removes slots [from..to) from the page.
-    /// It is not allowed to be removed the low fence or high fence.
+    /// Panics if from >= to or the low fence or high fence is included in the range.
     /// The slots are shifted to the left by (to - from) slots.
     /// The active_slot_count is decremented by (to - from).
     /// This function does not reclaim the space. Run `compact_space` to reclaim the space.
