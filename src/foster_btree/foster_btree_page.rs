@@ -327,6 +327,9 @@ impl FosterBtreePage for Page {
         }
     }
 
+    /// The number of active slots in the page.
+    /// The low fence and high fence are always present.
+    /// Therefore, the active slot count should be at least 2 after the initialization.
     fn active_slot_count(&self) -> u16 {
         u16::from_be_bytes([self[1], self[2]])
     }

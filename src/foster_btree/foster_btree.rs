@@ -52,7 +52,7 @@ impl FosterBtree {
     /// * This means that the high fence of the foster child will be the same as the high fence of this page.
     /// If this is the left-most page, then the foster child iwll *NOT* be the left-most page.
     /// * This means that the high fence of the foster child will be the same as the low fence of the foster child.
-    fn split(&self, this: &mut Page, foster_child: &mut Page) {
+    fn split(this: &mut Page, foster_child: &mut Page) {
         if this.active_slot_count() - 2 < 2 {
             // -2 to exclude the low and high fences.
             // Minimum 4 slots are required to split.
@@ -109,6 +109,7 @@ impl FosterBtree {
             let end = this.high_fence_slot_id();
             this.remove_range(mid, end);
             this.insert(&foster_key, &foster_page_id_bytes, false);
+            this.compact_space();
 
             #[cfg(debug_assertions)]
             {
@@ -322,11 +323,14 @@ impl FosterBtree {
 }
 
 mod tests {
+    use core::num;
+    use std::collections::btree_map::Keys;
+
     use tempfile::TempDir;
 
-    use crate::buffer_pool::CacheEvictionPolicy;
+    use crate::{buffer_pool::CacheEvictionPolicy, foster_btree::foster_btree_page::BTreeKey};
 
-    use super::{BufferPool, BufferPoolRef, ContainerKey, FosterBtree};
+    use super::{BufferPool, BufferPoolRef, ContainerKey, FosterBtree, FosterBtreePage};
 
     fn get_buffer_pool(db_id: u16) -> (TempDir, BufferPoolRef) {
         let temp_dir = TempDir::new().unwrap();
@@ -338,12 +342,66 @@ mod tests {
         (temp_dir, bp)
     }
 
-    #[test]
-    fn test_page_split() {
-        let db_id = 0;
+    fn get_btree(db_id: u16) -> (TempDir, FosterBtree) {
         let (temp_dir, bp) = get_buffer_pool(db_id);
         let c_key = ContainerKey::new(db_id, 0);
         let txn_id = 0;
         let btree = FosterBtree::create_new(txn_id, c_key, bp.clone());
+        (temp_dir, btree)
+    }
+
+    #[test]
+    fn test_page_split() {
+        let db_id = 0;
+        let c_id = 0;
+        let c_key = ContainerKey::new(db_id, c_id);
+
+        let (temp_dir, bp) = get_buffer_pool(db_id);
+        let p0_key = bp.create_new_page_for_write(c_key).unwrap().key().unwrap();
+        let mut p0 = bp.get_page_for_write(p0_key).unwrap();
+        p0.init_as_root();
+        let p1_key = bp.create_new_page_for_write(c_key).unwrap().key().unwrap();
+        let mut p1 = bp.get_page_for_write(p1_key).unwrap();
+        p1.init();
+
+        // Insert 10 keys into p0
+        let num_keys = 10;
+        let kvs = (0..num_keys as usize)
+            .map(|i| (i.to_be_bytes().to_vec(), i.to_be_bytes().to_vec()))
+            .collect::<Vec<_>>();
+        p0.insert_sorted(
+            kvs.iter()
+                .map(|(k, v)| (k.as_slice(), v.as_slice()))
+                .collect(),
+        );
+        assert_eq!(p0.active_slot_count(), num_keys + 2);
+
+        // Split p0 into p0 and p1
+        FosterBtree::split(&mut p0, &mut p1);
+
+        // Check the contents of p0 and p1
+        p0.run_consistency_checks(true);
+        p1.run_consistency_checks(true);
+
+        // Check the contents of p0
+        // p0 has 0, 1, 2, 3, 4, and foster key 5
+        assert_eq!(p0.active_slot_count(), 8); // 5 real slots + 1 foster key + 2 fences
+        assert!(p0.has_foster_child());
+        assert_eq!(p0.get_foster_page_id(), p1.get_id());
+        for i in 0..5 as usize {
+            let key = p0.get_raw_key((i + 1) as u16);
+            assert_eq!(key, i.to_be_bytes());
+        }
+
+        // Check the contents of p1
+        // p1 has 5, 6, 7, 8, 9
+        assert_eq!(p1.active_slot_count(), 7); // 5 real slots + 2 fences
+        assert!(!p1.has_foster_child());
+        for i in 0..5 as usize {
+            let key = p1.get_raw_key((i + 1) as u16);
+            assert_eq!(key, (i + 5).to_be_bytes());
+        }
+
+        drop(temp_dir);
     }
 }
