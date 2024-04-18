@@ -53,7 +53,7 @@ impl FosterBtree {
     /// If this is the left-most page, then the foster child iwll *NOT* be the left-most page.
     /// * This means that the high fence of the foster child will be the same as the low fence of the foster child.
     fn split(this: &mut Page, foster_child: &mut Page) {
-        if this.active_slot_count() - 2 < 2 {
+        if this.slot_count() - 2 < 2 {
             // -2 to exclude the low and high fences.
             // Minimum 4 slots are required to split.
             panic!("Cannot split the page with less than 2 real slots");
@@ -62,20 +62,20 @@ impl FosterBtree {
         // This page keeps [0, mid) slots and mid key with the foster_child_page_id
         // Foster child keeps [mid, active_slot_count) slots
 
-        let mid = this.active_slot_count() / 2;
+        let mid = this.slot_count() / 2;
         assert!(!this.is_fence(mid));
 
         {
             // Set the foster_child's low and high fence and foster children flag
             let mid_key = this.get_raw_key(mid);
-            foster_child.insert_low_fence(mid_key);
+            foster_child.set_low_fence(mid_key);
             if this.is_right_most() {
                 // If this is the right-most page, then the foster child will also be the right most page.
-                foster_child.insert_high_fence(&[]);
+                foster_child.set_high_fence(&[]);
                 foster_child.set_right_most(true);
             } else {
-                let high_fence = this.get_high_fence().unwrap();
-                foster_child.insert_high_fence(high_fence);
+                let high_fence = this.get_high_fence();
+                foster_child.set_high_fence(high_fence.as_ref());
             }
             if this.has_foster_child() {
                 // If this page has foster children, then the foster child will also have foster children.
@@ -85,7 +85,7 @@ impl FosterBtree {
                 // If this page is a leaf, then the foster child will also be a leaf.
                 foster_child.set_leaf(true);
             }
-            assert!(foster_child.active_slot_count() == 2);
+            assert!(foster_child.slot_count() == 2);
         }
 
         {
@@ -328,7 +328,7 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use crate::{buffer_pool::CacheEvictionPolicy, foster_btree::foster_btree_page::BTreeKey};
+    use crate::{buffer_pool::CacheEvictionPolicy, page::Page};
 
     use super::{BufferPool, BufferPoolRef, ContainerKey, FosterBtree, FosterBtreePage};
 
@@ -350,8 +350,160 @@ mod tests {
         (temp_dir, btree)
     }
 
+    fn to_bytes(num: usize) -> Vec<u8> {
+        num.to_be_bytes().to_vec()
+    }
+
+    fn get_kvs(range: std::ops::Range<usize>) -> Vec<(Vec<u8>, Vec<u8>)> {
+        range.map(|i| (to_bytes(i), to_bytes(i))).collect()
+    }
+
+    fn print_page(p: &Page) {
+        println!(
+            "----------------- Page ID: {} -----------------",
+            p.get_id()
+        );
+        println!("Low fence: {:?}", p.get_low_fence());
+        println!("High fence: {:?}", p.get_high_fence());
+        println!("Slot count: {}", p.slot_count());
+        println!("Active slot count: {}", p.active_slot_count());
+        println!("Foster child: {}", p.has_foster_child());
+        for i in 0..p.active_slot_count() {
+            let key = p.get_raw_key((i + 1) as u16);
+            let val = p.get_val((i + 1) as u16);
+            let key = usize::from_be_bytes(key.try_into().unwrap());
+            let val = if p.has_foster_child() && i == p.active_slot_count() - 1 {
+                let page_id = u32::from_be_bytes(val.try_into().unwrap()).to_string();
+                format!("PageID({})", page_id)
+            } else {
+                usize::from_be_bytes(val.try_into().unwrap()).to_string()
+            };
+            println!("Slot {}: Key: {}, Value: {}", i + 1, key, val);
+        }
+        println!("----------------------------------------------");
+    }
+
+    #[test]
+    fn test_page_setup() {
+        let (db_id, c_id) = (0, 0);
+        let c_key = ContainerKey::new(db_id, c_id);
+        let (temp_dir, bp) = get_buffer_pool(db_id);
+        {
+            let p_key = bp.create_new_page_for_write(c_key).unwrap().key().unwrap();
+            let mut p = bp.get_page_for_write(p_key).unwrap();
+            p.init();
+            let low_fence = to_bytes(0);
+            let high_fence = to_bytes(20);
+            p.set_low_fence(&low_fence);
+            p.set_high_fence(&high_fence);
+            assert_eq!(p.get_low_fence().as_ref(), low_fence);
+            assert_eq!(p.get_high_fence().as_ref(), high_fence);
+            print_page(&p);
+        }
+        drop(temp_dir);
+    }
+
     #[test]
     fn test_page_split() {
+        let (db_id, c_id) = (0, 0);
+        let c_key = ContainerKey::new(db_id, c_id);
+
+        let low_fence = to_bytes(0);
+        let high_fence = to_bytes(20);
+        let kvs = get_kvs(0..10);
+
+        let (temp_dir, bp) = get_buffer_pool(db_id);
+        let p0_key = bp.create_new_page_for_write(c_key).unwrap().key().unwrap();
+        let mut p0 = bp.get_page_for_write(p0_key).unwrap();
+        p0.init();
+        p0.set_low_fence(&low_fence);
+        p0.set_high_fence(&high_fence);
+
+        let p1_key = bp.create_new_page_for_write(c_key).unwrap().key().unwrap();
+        let mut p1 = bp.get_page_for_write(p1_key).unwrap();
+        p1.init();
+
+        let p2_key = bp.create_new_page_for_write(c_key).unwrap().key().unwrap();
+        let mut p2 = bp.get_page_for_write(p2_key).unwrap();
+        p2.init();
+
+        // Insert 10 keys into p0
+        p0.insert_sorted(kvs.clone());
+        assert_eq!(p0.active_slot_count(), 10);
+
+        {
+            // Split p0 into p0 and p1
+            FosterBtree::split(&mut p0, &mut p1);
+
+            // Check the consistency of p0 and p1
+            p0.run_consistency_checks(true);
+            p1.run_consistency_checks(true);
+            // Check the contents of p0
+            // p0 has 0, 1, 2, 3, 4, and foster key 5
+            assert_eq!(p0.active_slot_count(), 6); // 5 real slots + 1 foster key
+            assert!(p0.has_foster_child());
+            assert_eq!(p0.get_foster_page_id(), p1.get_id());
+            for i in 0..5 as usize {
+                let key = p0.get_raw_key((i + 1) as u16);
+                assert_eq!(key, kvs[i].0);
+            }
+            // Check the contents of p1
+            // p1 has 5, 6, 7, 8, 9
+            assert_eq!(p1.active_slot_count(), 5); // 5 real slots
+            assert!(!p1.has_foster_child());
+            for i in 0..5 as usize {
+                let key = p1.get_raw_key((i + 1) as u16);
+                assert_eq!(key, kvs[i + 5].0);
+            }
+            // p1's low fence should be the mid key
+            assert_eq!(p1.get_low_fence().as_ref(), kvs[5].0);
+            // p1's high fence should be the same as p0's high fence
+            assert_eq!(p0.get_high_fence(), p1.get_high_fence());
+
+            print_page(&p0);
+            print_page(&p1);
+        }
+
+        {
+            // Split p0 into p0 and p2
+            FosterBtree::split(&mut p0, &mut p2);
+
+            // Check the consistency of p0 and p2
+            p0.run_consistency_checks(true);
+            p2.run_consistency_checks(true);
+            // Check the contents of p0
+            // p0 has 0, 1, 2, and foster key 3
+            assert_eq!(p0.active_slot_count(), 4); // 3 real slots + 1 foster key
+            assert!(p0.has_foster_child());
+            assert_eq!(p0.get_foster_page_id(), p2.get_id());
+            for i in 0..3 as usize {
+                let key = p0.get_raw_key((i + 1) as u16);
+                assert_eq!(key, kvs[i].0);
+            }
+            // Check the contents of p2
+            // p2 has 3, 4, and foster key 5
+            assert_eq!(p2.active_slot_count(), 3); // 2 real slots + 1 foster key
+            assert!(p2.has_foster_child());
+            assert_eq!(p2.get_foster_page_id(), p1.get_id());
+            for i in 0..2 as usize {
+                let key = p2.get_raw_key((i + 1) as u16);
+                assert_eq!(key, kvs[i + 3].0);
+            }
+            // p2's low fence should be the mid key
+            assert_eq!(p2.get_low_fence().as_ref(), kvs[3].0);
+            // p2's high fence should be the same as p0's high fence
+            assert_eq!(p0.get_high_fence(), p2.get_high_fence());
+
+            print_page(&p0);
+            print_page(&p2);
+            print_page(&p1);
+        }
+
+        drop(temp_dir);
+    }
+
+    #[test]
+    fn test_page_split_with_foster_child() {
         let db_id = 0;
         let c_id = 0;
         let c_key = ContainerKey::new(db_id, c_id);
@@ -359,49 +511,5 @@ mod tests {
         let (temp_dir, bp) = get_buffer_pool(db_id);
         let p0_key = bp.create_new_page_for_write(c_key).unwrap().key().unwrap();
         let mut p0 = bp.get_page_for_write(p0_key).unwrap();
-        p0.init_as_root();
-        let p1_key = bp.create_new_page_for_write(c_key).unwrap().key().unwrap();
-        let mut p1 = bp.get_page_for_write(p1_key).unwrap();
-        p1.init();
-
-        // Insert 10 keys into p0
-        let num_keys = 10;
-        let kvs = (0..num_keys as usize)
-            .map(|i| (i.to_be_bytes().to_vec(), i.to_be_bytes().to_vec()))
-            .collect::<Vec<_>>();
-        p0.insert_sorted(
-            kvs.iter()
-                .map(|(k, v)| (k.as_slice(), v.as_slice()))
-                .collect(),
-        );
-        assert_eq!(p0.active_slot_count(), num_keys + 2);
-
-        // Split p0 into p0 and p1
-        FosterBtree::split(&mut p0, &mut p1);
-
-        // Check the contents of p0 and p1
-        p0.run_consistency_checks(true);
-        p1.run_consistency_checks(true);
-
-        // Check the contents of p0
-        // p0 has 0, 1, 2, 3, 4, and foster key 5
-        assert_eq!(p0.active_slot_count(), 8); // 5 real slots + 1 foster key + 2 fences
-        assert!(p0.has_foster_child());
-        assert_eq!(p0.get_foster_page_id(), p1.get_id());
-        for i in 0..5 as usize {
-            let key = p0.get_raw_key((i + 1) as u16);
-            assert_eq!(key, i.to_be_bytes());
-        }
-
-        // Check the contents of p1
-        // p1 has 5, 6, 7, 8, 9
-        assert_eq!(p1.active_slot_count(), 7); // 5 real slots + 2 fences
-        assert!(!p1.has_foster_child());
-        for i in 0..5 as usize {
-            let key = p1.get_raw_key((i + 1) as u16);
-            assert_eq!(key, (i + 5).to_be_bytes());
-        }
-
-        drop(temp_dir);
     }
 }
