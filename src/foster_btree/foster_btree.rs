@@ -356,9 +356,6 @@ impl FosterBtree {
 }
 
 mod tests {
-    use core::num;
-    use std::collections::btree_map::Keys;
-
     use tempfile::TempDir;
 
     use crate::{buffer_pool::CacheEvictionPolicy, page::Page};
@@ -409,7 +406,12 @@ mod tests {
                 let page_id = u32::from_be_bytes(val.try_into().unwrap()).to_string();
                 format!("PageID({})", page_id)
             } else {
-                usize::from_be_bytes(val.try_into().unwrap()).to_string()
+                if p.is_leaf() {
+                    usize::from_be_bytes(val.try_into().unwrap()).to_string()
+                } else {
+                    let page_id = u32::from_be_bytes(val.try_into().unwrap()).to_string();
+                    format!("PageID({})", page_id)
+                }
             };
             println!("Slot {}: Key: {}, Value: {}", i + 1, key, val);
         }
@@ -562,12 +564,13 @@ mod tests {
         parent.init();
         parent.set_low_fence(&k0);
         parent.set_high_fence(&k2);
-        parent.insert(&k0, &child0.get_id().to_be_bytes(), false);
         parent.set_leaf(false);
+        parent.insert(&k0, &child0.get_id().to_be_bytes(), false);
 
         child0.init();
         child0.set_low_fence(&k0);
         child0.set_high_fence(&k2);
+        child0.set_leaf(true);
         // Insert 10 slots
         for i in 0..10 {
             let key = to_bytes(i + 10);
@@ -579,6 +582,7 @@ mod tests {
         child1.init();
         child1.set_low_fence(&k1);
         child1.set_high_fence(&k2);
+        child1.set_leaf(true);
         // Insert 10 slots
         for i in 0..10 {
             let key = to_bytes(i + 20);
@@ -609,6 +613,10 @@ mod tests {
         assert_eq!(parent.get_val(1), child0.get_id().to_be_bytes());
         assert_eq!(parent.get_val(2), child1.get_id().to_be_bytes());
         assert_eq!(child0.has_foster_child(), false);
+
+        // print_page(&parent);
+        // print_page(&child0);
+        // print_page(&child1);
 
         drop(temp_dir);
     }
