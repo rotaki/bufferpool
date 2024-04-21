@@ -67,7 +67,7 @@ impl FosterBtree {
 
         {
             // Set the foster_child's low and high fence and foster children flag
-            let mid_key = this.get_raw_key(mid);
+            let mid_key: &[u8] = this.get_raw_key(mid);
             foster_child.set_low_fence(mid_key);
             if this.is_right_most() {
                 // If this is the right-most page, then the foster child will also be the right most page.
@@ -126,6 +126,39 @@ impl FosterBtree {
         {
             this.run_consistency_checks(true);
             foster_child.run_consistency_checks(true);
+        }
+    }
+
+    /// Adopt the foster child of the child page.
+    /// We first check if parent is full.
+    /// If not full, then the parent page adopt the foster child of the child page.
+    /// The foster child of the child page is removed and becomes the child of the parent page.
+    ///
+    /// Parent page
+    /// * insert the foster key and the foster child page id.
+    ///
+    /// Child page
+    /// * remove the foster key from the child page.
+    /// * remove the foster child flag and set the high fence to the foster key.
+    fn adopt(parent: &mut Page, child: &mut Page) {
+        if !child.has_foster_child() {
+            panic!("The child page does not have a foster child");
+        }
+        let foster_child_slot_id = child.foster_child_slot_id();
+        let foster_key = child.get_foster_key().to_owned();
+        let foster_child_page_id = child.get_foster_page_id();
+
+        // Try insert into parent page.
+        let inserted = parent.insert(&foster_key, &foster_child_page_id.to_be_bytes(), false);
+
+        if inserted {
+            // Remove the foster key from the child page.
+            child.remove_at(foster_child_slot_id);
+            child.set_foster_child(false);
+            child.set_high_fence(foster_key.as_ref());
+        } else {
+            // Need to split the parent page.
+            todo!("Need to split the parent page");
         }
     }
 
@@ -413,18 +446,15 @@ mod tests {
         let kvs = get_kvs(0..10);
 
         let (temp_dir, bp) = get_buffer_pool(db_id);
-        let p0_key = bp.create_new_page_for_write(c_key).unwrap().key().unwrap();
-        let mut p0 = bp.get_page_for_write(p0_key).unwrap();
+        let mut p0 = bp.create_new_page_for_write(c_key).unwrap();
         p0.init();
         p0.set_low_fence(&low_fence);
         p0.set_high_fence(&high_fence);
 
-        let p1_key = bp.create_new_page_for_write(c_key).unwrap().key().unwrap();
-        let mut p1 = bp.get_page_for_write(p1_key).unwrap();
+        let mut p1 = bp.create_new_page_for_write(c_key).unwrap();
         p1.init();
 
-        let p2_key = bp.create_new_page_for_write(c_key).unwrap().key().unwrap();
-        let mut p2 = bp.get_page_for_write(p2_key).unwrap();
+        let mut p2 = bp.create_new_page_for_write(c_key).unwrap();
         p2.init();
 
         // Insert 10 keys into p0
@@ -503,13 +533,83 @@ mod tests {
     }
 
     #[test]
-    fn test_page_split_with_foster_child() {
-        let db_id = 0;
-        let c_id = 0;
+    fn test_page_adopt() {
+        // One parent page. One child page with foster child.
+        let (db_id, c_id) = (0, 0);
         let c_key = ContainerKey::new(db_id, c_id);
-
         let (temp_dir, bp) = get_buffer_pool(db_id);
-        let p0_key = bp.create_new_page_for_write(c_key).unwrap().key().unwrap();
-        let mut p0 = bp.get_page_for_write(p0_key).unwrap();
+        let mut parent = bp.create_new_page_for_write(c_key).unwrap();
+        let mut child0 = bp.create_new_page_for_write(c_key).unwrap();
+        let mut child1 = bp.create_new_page_for_write(c_key).unwrap();
+
+        // Before:
+        //   parent [k0, k2)
+        //    |
+        //    v
+        //   child0 [k0, k2) --> child1 [k1, k2)
+        //
+        // After:
+        //   parent [k0, k2)
+        //    +-------------------+
+        //    |                   |
+        //    v                   v
+        //   child0 [k0, k1)    child1 [k1, k2)
+
+        let k0 = to_bytes(10);
+        let k1 = to_bytes(20);
+        let k2 = to_bytes(30);
+
+        parent.init();
+        parent.set_low_fence(&k0);
+        parent.set_high_fence(&k2);
+        parent.insert(&k0, &child0.get_id().to_be_bytes(), false);
+        parent.set_leaf(false);
+
+        child0.init();
+        child0.set_low_fence(&k0);
+        child0.set_high_fence(&k2);
+        // Insert 10 slots
+        for i in 0..10 {
+            let key = to_bytes(i + 10);
+            child0.insert(&key, &key, false);
+        }
+        child0.set_foster_child(true);
+        child0.insert(&k1, &child1.get_id().to_be_bytes(), false);
+
+        child1.init();
+        child1.set_low_fence(&k1);
+        child1.set_high_fence(&k2);
+        // Insert 10 slots
+        for i in 0..10 {
+            let key = to_bytes(i + 20);
+            child1.insert(&key, &key, false);
+        }
+
+        // Run consistency checks
+        parent.run_consistency_checks(false);
+        child0.run_consistency_checks(false);
+        child1.run_consistency_checks(false);
+        assert_eq!(parent.active_slot_count(), 1);
+        assert_eq!(child0.active_slot_count(), 11);
+        assert_eq!(child1.active_slot_count(), 10);
+        assert_eq!(parent.get_val(1), child0.get_id().to_be_bytes());
+        assert!(child0.has_foster_child());
+        assert_eq!(child0.get_foster_key(), k1);
+        assert_eq!(child0.get_foster_page_id(), child1.get_id());
+
+        FosterBtree::adopt(&mut parent, &mut child0);
+
+        // Run consistency checks
+        parent.run_consistency_checks(false);
+        child0.run_consistency_checks(false);
+        child1.run_consistency_checks(false);
+        assert_eq!(parent.active_slot_count(), 2);
+        assert_eq!(child0.active_slot_count(), 10);
+        assert_eq!(child1.active_slot_count(), 10);
+        assert_eq!(parent.get_val(1), child0.get_id().to_be_bytes());
+        assert_eq!(parent.get_val(2), child1.get_id().to_be_bytes());
+        assert_eq!(child0.has_foster_child(), false);
+
+        drop(temp_dir);
     }
 }

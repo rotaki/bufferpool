@@ -195,7 +195,8 @@ pub trait FosterBtreePage {
     fn slot(&self, slot_id: u16) -> Option<Slot>;
     fn append_slot(&mut self, slot: &Slot);
     fn update_slot(&mut self, slot_id: u16, slot: &Slot);
-    fn free_space(&self) -> usize;
+    fn contiguous_free_space(&self) -> usize;
+    fn total_free_space(&self) -> usize;
     fn shift_records(&mut self, shift_start_offset: u16, shift_size: u16);
     fn linear_search<F>(&self, f: F) -> u16
     where
@@ -244,7 +245,8 @@ pub trait FosterBtreePage {
     fn inside_range(&self, key: &BTreeKey) -> bool;
     fn lower_bound_slot_id(&self, key: &BTreeKey) -> u16;
     fn find_slot_id(&self, key: &BTreeKey) -> Option<u16>;
-    fn insert_at(&mut self, slot_id: u16, key: &[u8], value: &[u8]);
+    fn insert_at(&mut self, slot_id: u16, key: &[u8], value: &[u8]) -> bool;
+    fn update_at(&mut self, slot_id: u16, key: &[u8], value: &[u8]) -> bool;
     fn remove_at(&mut self, slot_id: u16);
     fn set_low_fence(&mut self, key: &[u8]);
     fn set_high_fence(&mut self, key: &[u8]);
@@ -414,10 +416,20 @@ impl FosterBtreePage for Page {
         self.set_rec_start_offset(offset);
     }
 
-    fn free_space(&self) -> usize {
+    fn contiguous_free_space(&self) -> usize {
         let next_slot_offset = self.slot_offset(self.slot_count());
         let rec_start_offset = self.rec_start_offset();
         rec_start_offset as usize - next_slot_offset
+    }
+
+    fn total_free_space(&self) -> usize {
+        let mut sum_used = PAGE_HEADER_SIZE;
+        for i in 0..self.slot_count() {
+            let slot = self.slot(i).unwrap();
+            sum_used += slot.key_size() as usize + slot.value_size() as usize;
+            sum_used += SLOT_SIZE;
+        }
+        self.len() - sum_used
     }
 
     // [ [rec4 ][rec3 ][rec2 ][rec1 ] ]
@@ -641,6 +653,11 @@ impl FosterBtreePage for Page {
         self.set_foster_child(false);
         self.set_slot_count(0);
         self.set_rec_start_offset(self.len() as u16);
+
+        // Insert low fence
+        self.insert_at(0, &[], &[]);
+        // Insert high fence
+        self.insert_at(1, &[], &[]);
     }
 
     fn init_as_root(&mut self) {
@@ -652,9 +669,9 @@ impl FosterBtreePage for Page {
         self.set_rec_start_offset(self.len() as u16);
 
         // Insert low fence
-        self.set_low_fence(&[]);
+        self.insert_at(0, &[], &[]);
         // Insert high fence
-        self.set_high_fence(&[]);
+        self.insert_at(1, &[], &[]);
     }
 
     fn is_ghost_slot(&self, slot_id: u16) -> bool {
@@ -761,36 +778,13 @@ impl FosterBtreePage for Page {
     }
 
     fn set_low_fence(&mut self, key: &[u8]) {
-        // Low fence is always at slot_id 0. This never changes.
-        if self.slot_count() != 0 {
-            panic!("Cannot insert low fence when slot_count != 0");
-        }
-        let current_offset = self.rec_start_offset();
-        let rec_size = key.len();
-        // Insert the key
-        let offset = current_offset - rec_size as u16;
-        self[offset as usize..offset as usize + key.len()].copy_from_slice(key);
-        // Insert the slot
-        let mut slot = Slot::new(offset, key.len() as u16, 0);
-        slot.set_ghost(true);
-        self.append_slot(&slot);
+        self.update_at(self.low_fence_slot_id(), key, &[]);
     }
 
+    /// Set the high fence of the page.
+    /// This function will
     fn set_high_fence(&mut self, key: &[u8]) {
-        // High fence is initially inserted at slot_id 1 (slot_id will change if other slots are inserted).
-        if self.slot_count() != 1 {
-            // Assumes that the low fence is already inserted but no other slots are inserted.
-            panic!("Cannot insert high fence when slot_count != 1");
-        }
-        let current_offset = self.rec_start_offset();
-        let rec_size = key.len();
-        // Insert the key
-        let offset = current_offset - rec_size as u16;
-        self[offset as usize..offset as usize + key.len()].copy_from_slice(key);
-        // Insert the slot
-        let mut slot = Slot::new(offset, key.len() as u16, 0);
-        slot.set_ghost(true);
-        self.append_slot(&slot);
+        self.update_at(self.high_fence_slot_id(), key, &[]);
     }
 
     /// Insert a key-value-pair at slot_id.
@@ -803,7 +797,19 @@ impl FosterBtreePage for Page {
     /// We want to insert a new key-value pair at slot2.
     /// Need to shift slot2 and slot3 to the right.
     /// [ [slot1][slot2'][slot2][slot3] ]
-    fn insert_at(&mut self, slot_id: u16, key: &[u8], value: &[u8]) {
+    ///
+    /// This function **DOES NOT** check the existence of the key before inserting.
+    /// This function **DOES NOT** check the sorted order of the keys.
+    fn insert_at(&mut self, slot_id: u16, key: &[u8], value: &[u8]) -> bool {
+        let rec_size = key.len() + value.len();
+        if SLOT_SIZE + rec_size > self.contiguous_free_space() {
+            if SLOT_SIZE + rec_size > self.total_free_space() {
+                return false;
+            } else {
+                self.compact_space();
+                return self.insert_at(slot_id, key, value);
+            }
+        }
         let start = self.slot_offset(slot_id);
         let end = self.slot_offset(self.slot_count());
         if start > end {
@@ -844,6 +850,51 @@ impl FosterBtreePage for Page {
             self.set_rec_start_offset(offset);
             self.increment_slot_count();
         }
+        true
+    }
+
+    /// Update the key-value pair at slot_id.
+    ///
+    /// There are three cases to consider:
+    /// 1. The record can be updated in-place. This is when the new_rec_size is smaller or equal to the old_rec_size.
+    /// 2. The new record can be inserted into the contiguous free space.
+    /// 3. The new record cannot be inserted into the contiguous free space. In this case, compact the space and try again.
+    ///
+    /// This function **DOES NOT** check the sorted order of the keys.
+    fn update_at(&mut self, slot_id: u16, key: &[u8], value: &[u8]) -> bool {
+        assert!(slot_id < self.slot_count());
+        let mut slot = self.slot(slot_id).unwrap();
+        let old_rec_size = slot.key_size() as usize + slot.value_size() as usize;
+        let new_rec_size = key.len() + value.len();
+        if new_rec_size <= old_rec_size {
+            let offset = slot.offset() as usize;
+            self[offset..offset + key.len()].copy_from_slice(key);
+            self[offset + key.len()..offset + new_rec_size].copy_from_slice(value);
+            slot.set_key_size(key.len() as u16);
+            slot.set_value_size(value.len() as u16);
+            self.update_slot(slot_id, &slot);
+            return true;
+        }
+
+        if new_rec_size > self.contiguous_free_space() {
+            if new_rec_size > self.total_free_space() {
+                return false;
+            } else {
+                // Run compact_space and try again
+                self.compact_space();
+                return self.update_at(slot_id, key, value);
+            }
+        }
+
+        // Insert the key-value pair at the beginning of the record space.
+        let current_offset = self.rec_start_offset();
+        let offset = current_offset - new_rec_size as u16;
+        self[offset as usize..offset as usize + key.len()].copy_from_slice(key);
+        self[offset as usize + key.len()..offset as usize + new_rec_size].copy_from_slice(value);
+        // Update the slot
+        let new_slot = Slot::new(offset, key.len() as u16, value.len() as u16);
+        self.update_slot(slot_id, &new_slot);
+        true
     }
 
     /// Remove a slot at slot_id.
@@ -891,21 +942,15 @@ impl FosterBtreePage for Page {
     /// 2. Panics if the key is out of the range of the page.
     /// 3. Panics if the key already exists in the page.
     fn insert(&mut self, key: &[u8], value: &[u8], _make_ghost: bool) -> bool {
-        let rec_size = key.len() + value.len();
-        if SLOT_SIZE + rec_size > self.free_space() {
-            false
-        } else {
-            let slot_id = self.lower_bound_slot_id(&BTreeKey::Normal(key));
-            // Check duplicate key. Duplication is only allowed for LOWER FENCE.
-            if slot_id != self.low_fence_slot_id()
-                && self.get_btree_key(slot_id) == BTreeKey::Normal(key)
-            {
-                panic!("Duplicate key");
-            }
-            // Insert at slot_id + 1
-            self.insert_at(slot_id + 1, key, value);
-            true
+        let slot_id = self.lower_bound_slot_id(&BTreeKey::Normal(key));
+        // Check duplicate key. Duplication is only allowed for LOWER FENCE.
+        if slot_id != self.low_fence_slot_id()
+            && self.get_btree_key(slot_id) == BTreeKey::Normal(key)
+        {
+            panic!("Duplicate key");
         }
+        // Insert at slot_id + 1
+        self.insert_at(slot_id + 1, key, value)
     }
 
     /// Mark the slot with the given key as a ghost slot.
@@ -974,7 +1019,7 @@ impl FosterBtreePage for Page {
             .map(|(k, v)| k.len() + v.len())
             .sum::<usize>()
             + recs_ref.len() * SLOT_SIZE;
-        if inserting_size > self.free_space() {
+        if inserting_size > self.contiguous_free_space() {
             return false;
         }
 
@@ -1518,5 +1563,30 @@ mod tests {
         fbt_page.compact_space();
         fbt_page.run_consistency_checks(true);
         // fbt_page.print_all();
+    }
+
+    #[test]
+    fn test_update_at() {
+        let mut fbt_page = Page::new_empty();
+        fbt_page.init();
+        fbt_page.run_consistency_checks(true);
+
+        let low_fence = "b".as_bytes();
+        let high_fence = "d".as_bytes();
+        fbt_page.set_low_fence(low_fence);
+        fbt_page.set_high_fence(high_fence);
+        fbt_page.run_consistency_checks(true);
+
+        fbt_page.insert("b".as_bytes(), "bb".as_bytes(), false);
+        fbt_page.run_consistency_checks(true);
+        fbt_page.insert("c".as_bytes(), "cc".as_bytes(), false);
+        fbt_page.run_consistency_checks(true);
+
+        assert!(fbt_page.update_at(1, "b".as_bytes(), "bbb".as_bytes()));
+        fbt_page.run_consistency_checks(false);
+        // fbt_page.print_all(|key| String::from_utf8_lossy(key).to_string());
+        fbt_page.compact_space();
+        fbt_page.run_consistency_checks(true);
+        assert_eq!(fbt_page.get_val(1), "bbb".as_bytes());
     }
 }
