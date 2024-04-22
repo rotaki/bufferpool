@@ -52,6 +52,12 @@ impl FosterBtree {
     /// * This means that the high fence of the foster child will be the same as the high fence of this page.
     /// If this is the left-most page, then the foster child iwll *NOT* be the left-most page.
     /// * This means that the high fence of the foster child will be the same as the low fence of the foster child.
+    ///
+    /// Before:
+    ///  this [k0, k1)
+    ///
+    /// After:
+    ///  this [k0, k1) --> foster_child [k2, k1)
     fn split(this: &mut Page, foster_child: &mut Page) {
         if this.slot_count() - 2 < 2 {
             // -2 to exclude the low and high fences.
@@ -98,7 +104,7 @@ impl FosterBtree {
                 }
                 recs
             };
-            let res = foster_child.insert_sorted(recs);
+            let res = foster_child.append_sorted(recs);
             assert!(res);
         }
 
@@ -126,6 +132,40 @@ impl FosterBtree {
         {
             this.run_consistency_checks(true);
             foster_child.run_consistency_checks(true);
+        }
+    }
+
+    /// Merge the foster child page into this page.
+    /// The foster child page will be deleted.
+    // Before:
+    //   this [k0, k2) --> sibling [k1, k2)
+    //
+    // After:
+    //   this [k0, k2)
+    fn merge(this: &mut Page, foster_child: &mut Page) {
+        assert_eq!(this.level(), foster_child.level());
+        assert!(this.has_foster_child());
+
+        let mut kvs = Vec::new();
+        for i in 1..=foster_child.active_slot_count() {
+            let key = foster_child.get_raw_key(i);
+            let val = foster_child.get_val(i);
+            kvs.push((key, val));
+        }
+        this.remove_at(this.foster_child_slot_id());
+        let res = this.append_sorted(kvs);
+        if res {
+            this.set_foster_child(foster_child.has_foster_child());
+            foster_child.remove_range(1, foster_child.high_fence_slot_id());
+            foster_child.set_foster_child(false);
+        } else {
+            todo!("Not enough space to merge the foster child");
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            this.run_consistency_checks(false);
+            foster_child.run_consistency_checks(false);
         }
     }
 
@@ -207,7 +247,7 @@ impl FosterBtree {
             let val = child.get_val(i);
             kvs.push((key, val));
         }
-        let res = root.insert_sorted(kvs);
+        let res = root.append_sorted(kvs);
         assert!(res);
 
         child.remove_range(1, child.high_fence_slot_id());
@@ -251,7 +291,7 @@ impl FosterBtree {
             let val = root.get_val(i);
             kvs.push((key, val));
         }
-        let res = child.insert_sorted(kvs);
+        let res = child.append_sorted(kvs);
         assert!(res);
 
         // Remove the moved slots from the root
@@ -567,7 +607,7 @@ mod tests {
         p2.init();
 
         // Insert 10 keys into p0
-        p0.insert_sorted(kvs.clone());
+        p0.append_sorted(kvs.clone());
         assert_eq!(p0.active_slot_count(), 10);
 
         {
@@ -639,6 +679,93 @@ mod tests {
         }
 
         drop(temp_dir);
+    }
+
+    fn test_page_merge_detail(
+        k0: usize,
+        k1: usize,
+        k2: usize,
+        left: Vec<usize>,
+        right: Vec<usize>,
+    ) {
+        // check left and right are sorted and in the correct range
+        assert!(left.iter().all(|&x| k0 <= x && x < k1));
+        if left.len() > 0 {
+            for i in 0..left.len() - 1 {
+                assert!(left[i] < left[i + 1]);
+            }
+        }
+        assert!(right.iter().all(|&x| k1 <= x && x < k2));
+        if right.len() > 0 {
+            for i in 0..right.len() - 1 {
+                assert!(right[i] < right[i + 1]);
+            }
+        }
+        let (db_id, c_id) = (0, 0);
+        let c_key = ContainerKey::new(db_id, c_id);
+        let (temp_dir, bp) = get_buffer_pool(db_id);
+        let mut p0 = bp.create_new_page_for_write(c_key).unwrap();
+        let mut p1 = bp.create_new_page_for_write(c_key).unwrap();
+
+        let k0 = to_bytes(k0);
+        let k1 = to_bytes(k1);
+        let k2 = to_bytes(k2);
+
+        p0.init();
+        p0.set_level(0);
+        p0.set_low_fence(&k0);
+        p0.set_high_fence(&k2);
+        p0.set_foster_child(true);
+        p0.append_sorted(left.iter().map(|&x| (to_bytes(x), to_bytes(x))).collect());
+        p0.insert(&k1, &p1.get_id().to_be_bytes(), false);
+
+        p1.init();
+        p1.set_level(0);
+        p1.set_low_fence(&k1);
+        p1.set_high_fence(&k2);
+        p1.append_sorted(right.iter().map(|&x| (to_bytes(x), to_bytes(x))).collect());
+
+        // Run consistency checks
+        p0.run_consistency_checks(true);
+        p1.run_consistency_checks(true);
+
+        // Merge p1 into p0
+        FosterBtree::merge(&mut p0, &mut p1);
+
+        // Run consistency checks
+        p0.run_consistency_checks(false);
+        p1.run_consistency_checks(false);
+        // Check the contents of p0
+        assert_eq!(p0.active_slot_count() as usize, left.len() + right.len());
+        for i in 0..left.len() {
+            let key = p0.get_raw_key((i + 1) as u16);
+            assert_eq!(key, to_bytes(left[i]));
+            let val = p0.get_val((i + 1) as u16);
+            assert_eq!(val, to_bytes(left[i]));
+        }
+        for i in 0..right.len() {
+            let key = p0.get_raw_key((i + 1 + left.len()) as u16);
+            assert_eq!(key, to_bytes(right[i]));
+            let val = p0.get_val((i + 1 + left.len()) as u16);
+            assert_eq!(val, to_bytes(right[i]));
+        }
+        assert_eq!(p0.get_low_fence().as_ref(), k0);
+        assert_eq!(p0.get_high_fence().as_ref(), k2);
+        assert!(!p0.has_foster_child());
+
+        assert!(p1.empty());
+
+        // print_page(&p0);
+        // print_page(&p1);
+
+        drop(temp_dir);
+    }
+
+    #[test]
+    fn test_page_merge() {
+        test_page_merge_detail(10, 20, 30, vec![10, 15], vec![20, 25, 29]);
+        test_page_merge_detail(10, 20, 30, vec![], vec![20, 25]);
+        test_page_merge_detail(10, 20, 30, vec![10, 15], vec![]);
     }
 
     #[test]

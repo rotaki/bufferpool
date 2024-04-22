@@ -257,7 +257,7 @@ pub trait FosterBtreePage {
     fn insert(&mut self, key: &[u8], value: &[u8], make_ghost: bool) -> bool;
     fn mark_ghost(&mut self, key: &[u8]);
     fn remove(&mut self, key: &[u8]);
-    fn insert_sorted<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, recs: Vec<(K, V)>) -> bool;
+    fn append_sorted<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, recs: Vec<(K, V)>) -> bool;
     fn remove_range(&mut self, start: u16, end: u16);
 
     #[cfg(any(test, debug_assertions))]
@@ -991,15 +991,15 @@ impl FosterBtreePage for Page {
         }
     }
 
-    /// Insert a sorted list of key-value pairs to a empty page.
-    /// The input recs must be sorted.
-    /// The page must be empty except for the low and high fences.
+    /// Append a sorted list of key-value pairs to the page.
+    /// The input recs must be sorted in the ascending order of the keys.
+    /// The input recs must be in [last_slot_key, high_fence)
     ///
     /// This function fails in the following cases:
     /// 1. Returns false if the page does not have enough space to insert the key-value pairs.
     /// 2. Panics if the page is not empty except for the low and high fences.
     /// 3. Panics if the range of the key-value pairs is out of the range of the page.
-    fn insert_sorted<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, recs: Vec<(K, V)>) -> bool {
+    fn append_sorted<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, recs: Vec<(K, V)>) -> bool {
         let recs_ref = recs
             .iter()
             .map(|(k, v)| (k.as_ref(), v.as_ref()))
@@ -1011,19 +1011,21 @@ impl FosterBtreePage for Page {
 
         #[cfg(any(test, debug_assertions))]
         {
-            // lower fence < recs < high fence
-            let low_fence = self.get_low_fence();
+            // last_slot_key < recs < high fence
+            let last_key = self.get_btree_key(self.high_fence_slot_id() - 1);
             let high_fence = self.get_high_fence();
-            assert!(low_fence <= BTreeKey::Normal(recs_ref[0].0));
+            if self.low_fence_slot_id() == self.high_fence_slot_id() - 1 {
+                assert!(last_key <= BTreeKey::Normal(recs_ref[0].0));
+            } else {
+                assert!(last_key < BTreeKey::Normal(recs_ref[0].0));
+            }
             assert!(BTreeKey::Normal(recs_ref[recs_ref.len() - 1].0) < high_fence);
             // Check sortedness of the input recs
             for i in 1..recs_ref.len() {
                 assert!(recs_ref[i - 1].0 < recs_ref[i].0);
             }
         }
-        if self.slot_count() != 2 {
-            panic!("Page must be empty except for the low and high fences");
-        }
+
         // Calculate the inserting size and check if the page has enough space.
         let inserting_size = recs_ref
             .iter()
@@ -1035,14 +1037,11 @@ impl FosterBtreePage for Page {
                 return false;
             } else {
                 self.compact_space();
-                return self.insert_sorted(recs);
+                return self.append_sorted(recs);
             }
         }
 
         // Place the key-value pairs in the record space and create the slots.
-        // For page header,
-        // 1. increment the slot_count
-        // 2. update the rec_start_offset
         let mut slots = Vec::new();
         let mut offset = self.rec_start_offset();
         for (key, value) in recs_ref {
@@ -1054,18 +1053,17 @@ impl FosterBtreePage for Page {
             self[offset as usize + key.len()..offset as usize + rec_size].copy_from_slice(value);
             slots.push(slot);
         }
-        let high_fence_slot = self.slot(1).unwrap(); // high fence is at slot_id 1 on an empty page
+        let high_fence_slot = self.slot(self.high_fence_slot_id()).unwrap();
         slots.push(high_fence_slot);
 
+        self.decrement_slot_count(); // Remove the high fence slot temporarily
+
         // slots contains the key-value pairs, and the high fence.
-        for (i, slot) in slots.iter().enumerate() {
-            let slot_id = i + 1; // 1 for the low fence
-            let slot_offset = self.slot_offset(slot_id as u16);
-            self[slot_offset..slot_offset + SLOT_SIZE].copy_from_slice(&slot.to_bytes());
+        for slot in slots {
+            self.append_slot(&slot);
         }
 
         // Update the header
-        self.set_slot_count(slots.len() as u16 + 1); // 1 for the low fence. The high fence is already included.
         self.set_rec_start_offset(offset);
 
         true
@@ -1077,7 +1075,10 @@ impl FosterBtreePage for Page {
     /// The slot_count is decremented by (to - from).
     /// This function does not reclaim the space. Run `compact_space` to reclaim the space.
     fn remove_range(&mut self, from: u16, to: u16) {
-        if from >= to {
+        if from == to {
+            return;
+        }
+        if from > to {
             panic!("start must be less than end");
         }
         if from <= self.low_fence_slot_id() || to > self.high_fence_slot_id() {
@@ -1531,7 +1532,7 @@ mod tests {
             ("b".as_bytes(), "bb".as_bytes()),
             ("c".as_bytes(), "cc".as_bytes()),
         ];
-        assert!(fbt_page.insert_sorted(recs));
+        assert!(fbt_page.append_sorted(recs));
         fbt_page.run_consistency_checks(true);
         assert_eq!(fbt_page.slot_count(), 4);
         assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("b")), 1);
@@ -1560,7 +1561,7 @@ mod tests {
             ("bbbbb".as_bytes(), "ccccc".as_bytes()),
             ("bbbbbb".as_bytes(), "cccccc".as_bytes()),
         ];
-        assert!(fbt_page.insert_sorted(recs));
+        assert!(fbt_page.append_sorted(recs));
         fbt_page.run_consistency_checks(true);
         assert_eq!(fbt_page.slot_count(), 8);
         // fbt_page.print_all();
