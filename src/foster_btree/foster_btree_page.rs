@@ -223,7 +223,7 @@ pub trait FosterBtreePage {
     fn is_right_most(&self) -> bool;
     fn set_right_most(&mut self, is_right_most: bool);
     fn has_foster_child(&self) -> bool;
-    fn set_foster_child(&mut self, has_foster_child: bool);
+    fn set_has_foster_child(&mut self, has_foster_child: bool);
     fn level(&self) -> u8;
     fn set_level(&mut self, level: u8);
     fn increment_level(&mut self);
@@ -319,7 +319,7 @@ impl FosterBtreePage for Page {
         self[0] & 0b0001_0000 != 0
     }
 
-    fn set_foster_child(&mut self, has_foster_child: bool) {
+    fn set_has_foster_child(&mut self, has_foster_child: bool) {
         if has_foster_child {
             self[0] |= 0b0001_0000;
         } else {
@@ -661,7 +661,7 @@ impl FosterBtreePage for Page {
         self.set_root(false);
         self.set_left_most(false);
         self.set_right_most(false);
-        self.set_foster_child(false);
+        self.set_has_foster_child(false);
         self.set_level(0);
         self.set_slot_count(0);
         self.set_rec_start_offset(self.len() as u16);
@@ -675,7 +675,7 @@ impl FosterBtreePage for Page {
         self.set_root(true);
         self.set_left_most(true);
         self.set_right_most(true);
-        self.set_foster_child(false);
+        self.set_has_foster_child(false);
         self.set_level(0);
         self.set_slot_count(0);
         self.set_rec_start_offset(self.len() as u16);

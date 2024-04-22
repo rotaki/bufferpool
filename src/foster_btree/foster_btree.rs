@@ -23,6 +23,19 @@ impl From<BPStatus> for TreeStatus {
     }
 }
 
+impl std::fmt::Debug for TreeStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TreeStatus::Ok => write!(f, "Ok"),
+            TreeStatus::NotFound => write!(f, "NotFound"),
+            TreeStatus::NotInPageRange => write!(f, "NotInPageRange"),
+            TreeStatus::Duplicate => write!(f, "Duplicate"),
+            TreeStatus::NotReadyForPhysicalDelete => write!(f, "NotReadyForPhysicalDelete"),
+            TreeStatus::BPStatus(status) => write!(f, "{:?}", status),
+        }
+    }
+}
+
 pub struct FosterBtree {
     pub c_key: ContainerKey,
     pub root_key: PageKey,
@@ -85,7 +98,7 @@ impl FosterBtree {
             }
             if this.has_foster_child() {
                 // If this page has foster children, then the foster child will also have foster children.
-                foster_child.set_foster_child(true);
+                foster_child.set_has_foster_child(true);
             }
             if this.is_leaf() {
                 // If this page is a leaf, then the foster child will also be a leaf.
@@ -125,7 +138,7 @@ impl FosterBtree {
             }
 
             // Mark that this page has foster children
-            this.set_foster_child(true);
+            this.set_has_foster_child(true);
         }
 
         #[cfg(debug_assertions)]
@@ -155,9 +168,9 @@ impl FosterBtree {
         this.remove_at(this.foster_child_slot_id());
         let res = this.append_sorted(kvs);
         if res {
-            this.set_foster_child(foster_child.has_foster_child());
+            this.set_has_foster_child(foster_child.has_foster_child());
             foster_child.remove_range(1, foster_child.high_fence_slot_id());
-            foster_child.set_foster_child(false);
+            foster_child.set_has_foster_child(false);
         } else {
             todo!("Not enough space to merge the foster child");
         }
@@ -207,7 +220,7 @@ impl FosterBtree {
         if inserted {
             // Remove the foster key from the child page.
             child.remove_at(foster_child_slot_id);
-            child.set_foster_child(false);
+            child.set_has_foster_child(false);
             child.set_high_fence(foster_key.as_ref());
         } else {
             // Need to split the parent page.
@@ -282,7 +295,7 @@ impl FosterBtree {
         child.set_left_most(true);
         child.set_high_fence(&foster_key);
         root.increment_level();
-        root.set_foster_child(false);
+        root.set_has_foster_child(false);
 
         // Move the root's data to the child
         let mut kvs = Vec::new();
@@ -338,13 +351,13 @@ impl FosterBtree {
     fn traverse_to_leaf_for_read(&self, key: &[u8]) -> Result<FrameReadGuard, TreeStatus> {
         let mut current_page = self.bp.get_page_for_read(self.root_key)?;
         loop {
-            let foster_page = &current_page;
-            if foster_page.is_leaf() {
+            let this_page = &current_page;
+            if this_page.is_leaf() {
                 break;
             }
             let page_key = {
-                let slot_id = foster_page.lower_bound_slot_id(&BTreeKey::new(key));
-                let page_id_bytes = foster_page.get_val(slot_id);
+                let slot_id = this_page.lower_bound_slot_id(&BTreeKey::new(key));
+                let page_id_bytes = this_page.get_val(slot_id);
                 let page_id = PageId::from_be_bytes(page_id_bytes.try_into().unwrap());
                 PageKey::new(self.c_key, page_id)
             };
@@ -503,7 +516,7 @@ mod tests {
 
     use crate::{buffer_pool::CacheEvictionPolicy, page::Page};
 
-    use super::{BufferPool, BufferPoolRef, ContainerKey, FosterBtree, FosterBtreePage};
+    use super::{BufferPool, BufferPoolRef, ContainerKey, FosterBtree, FosterBtreePage, PageKey};
 
     fn get_buffer_pool(db_id: u16) -> (TempDir, BufferPoolRef) {
         let temp_dir = TempDir::new().unwrap();
@@ -715,7 +728,7 @@ mod tests {
         p0.set_level(0);
         p0.set_low_fence(&k0);
         p0.set_high_fence(&k2);
-        p0.set_foster_child(true);
+        p0.set_has_foster_child(true);
         p0.append_sorted(left.iter().map(|&x| (to_bytes(x), to_bytes(x))).collect());
         p0.insert(&k1, &p1.get_id().to_be_bytes(), false);
 
@@ -810,7 +823,7 @@ mod tests {
             let key = to_bytes(i + 10);
             child0.insert(&key, &key, false);
         }
-        child0.set_foster_child(true);
+        child0.set_has_foster_child(true);
         child0.insert(&k1, &child1.get_id().to_be_bytes(), false);
 
         child1.init();
@@ -943,7 +956,7 @@ mod tests {
         }
         let foster_key = to_bytes(11);
         root.insert(&foster_key, &foster_child.get_id().to_be_bytes(), false);
-        root.set_foster_child(true);
+        root.set_has_foster_child(true);
 
         foster_child.init();
         foster_child.set_right_most(true);
@@ -1001,6 +1014,153 @@ mod tests {
         print_page(&root);
         print_page(&child);
         print_page(&foster_child);
+
+        drop(temp_dir);
+    }
+
+    fn setup_btree() -> (TempDir, FosterBtree) {
+        let (db_id, c_id) = (0, 0);
+        let c_key = ContainerKey::new(db_id, c_id);
+        let (temp_dir, bp) = get_buffer_pool(db_id);
+        let root_key = {
+            let mut root = bp.create_new_page_for_write(c_key).unwrap();
+            let mut inner0 = bp.create_new_page_for_write(c_key).unwrap();
+            let mut inner1 = bp.create_new_page_for_write(c_key).unwrap();
+            let mut leaf0 = bp.create_new_page_for_write(c_key).unwrap();
+            let mut leaf1 = bp.create_new_page_for_write(c_key).unwrap();
+            let mut leaf2 = bp.create_new_page_for_write(c_key).unwrap();
+            let mut leaf3 = bp.create_new_page_for_write(c_key).unwrap();
+
+            //
+            // root [-inf, +inf)
+            //  +------------------------------------------+
+            //  |                                          |
+            //  v                                          v
+            // inner0 [-inf, k0)                           inner1 [k0, +inf)
+            //  +-------------------+                      +-------------------+
+            //  |                   |                      |                   |
+            //  v                   v                      v                   v
+            // leaf0 [-inf, k1)    leaf1 [k1, k0)         leaf2 [k0, k2)      leaf3 [k2, +inf)
+
+            let k0 = to_bytes(20);
+            let k1 = to_bytes(10);
+            let k2 = to_bytes(30);
+
+            root.init_as_root();
+            root.set_level(2);
+            root.insert(&[], &inner0.get_id().to_be_bytes(), false);
+            root.insert(&k0, &inner1.get_id().to_be_bytes(), false);
+
+            inner0.init();
+            inner0.set_left_most(true);
+            inner0.set_high_fence(&k0);
+            inner0.set_level(1);
+            inner0.insert(&[], &leaf0.get_id().to_be_bytes(), false);
+
+            inner1.init();
+            inner1.set_right_most(true);
+            inner1.set_low_fence(&k0);
+            inner1.set_level(1);
+            inner1.insert(&k0, &leaf2.get_id().to_be_bytes(), false);
+            inner1.insert(&k2, &leaf3.get_id().to_be_bytes(), false);
+
+            leaf0.init();
+            leaf0.set_left_most(true);
+            leaf0.set_high_fence(&k1);
+            leaf0.set_level(0);
+            for i in 0..10 {
+                let key = to_bytes(i);
+                leaf0.insert(&key, &key, false);
+            }
+
+            leaf1.init();
+            leaf1.set_low_fence(&k1);
+            leaf1.set_high_fence(&k0);
+            leaf1.set_level(0);
+            for i in 10..20 {
+                let key = to_bytes(i);
+                leaf1.insert(&key, &key, false);
+            }
+
+            leaf2.init();
+            leaf2.set_low_fence(&k0);
+            leaf2.set_high_fence(&k2);
+            leaf2.set_level(0);
+            for i in 20..30 {
+                let key = to_bytes(i);
+                leaf2.insert(&key, &key, false);
+            }
+
+            leaf3.init();
+            leaf3.set_right_most(true);
+            leaf3.set_low_fence(&k2);
+            leaf3.set_level(0);
+            for i in 30..40 {
+                let key = to_bytes(i);
+                leaf3.insert(&key, &key, false);
+            }
+
+            root.key().unwrap()
+        };
+
+        let btree = FosterBtree {
+            c_key,
+            root_key,
+            bp: bp.clone(),
+        };
+        (temp_dir, btree)
+    }
+
+    #[test]
+    fn test_btree_traverse_to_leaf_for_read_simple() {
+        let (temp_dir, btree) = setup_btree();
+
+        {
+            let key = to_bytes(5);
+            let leaf = btree.traverse_to_leaf_for_read(&key).unwrap();
+            print_page(&leaf);
+            assert_eq!(leaf.active_slot_count(), 10);
+            for i in 1..=leaf.active_slot_count() {
+                let key = leaf.get_raw_key(i);
+                assert_eq!(key, to_bytes(i as usize - 1));
+                let val = leaf.get_val(i);
+                assert_eq!(val, to_bytes(i as usize - 1));
+            }
+        }
+        {
+            let key = to_bytes(15);
+            let leaf = btree.traverse_to_leaf_for_read(&key).unwrap();
+            print_page(&leaf);
+            assert_eq!(leaf.active_slot_count(), 10);
+            for i in 1..=leaf.active_slot_count() {
+                let key = leaf.get_raw_key(i);
+                assert_eq!(key, to_bytes(i as usize + 10 - 1));
+                let val = leaf.get_val(i);
+                assert_eq!(val, to_bytes(i as usize + 10 - 1));
+            }
+        }
+        {
+            let key = to_bytes(25);
+            let leaf = btree.traverse_to_leaf_for_read(&key).unwrap();
+            assert_eq!(leaf.active_slot_count(), 10);
+            for i in 1..=leaf.active_slot_count() {
+                let key = leaf.get_raw_key(i);
+                assert_eq!(key, to_bytes(i as usize + 20 - 1));
+                let val = leaf.get_val(i);
+                assert_eq!(val, to_bytes(i as usize + 20 - 1));
+            }
+        }
+        {
+            let key = to_bytes(35);
+            let leaf = btree.traverse_to_leaf_for_read(&key).unwrap();
+            assert_eq!(leaf.active_slot_count(), 10);
+            for i in 1..=leaf.active_slot_count() {
+                let key = leaf.get_raw_key(i);
+                assert_eq!(key, to_bytes(i as usize + 30 - 1));
+                let val = leaf.get_val(i);
+                assert_eq!(val, to_bytes(i as usize + 30 - 1));
+            }
+        }
 
         drop(temp_dir);
     }
