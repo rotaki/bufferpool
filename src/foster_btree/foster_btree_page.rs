@@ -1,7 +1,8 @@
 use crate::page::Page;
 
 // Page layout:
-// 1 byte: flags (is_root, is_leaf, leftmost, rightmost, has_foster_children)
+// 1 byte: flags (is_root, leftmost, rightmost, has_foster_children)
+// 1 byte: level (0 for leaf)
 // 2 byte: slot count (generally >=2  because of low and high fences)
 // 2 byte: free space
 // Slotted page layout:
@@ -105,7 +106,7 @@ mod slot {
 }
 
 use log::trace;
-const PAGE_HEADER_SIZE: usize = 5;
+const PAGE_HEADER_SIZE: usize = 6;
 use slot::{Slot, SLOT_SIZE};
 
 pub enum BTreeKey<'a> {
@@ -217,13 +218,16 @@ pub trait FosterBtreePage {
     fn is_root(&self) -> bool;
     fn set_root(&mut self, is_root: bool);
     fn is_leaf(&self) -> bool;
-    fn set_leaf(&mut self, is_leaf: bool);
     fn is_left_most(&self) -> bool;
     fn set_left_most(&mut self, is_left_most: bool);
     fn is_right_most(&self) -> bool;
     fn set_right_most(&mut self, is_right_most: bool);
     fn has_foster_child(&self) -> bool;
     fn set_foster_child(&mut self, has_foster_child: bool);
+    fn level(&self) -> u8;
+    fn set_level(&mut self, level: u8);
+    fn increment_level(&mut self);
+    fn decrement_level(&mut self);
     fn slot_count(&self) -> u16;
     fn active_slot_count(&self) -> u16;
     fn set_slot_count(&mut self, slot_count: u16);
@@ -284,58 +288,66 @@ impl FosterBtreePage for Page {
     }
 
     fn is_leaf(&self) -> bool {
+        self[1] == 0
+    }
+
+    fn is_left_most(&self) -> bool {
         self[0] & 0b0100_0000 != 0
     }
 
-    fn set_leaf(&mut self, is_leaf: bool) {
-        if is_leaf {
+    fn set_left_most(&mut self, is_left_most: bool) {
+        if is_left_most {
             self[0] |= 0b0100_0000;
         } else {
             self[0] &= 0b1011_1111;
         }
     }
 
-    fn is_left_most(&self) -> bool {
+    fn is_right_most(&self) -> bool {
         self[0] & 0b0010_0000 != 0
     }
 
-    fn set_left_most(&mut self, is_left_most: bool) {
-        if is_left_most {
+    fn set_right_most(&mut self, is_right_most: bool) {
+        if is_right_most {
             self[0] |= 0b0010_0000;
         } else {
             self[0] &= 0b1101_1111;
         }
     }
 
-    fn is_right_most(&self) -> bool {
+    fn has_foster_child(&self) -> bool {
         self[0] & 0b0001_0000 != 0
     }
 
-    fn set_right_most(&mut self, is_right_most: bool) {
-        if is_right_most {
+    fn set_foster_child(&mut self, has_foster_child: bool) {
+        if has_foster_child {
             self[0] |= 0b0001_0000;
         } else {
             self[0] &= 0b1110_1111;
         }
     }
 
-    fn has_foster_child(&self) -> bool {
-        self[0] & 0b0000_1000 != 0
+    fn level(&self) -> u8 {
+        self[1]
     }
 
-    fn set_foster_child(&mut self, has_foster_child: bool) {
-        if has_foster_child {
-            self[0] |= 0b0000_1000;
-        } else {
-            self[0] &= 0b1111_0111;
-        }
+    fn set_level(&mut self, level: u8) {
+        self[1] = level;
+    }
+
+    fn increment_level(&mut self) {
+        self[1] += 1; // Towards the root
+    }
+
+    fn decrement_level(&mut self) {
+        self[1] -= 1; // Towards the leaf
     }
 
     /// The number of slots in the page.
     /// The low fence and high fence are always present.
     /// Therefore, the slot count should be at least 2 after the initialization.
     fn slot_count(&self) -> u16 {
-        u16::from_be_bytes([self[1], self[2]])
+        u16::from_be_bytes([self[2], self[3]])
     }
 
     /// The number of active slots in the page.
@@ -347,8 +359,8 @@ impl FosterBtreePage for Page {
 
     fn set_slot_count(&mut self, slot_count: u16) {
         let bytes = slot_count.to_be_bytes();
-        self[1] = bytes[0];
-        self[2] = bytes[1];
+        self[2] = bytes[0];
+        self[3] = bytes[1];
     }
 
     fn increment_slot_count(&mut self) {
@@ -362,13 +374,13 @@ impl FosterBtreePage for Page {
     }
 
     fn rec_start_offset(&self) -> u16 {
-        u16::from_be_bytes([self[3], self[4]])
+        u16::from_be_bytes([self[4], self[5]])
     }
 
     fn set_rec_start_offset(&mut self, rec_start_offset: u16) {
         let bytes = rec_start_offset.to_be_bytes();
-        self[3] = bytes[0];
-        self[4] = bytes[1];
+        self[4] = bytes[0];
+        self[5] = bytes[1];
     }
 
     fn get_id(&self) -> u32 {
@@ -645,32 +657,31 @@ impl FosterBtreePage for Page {
     }
 
     fn init(&mut self) {
-        // Default is non-root, non-leaf, non-leftmost, non-rightmost, non-foster_children
+        // Default is non-root, leaf, non-leftmost, non-rightmost, non-foster_children
         self.set_root(false);
-        self.set_leaf(false);
         self.set_left_most(false);
         self.set_right_most(false);
         self.set_foster_child(false);
+        self.set_level(0);
         self.set_slot_count(0);
         self.set_rec_start_offset(self.len() as u16);
 
-        // Insert low fence
+        // Insert low and high fence
         self.insert_at(0, &[], &[]);
-        // Insert high fence
         self.insert_at(1, &[], &[]);
     }
 
     fn init_as_root(&mut self) {
         self.set_root(true);
-        self.set_leaf(true);
         self.set_left_most(true);
         self.set_right_most(true);
         self.set_foster_child(false);
+        self.set_level(0);
+        self.set_slot_count(0);
         self.set_rec_start_offset(self.len() as u16);
 
-        // Insert low fence
+        // Insert low and high fence
         self.insert_at(0, &[], &[]);
-        // Insert high fence
         self.insert_at(1, &[], &[]);
     }
 
@@ -683,7 +694,7 @@ impl FosterBtreePage for Page {
     }
 
     fn empty(&self) -> bool {
-        self.slot_count() <= 2 // low fence and high fence
+        self.slot_count() == 2 // low fence and high fence
     }
 
     fn get_raw_key(&self, slot_id: u16) -> &[u8] {
@@ -1020,7 +1031,12 @@ impl FosterBtreePage for Page {
             .sum::<usize>()
             + recs_ref.len() * SLOT_SIZE;
         if inserting_size > self.contiguous_free_space() {
-            return false;
+            if inserting_size > self.total_free_space() {
+                return false;
+            } else {
+                self.compact_space();
+                return self.insert_sorted(recs);
+            }
         }
 
         // Place the key-value pairs in the record space and create the slots.
