@@ -352,8 +352,19 @@ impl FosterBtree {
         let mut current_page = self.bp.get_page_for_read(self.root_key)?;
         loop {
             let this_page = &current_page;
+            // FosterBtree::print_page(this_page);
             if this_page.is_leaf() {
-                break;
+                if this_page.has_foster_child() && this_page.get_foster_key() <= key {
+                    // Check whether the foster child should be traversed.
+                    let foster_page_key = PageKey::new(self.c_key, this_page.get_foster_page_id());
+                    let foster_page = self.bp.get_page_for_read(foster_page_key)?;
+                    // Now we have two locks. We need to release the lock of the current page.
+
+                    current_page = foster_page;
+                    continue;
+                } else {
+                    break;
+                }
             }
             let page_key = {
                 let slot_id = this_page.lower_bound_slot_id(&BTreeKey::new(key));
@@ -412,6 +423,40 @@ impl FosterBtree {
             // Non-existent key
             Err(TreeStatus::NotFound)
         }
+    }
+
+    fn print_page(p: &Page) {
+        println!(
+            "----------------- Page ID: {} -----------------",
+            p.get_id()
+        );
+        println!("Low fence: {:?}", p.get_low_fence());
+        println!("High fence: {:?}", p.get_high_fence());
+        println!("Slot count: {}", p.slot_count());
+        println!("Active slot count: {}", p.active_slot_count());
+        println!("Foster child: {}", p.has_foster_child());
+        for i in 0..p.active_slot_count() {
+            let key = p.get_raw_key((i + 1) as u16);
+            let val = p.get_val((i + 1) as u16);
+            let key = if key.is_empty() {
+                "[]".to_owned()
+            } else {
+                usize::from_be_bytes(key.try_into().unwrap()).to_string()
+            };
+            let val = if p.has_foster_child() && i == p.active_slot_count() - 1 {
+                let page_id = u32::from_be_bytes(val.try_into().unwrap()).to_string();
+                format!("PageID({})", page_id)
+            } else {
+                if p.is_leaf() {
+                    usize::from_be_bytes(val.try_into().unwrap()).to_string()
+                } else {
+                    let page_id = u32::from_be_bytes(val.try_into().unwrap()).to_string();
+                    format!("PageID({})", page_id)
+                }
+            };
+            println!("Slot {}: Key: {}, Value: {}", i + 1, key, val);
+        }
+        println!("----------------------------------------------");
     }
 
     /*
@@ -544,40 +589,6 @@ mod tests {
         range.map(|i| (to_bytes(i), to_bytes(i))).collect()
     }
 
-    fn print_page(p: &Page) {
-        println!(
-            "----------------- Page ID: {} -----------------",
-            p.get_id()
-        );
-        println!("Low fence: {:?}", p.get_low_fence());
-        println!("High fence: {:?}", p.get_high_fence());
-        println!("Slot count: {}", p.slot_count());
-        println!("Active slot count: {}", p.active_slot_count());
-        println!("Foster child: {}", p.has_foster_child());
-        for i in 0..p.active_slot_count() {
-            let key = p.get_raw_key((i + 1) as u16);
-            let val = p.get_val((i + 1) as u16);
-            let key = if key.is_empty() {
-                "[]".to_owned()
-            } else {
-                usize::from_be_bytes(key.try_into().unwrap()).to_string()
-            };
-            let val = if p.has_foster_child() && i == p.active_slot_count() - 1 {
-                let page_id = u32::from_be_bytes(val.try_into().unwrap()).to_string();
-                format!("PageID({})", page_id)
-            } else {
-                if p.is_leaf() {
-                    usize::from_be_bytes(val.try_into().unwrap()).to_string()
-                } else {
-                    let page_id = u32::from_be_bytes(val.try_into().unwrap()).to_string();
-                    format!("PageID({})", page_id)
-                }
-            };
-            println!("Slot {}: Key: {}, Value: {}", i + 1, key, val);
-        }
-        println!("----------------------------------------------");
-    }
-
     #[test]
     fn test_page_setup() {
         let (db_id, c_id) = (0, 0);
@@ -593,7 +604,7 @@ mod tests {
             p.set_high_fence(&high_fence);
             assert_eq!(p.get_low_fence().as_ref(), low_fence);
             assert_eq!(p.get_high_fence().as_ref(), high_fence);
-            print_page(&p);
+            FosterBtree::print_page(&p);
         }
         drop(temp_dir);
     }
@@ -652,8 +663,8 @@ mod tests {
             // p1's high fence should be the same as p0's high fence
             assert_eq!(p0.get_high_fence(), p1.get_high_fence());
 
-            print_page(&p0);
-            print_page(&p1);
+            FosterBtree::print_page(&p0);
+            FosterBtree::print_page(&p1);
         }
 
         {
@@ -686,9 +697,9 @@ mod tests {
             // p2's high fence should be the same as p0's high fence
             assert_eq!(p0.get_high_fence(), p2.get_high_fence());
 
-            print_page(&p0);
-            print_page(&p2);
-            print_page(&p1);
+            FosterBtree::print_page(&p0);
+            FosterBtree::print_page(&p2);
+            FosterBtree::print_page(&p1);
         }
 
         drop(temp_dir);
@@ -923,8 +934,8 @@ mod tests {
             assert_eq!(val, to_bytes(i as usize));
         }
 
-        print_page(&root);
-        print_page(&child);
+        FosterBtree::print_page(&root);
+        FosterBtree::print_page(&child);
 
         drop(temp_dir);
     }
@@ -975,9 +986,9 @@ mod tests {
         foster_child.run_consistency_checks(true);
         child.run_consistency_checks(true);
 
-        print_page(&root);
-        print_page(&foster_child);
-        print_page(&child);
+        FosterBtree::print_page(&root);
+        FosterBtree::print_page(&foster_child);
+        FosterBtree::print_page(&child);
 
         FosterBtree::ascend_root(&mut root, &mut child);
 
@@ -1011,14 +1022,14 @@ mod tests {
             assert_eq!(val, to_bytes(i as usize + 10));
         }
 
-        print_page(&root);
-        print_page(&child);
-        print_page(&foster_child);
+        FosterBtree::print_page(&root);
+        FosterBtree::print_page(&child);
+        FosterBtree::print_page(&foster_child);
 
         drop(temp_dir);
     }
 
-    fn setup_btree() -> (TempDir, FosterBtree) {
+    fn setup_btree_simple() -> (TempDir, FosterBtree) {
         let (db_id, c_id) = (0, 0);
         let c_key = ContainerKey::new(db_id, c_id);
         let (temp_dir, bp) = get_buffer_pool(db_id);
@@ -1056,6 +1067,7 @@ mod tests {
             inner0.set_high_fence(&k0);
             inner0.set_level(1);
             inner0.insert(&[], &leaf0.get_id().to_be_bytes(), false);
+            inner0.insert(&k1, &leaf1.get_id().to_be_bytes(), false);
 
             inner1.init();
             inner1.set_right_most(true);
@@ -1111,14 +1123,108 @@ mod tests {
         (temp_dir, btree)
     }
 
+    fn setup_btree_with_foster_child() -> (TempDir, FosterBtree) {
+        let (db_id, c_id) = (0, 0);
+        let c_key = ContainerKey::new(db_id, c_id);
+        let (temp_dir, bp) = get_buffer_pool(db_id);
+
+        let root_key = {
+            let mut root = bp.create_new_page_for_write(c_key).unwrap();
+            let mut inner0 = bp.create_new_page_for_write(c_key).unwrap();
+            let mut inner1 = bp.create_new_page_for_write(c_key).unwrap();
+            let mut leaf0 = bp.create_new_page_for_write(c_key).unwrap();
+            let mut leaf1 = bp.create_new_page_for_write(c_key).unwrap();
+            let mut leaf2 = bp.create_new_page_for_write(c_key).unwrap();
+            let mut leaf3 = bp.create_new_page_for_write(c_key).unwrap();
+
+            //
+            // root [-inf, +inf)
+            //  |
+            //  v
+            // inner0 [-inf, +inf) -------------------> inner1 [k0, +inf)
+            //  |                                          |
+            //  v                                          v
+            // leaf0 [-inf, k0) --> leaf1 [k1, k0)        leaf2 [k0, +inf) --> leaf3 [k2, +inf)
+
+            let k0 = to_bytes(20);
+            let k1 = to_bytes(10);
+            let k2 = to_bytes(30);
+
+            root.init_as_root();
+            root.set_level(2);
+            root.insert(&[], &inner0.get_id().to_be_bytes(), false);
+
+            inner0.init();
+            inner0.set_left_most(true);
+            inner0.set_right_most(true);
+            inner0.set_level(1);
+            inner0.set_has_foster_child(true);
+            inner0.insert(&[], &leaf0.get_id().to_be_bytes(), false);
+            inner0.insert(&k0, &inner1.get_id().to_be_bytes(), false);
+
+            inner1.init();
+            inner1.set_right_most(true);
+            inner1.set_low_fence(&k0);
+            inner1.set_level(1);
+            inner1.insert(&k0, &leaf2.get_id().to_be_bytes(), false);
+
+            leaf0.init();
+            leaf0.set_left_most(true);
+            leaf0.set_high_fence(&k0);
+            leaf0.set_level(0);
+            for i in 0..5 {
+                let key = to_bytes(i);
+                leaf0.insert(&key, &key, false);
+            }
+            leaf0.set_has_foster_child(true);
+            leaf0.insert(&k1, &leaf1.get_id().to_be_bytes(), false);
+
+            leaf1.init();
+            leaf1.set_low_fence(&k1);
+            leaf1.set_high_fence(&k0);
+            leaf1.set_level(0);
+            for i in 10..15 {
+                let key = to_bytes(i);
+                leaf1.insert(&key, &key, false);
+            }
+
+            leaf2.init();
+            leaf2.set_right_most(true);
+            leaf2.set_low_fence(&k0);
+            leaf2.set_level(0);
+            for i in 20..25 {
+                let key = to_bytes(i);
+                leaf2.insert(&key, &key, false);
+            }
+            leaf2.set_has_foster_child(true);
+            leaf2.insert(&k2, &leaf3.get_id().to_be_bytes(), false);
+
+            leaf3.init();
+            leaf3.set_right_most(true);
+            leaf3.set_low_fence(&k2);
+            leaf3.set_level(0);
+            for i in 30..35 {
+                let key = to_bytes(i);
+                leaf3.insert(&key, &key, false);
+            }
+
+            root.key().unwrap()
+        };
+
+        let btree = FosterBtree {
+            c_key,
+            root_key,
+            bp: bp.clone(),
+        };
+        (temp_dir, btree)
+    }
     #[test]
     fn test_btree_traverse_to_leaf_for_read_simple() {
-        let (temp_dir, btree) = setup_btree();
+        let (temp_dir, btree) = setup_btree_simple();
 
         {
             let key = to_bytes(5);
             let leaf = btree.traverse_to_leaf_for_read(&key).unwrap();
-            print_page(&leaf);
             assert_eq!(leaf.active_slot_count(), 10);
             for i in 1..=leaf.active_slot_count() {
                 let key = leaf.get_raw_key(i);
@@ -1130,7 +1236,6 @@ mod tests {
         {
             let key = to_bytes(15);
             let leaf = btree.traverse_to_leaf_for_read(&key).unwrap();
-            print_page(&leaf);
             assert_eq!(leaf.active_slot_count(), 10);
             for i in 1..=leaf.active_slot_count() {
                 let key = leaf.get_raw_key(i);
@@ -1154,6 +1259,59 @@ mod tests {
             let key = to_bytes(35);
             let leaf = btree.traverse_to_leaf_for_read(&key).unwrap();
             assert_eq!(leaf.active_slot_count(), 10);
+            for i in 1..=leaf.active_slot_count() {
+                let key = leaf.get_raw_key(i);
+                assert_eq!(key, to_bytes(i as usize + 30 - 1));
+                let val = leaf.get_val(i);
+                assert_eq!(val, to_bytes(i as usize + 30 - 1));
+            }
+        }
+
+        drop(temp_dir);
+    }
+
+    #[test]
+    fn test_btree_traverse_to_leaf_for_read_with_foster_child() {
+        let (temp_dir, btree) = setup_btree_with_foster_child();
+
+        {
+            let key = to_bytes(5);
+            let leaf = btree.traverse_to_leaf_for_read(&key).unwrap();
+            assert_eq!(leaf.active_slot_count(), 6);
+            assert!(leaf.has_foster_child());
+            for i in 1..=leaf.active_slot_count() - 1 {
+                let key = leaf.get_raw_key(i);
+                assert_eq!(key, to_bytes(i as usize - 1));
+                let val = leaf.get_val(i);
+                assert_eq!(val, to_bytes(i as usize - 1));
+            }
+        }
+        {
+            let key = to_bytes(15);
+            let leaf = btree.traverse_to_leaf_for_read(&key).unwrap();
+            assert_eq!(leaf.active_slot_count(), 5);
+            for i in 1..=leaf.active_slot_count() {
+                let key = leaf.get_raw_key(i);
+                assert_eq!(key, to_bytes(i as usize + 10 - 1));
+                let val = leaf.get_val(i);
+                assert_eq!(val, to_bytes(i as usize + 10 - 1));
+            }
+        }
+        {
+            let key = to_bytes(25);
+            let leaf = btree.traverse_to_leaf_for_read(&key).unwrap();
+            assert_eq!(leaf.active_slot_count(), 6);
+            for i in 1..=leaf.active_slot_count() - 1 {
+                let key = leaf.get_raw_key(i);
+                assert_eq!(key, to_bytes(i as usize + 20 - 1));
+                let val = leaf.get_val(i);
+                assert_eq!(val, to_bytes(i as usize + 20 - 1));
+            }
+        }
+        {
+            let key = to_bytes(35);
+            let leaf = btree.traverse_to_leaf_for_read(&key).unwrap();
+            assert_eq!(leaf.active_slot_count(), 5);
             for i in 1..=leaf.active_slot_count() {
                 let key = leaf.get_raw_key(i);
                 assert_eq!(key, to_bytes(i as usize + 30 - 1));
