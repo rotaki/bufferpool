@@ -1220,7 +1220,7 @@ mod tests {
         let (temp_dir, btree) = setup_btree_simple();
 
         {
-            let key = to_bytes(5);
+            let key = to_bytes(0);
             let leaf = btree.traverse_to_leaf_for_read(&key).unwrap();
             assert_eq!(leaf.active_slot_count(), 10);
             for i in 1..=leaf.active_slot_count() {
@@ -1231,7 +1231,7 @@ mod tests {
             }
         }
         {
-            let key = to_bytes(15);
+            let key = to_bytes(10);
             let leaf = btree.traverse_to_leaf_for_read(&key).unwrap();
             assert_eq!(leaf.active_slot_count(), 10);
             for i in 1..=leaf.active_slot_count() {
@@ -1242,7 +1242,7 @@ mod tests {
             }
         }
         {
-            let key = to_bytes(25);
+            let key = to_bytes(20);
             let leaf = btree.traverse_to_leaf_for_read(&key).unwrap();
             assert_eq!(leaf.active_slot_count(), 10);
             for i in 1..=leaf.active_slot_count() {
@@ -1253,7 +1253,7 @@ mod tests {
             }
         }
         {
-            let key = to_bytes(35);
+            let key = to_bytes(30);
             let leaf = btree.traverse_to_leaf_for_read(&key).unwrap();
             assert_eq!(leaf.active_slot_count(), 10);
             for i in 1..=leaf.active_slot_count() {
@@ -1272,7 +1272,7 @@ mod tests {
         let (temp_dir, btree) = setup_btree_with_foster_child();
 
         {
-            let key = to_bytes(5);
+            let key = to_bytes(0);
             let leaf = btree.traverse_to_leaf_for_read(&key).unwrap();
             assert_eq!(leaf.active_slot_count(), 6);
             assert!(leaf.has_foster_child());
@@ -1284,7 +1284,7 @@ mod tests {
             }
         }
         {
-            let key = to_bytes(15);
+            let key = to_bytes(10);
             let leaf = btree.traverse_to_leaf_for_read(&key).unwrap();
             assert_eq!(leaf.active_slot_count(), 5);
             for i in 1..=leaf.active_slot_count() {
@@ -1295,7 +1295,7 @@ mod tests {
             }
         }
         {
-            let key = to_bytes(25);
+            let key = to_bytes(20);
             let leaf = btree.traverse_to_leaf_for_read(&key).unwrap();
             assert_eq!(leaf.active_slot_count(), 6);
             for i in 1..=leaf.active_slot_count() - 1 {
@@ -1306,7 +1306,7 @@ mod tests {
             }
         }
         {
-            let key = to_bytes(35);
+            let key = to_bytes(30);
             let leaf = btree.traverse_to_leaf_for_read(&key).unwrap();
             assert_eq!(leaf.active_slot_count(), 5);
             for i in 1..=leaf.active_slot_count() {
