@@ -347,8 +347,11 @@ impl FosterBtree {
         }
     }
 
-    fn modify_structure_if_necessary_in_read(&self, this: &mut FrameReadGuard, child: &mut FrameReadGuard) {
-
+    fn modify_structure_if_necessary_in_read(
+        &self,
+        this: &mut FrameReadGuard,
+        child: &mut FrameReadGuard,
+    ) {
     }
 
     fn traverse_to_leaf_for_read(&self, key: &[u8]) -> Result<FrameReadGuard, TreeStatus> {

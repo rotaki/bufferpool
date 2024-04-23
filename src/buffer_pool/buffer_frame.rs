@@ -30,17 +30,17 @@ unsafe impl Sync for BufferFrame {}
 impl BufferFrame {
     pub fn read(&self) -> FrameReadGuard {
         self.latch.shared();
-        FrameReadGuard { 
+        FrameReadGuard {
             upgraded: AtomicBool::new(false),
-            buffer_frame: self
+            buffer_frame: self,
         }
     }
 
     pub fn try_read(&self) -> Option<FrameReadGuard> {
         if self.latch.try_shared() {
-            Some(FrameReadGuard { 
+            Some(FrameReadGuard {
                 upgraded: AtomicBool::new(false),
-                buffer_frame: self
+                buffer_frame: self,
             })
         } else {
             None
@@ -88,9 +88,12 @@ impl<'a> FrameReadGuard<'a> {
         &self.buffer_frame.is_dirty
     }
 
-    pub fn try_upgrade(self) -> Option<FrameWriteGuard<'a>> {
+    pub fn try_upgrade(self, make_dirty: bool) -> Option<FrameWriteGuard<'a>> {
         if self.buffer_frame.latch.try_upgrade() {
             self.upgraded.store(true, Ordering::Relaxed);
+            if make_dirty {
+                self.buffer_frame.is_dirty.store(true, Ordering::Release);
+            }
             Some(FrameWriteGuard {
                 downgraded: AtomicBool::new(false),
                 buffer_frame: self.buffer_frame,
@@ -172,9 +175,10 @@ impl DerefMut for FrameWriteGuard<'_> {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
+    use std::{sync::Arc, thread};
+
     use super::*;
 
     #[test]
@@ -190,8 +194,129 @@ mod tests {
         let guard = buffer_frame.read();
         assert_eq!(guard.key(), &None);
         assert_eq!(guard.dirty().load(Ordering::Relaxed), false);
-        guard.into_iter().all
+        guard.iter().all(|&x| x == 0);
+        assert!(!guard.dirty().load(Ordering::Relaxed));
     }
 
+    #[test]
+    fn test_write_access() {
+        let buffer_frame = BufferFrame::default();
+        let mut guard = buffer_frame.write(true);
+        assert_eq!(guard.key(), &None);
+        assert_eq!(guard.dirty().load(Ordering::Relaxed), true);
+        guard.iter().all(|&x| x == 0);
+        guard[0] = 1;
+        assert_eq!(guard[0], 1);
+        assert_eq!(guard.dirty().load(Ordering::Relaxed), true);
+    }
 
+    #[test]
+    fn test_concurrent_read_access() {
+        let buffer_frame = BufferFrame::default();
+        let guard1 = buffer_frame.read();
+        let guard2 = buffer_frame.read();
+        assert_eq!(guard1.key(), &None);
+        assert_eq!(guard2.key(), &None);
+        assert_eq!(guard1.dirty().load(Ordering::Relaxed), false);
+        assert_eq!(guard2.dirty().load(Ordering::Relaxed), false);
+        guard1.iter().all(|&x| x == 0);
+        guard2.iter().all(|&x| x == 0);
+        assert!(!guard1.dirty().load(Ordering::Relaxed));
+        assert!(!guard2.dirty().load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_concurrent_write_access() {
+        let buffer_frame = Arc::new(BufferFrame::default());
+        // Instantiate three threads, each increments the first element of the page by 1 for 80 times.
+        // (80 * 3 < 255 so that the first element does not overflow)
+
+        // scoped threads
+        thread::scope(|s| {
+            let t1_frame = buffer_frame.clone();
+            let t2_frame = buffer_frame.clone();
+            let t3_frame = buffer_frame.clone();
+            let t1 = s.spawn(move || {
+                for _ in 0..80 {
+                    let mut guard1 = t1_frame.write(true);
+                    guard1[0] += 1;
+                }
+            });
+            let t2 = s.spawn(move || {
+                for _ in 0..80 {
+                    let mut guard2 = t2_frame.write(true);
+                    guard2[0] += 1;
+                }
+            });
+            let t3 = s.spawn(move || {
+                for _ in 0..80 {
+                    let mut guard3 = t3_frame.write(true);
+                    guard3[0] += 1;
+                }
+            });
+            t1.join().unwrap();
+            t2.join().unwrap();
+            t3.join().unwrap();
+        });
+
+        // Check if the first element is 240
+        let guard = buffer_frame.read();
+        assert_eq!(guard[0], 240);
+    }
+
+    #[test]
+    fn test_upgrade_access() {
+        let buffer_frame = BufferFrame::default();
+        {
+            // Upgrade read guard to write guard and modify the first element
+            let guard = buffer_frame.read();
+            let mut guard = guard.try_upgrade(true).unwrap();
+            assert_eq!(guard.key(), &None);
+            assert_eq!(guard.dirty().load(Ordering::Relaxed), true);
+            guard.iter().all(|&x| x == 0);
+            guard[0] = 1;
+            assert_eq!(guard[0], 1);
+            assert_eq!(guard.dirty().load(Ordering::Relaxed), true);
+        }
+        let guard = buffer_frame.read();
+        assert_eq!(guard[0], 1);
+        assert_eq!(guard.dirty().load(Ordering::Relaxed), true);
+    }
+
+    #[test]
+    fn test_downgrade_access() {
+        let buffer_frame = BufferFrame::default();
+        let mut guard = buffer_frame.write(true);
+        guard[0] = 1;
+        let guard = guard.downgrade();
+        assert_eq!(guard[0], 1);
+        assert_eq!(guard.dirty().load(Ordering::Relaxed), true);
+    }
+
+    #[test]
+    fn test_upgrade_and_downgrade_access() {
+        let buffer_frame = BufferFrame::default();
+        // read -> write(dirty=false) -> read -> write(dirty=true) -> read
+        let guard = buffer_frame.read();
+        assert_eq!(guard.dirty().load(Ordering::Relaxed), false);
+        let mut guard = guard.try_upgrade(false).unwrap();
+        guard[0] = 1;
+        assert_eq!(guard.dirty().load(Ordering::Relaxed), false);
+        let guard = guard.downgrade();
+        assert_eq!(guard.dirty().load(Ordering::Relaxed), false);
+        let mut guard = guard.try_upgrade(true).unwrap();
+        guard[0] += 1;
+        assert_eq!(guard.dirty().load(Ordering::Relaxed), true);
+        let guard = guard.downgrade();
+        assert_eq!(guard[0], 2);
+        assert_eq!(guard.dirty().load(Ordering::Relaxed), true);
+    }
+
+    #[test]
+    fn test_concurrent_upgrade_failure() {
+        let buffer_frame = BufferFrame::default();
+        let guard1 = buffer_frame.read();
+        let guard2 = buffer_frame.read();
+        assert!(guard1.try_upgrade(true).is_none());
+    }
 }
