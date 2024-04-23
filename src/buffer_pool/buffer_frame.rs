@@ -30,12 +30,18 @@ unsafe impl Sync for BufferFrame {}
 impl BufferFrame {
     pub fn read(&self) -> FrameReadGuard {
         self.latch.shared();
-        FrameReadGuard { buffer_frame: self }
+        FrameReadGuard { 
+            upgraded: AtomicBool::new(false),
+            buffer_frame: self
+        }
     }
 
     pub fn try_read(&self) -> Option<FrameReadGuard> {
         if self.latch.try_shared() {
-            Some(FrameReadGuard { buffer_frame: self })
+            Some(FrameReadGuard { 
+                upgraded: AtomicBool::new(false),
+                buffer_frame: self
+            })
         } else {
             None
         }
@@ -68,6 +74,7 @@ impl BufferFrame {
 }
 
 pub struct FrameReadGuard<'a> {
+    pub upgraded: AtomicBool,
     pub buffer_frame: &'a BufferFrame,
 }
 
@@ -80,11 +87,25 @@ impl<'a> FrameReadGuard<'a> {
     pub fn dirty(&self) -> &AtomicBool {
         &self.buffer_frame.is_dirty
     }
+
+    pub fn try_upgrade(self) -> Option<FrameWriteGuard<'a>> {
+        if self.buffer_frame.latch.try_upgrade() {
+            self.upgraded.store(true, Ordering::Relaxed);
+            Some(FrameWriteGuard {
+                downgraded: AtomicBool::new(false),
+                buffer_frame: self.buffer_frame,
+            })
+        } else {
+            None
+        }
+    }
 }
 
 impl<'a> Drop for FrameReadGuard<'a> {
     fn drop(&mut self) {
-        self.buffer_frame.latch.release_shared();
+        if !self.upgraded.load(Ordering::Relaxed) {
+            self.buffer_frame.latch.release_shared();
+        }
     }
 }
 
@@ -116,6 +137,7 @@ impl<'a> FrameWriteGuard<'a> {
         self.buffer_frame.latch.downgrade();
         self.downgraded.store(true, Ordering::Relaxed);
         FrameReadGuard {
+            upgraded: AtomicBool::new(false),
             buffer_frame: self.buffer_frame,
         }
     }
@@ -148,4 +170,28 @@ impl DerefMut for FrameWriteGuard<'_> {
         // SAFETY: This is safe because the latch is held exclusively.
         unsafe { &mut *self.buffer_frame.page.get() }
     }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_buffer_frame() {
+        let buffer_frame = BufferFrame::default();
+        assert_eq!(buffer_frame.is_dirty.load(Ordering::Relaxed), false);
+        assert!(unsafe { &*buffer_frame.key.get() }.is_none());
+    }
+
+    #[test]
+    fn test_read_access() {
+        let buffer_frame = BufferFrame::default();
+        let guard = buffer_frame.read();
+        assert_eq!(guard.key(), &None);
+        assert_eq!(guard.dirty().load(Ordering::Relaxed), false);
+        guard.into_iter().all
+    }
+
+
 }

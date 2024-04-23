@@ -347,6 +347,10 @@ impl FosterBtree {
         }
     }
 
+    fn modify_structure_if_necessary_in_read(&self, this: &mut FrameReadGuard, child: &mut FrameReadGuard) {
+
+    }
+
     fn traverse_to_leaf_for_read(&self, key: &[u8]) -> Result<FrameReadGuard, TreeStatus> {
         let mut current_page = self.bp.get_page_for_read(self.root_key)?;
         loop {
