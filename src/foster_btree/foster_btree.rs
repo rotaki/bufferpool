@@ -91,7 +91,6 @@ impl FosterBtree {
             if this.is_right_most() {
                 // If this is the right-most page, then the foster child will also be the right most page.
                 foster_child.set_high_fence(&[]);
-                foster_child.set_right_most(true);
             } else {
                 let high_fence = this.get_high_fence();
                 foster_child.set_high_fence(high_fence.as_ref());
@@ -292,7 +291,7 @@ impl FosterBtree {
         // Set level, has_foster_child flag, and fence keys
         child.init();
         child.set_level(root.level());
-        child.set_left_most(true);
+        child.set_low_fence(&[]);
         child.set_high_fence(&foster_key);
         root.increment_level();
         root.set_has_foster_child(false);
@@ -902,8 +901,6 @@ mod tests {
         root.insert(&[], &child.get_id().to_be_bytes(), false);
 
         child.init();
-        child.set_left_most(true);
-        child.set_right_most(true);
         child.set_low_fence(&[]);
         child.set_high_fence(&[]);
         // Insert 10 slots
@@ -970,8 +967,8 @@ mod tests {
         root.set_has_foster_child(true);
 
         foster_child.init();
-        foster_child.set_right_most(true);
         foster_child.set_low_fence(&foster_key);
+        foster_child.set_high_fence(&[]);
 
         // Insert 10 slots into the foster child
         for i in 11..=20 {
@@ -1063,21 +1060,21 @@ mod tests {
             root.insert(&k0, &inner1.get_id().to_be_bytes(), false);
 
             inner0.init();
-            inner0.set_left_most(true);
+            inner0.set_low_fence(&[]);
             inner0.set_high_fence(&k0);
             inner0.set_level(1);
             inner0.insert(&[], &leaf0.get_id().to_be_bytes(), false);
             inner0.insert(&k1, &leaf1.get_id().to_be_bytes(), false);
 
             inner1.init();
-            inner1.set_right_most(true);
             inner1.set_low_fence(&k0);
+            inner1.set_high_fence(&[]);
             inner1.set_level(1);
             inner1.insert(&k0, &leaf2.get_id().to_be_bytes(), false);
             inner1.insert(&k2, &leaf3.get_id().to_be_bytes(), false);
 
             leaf0.init();
-            leaf0.set_left_most(true);
+            leaf0.set_low_fence(&[]);
             leaf0.set_high_fence(&k1);
             leaf0.set_level(0);
             for i in 0..10 {
@@ -1104,8 +1101,8 @@ mod tests {
             }
 
             leaf3.init();
-            leaf3.set_right_most(true);
             leaf3.set_low_fence(&k2);
+            leaf3.set_high_fence(&[]);
             leaf3.set_level(0);
             for i in 30..40 {
                 let key = to_bytes(i);
@@ -1155,21 +1152,21 @@ mod tests {
             root.insert(&[], &inner0.get_id().to_be_bytes(), false);
 
             inner0.init();
-            inner0.set_left_most(true);
-            inner0.set_right_most(true);
+            inner0.set_low_fence(&[]);
+            inner0.set_high_fence(&[]);
             inner0.set_level(1);
             inner0.set_has_foster_child(true);
             inner0.insert(&[], &leaf0.get_id().to_be_bytes(), false);
             inner0.insert(&k0, &inner1.get_id().to_be_bytes(), false);
 
             inner1.init();
-            inner1.set_right_most(true);
             inner1.set_low_fence(&k0);
+            inner1.set_high_fence(&[]);
             inner1.set_level(1);
             inner1.insert(&k0, &leaf2.get_id().to_be_bytes(), false);
 
             leaf0.init();
-            leaf0.set_left_most(true);
+            leaf0.set_low_fence(&[]);
             leaf0.set_high_fence(&k0);
             leaf0.set_level(0);
             for i in 0..5 {
@@ -1189,8 +1186,8 @@ mod tests {
             }
 
             leaf2.init();
-            leaf2.set_right_most(true);
             leaf2.set_low_fence(&k0);
+            leaf2.set_high_fence(&[]);
             leaf2.set_level(0);
             for i in 20..25 {
                 let key = to_bytes(i);
@@ -1200,8 +1197,8 @@ mod tests {
             leaf2.insert(&k2, &leaf3.get_id().to_be_bytes(), false);
 
             leaf3.init();
-            leaf3.set_right_most(true);
             leaf3.set_low_fence(&k2);
+            leaf3.set_high_fence(&[]);
             leaf3.set_level(0);
             for i in 30..35 {
                 let key = to_bytes(i);

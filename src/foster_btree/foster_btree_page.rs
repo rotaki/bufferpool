@@ -789,12 +789,18 @@ impl FosterBtreePage for Page {
     }
 
     fn set_low_fence(&mut self, key: &[u8]) {
+        if key == &[] {
+            self.set_left_most(true)
+        }
         self.update_at(self.low_fence_slot_id(), key, &[]);
     }
 
     /// Set the high fence of the page.
     /// This function will
     fn set_high_fence(&mut self, key: &[u8]) {
+        if key == &[] {
+            self.set_right_most(true)
+        }
         self.update_at(self.high_fence_slot_id(), key, &[]);
     }
 
@@ -1343,12 +1349,10 @@ mod tests {
         {
             // Left most page
             let mut fbt_page = Page::new_empty();
-            let low_fence = "".as_bytes();
             let high_fence = "d".as_bytes();
             fbt_page.init();
-            fbt_page.set_low_fence(low_fence);
+            fbt_page.set_low_fence(&[]);
             fbt_page.set_high_fence(high_fence);
-            fbt_page.set_left_most(true);
             fbt_page.check_fence_slots_exists();
 
             assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("a")), 0);
@@ -1379,11 +1383,9 @@ mod tests {
             // Right most page
             let mut fbt_page = Page::new_empty();
             let low_fence = "b".as_bytes();
-            let high_fence = "".as_bytes();
             fbt_page.init();
             fbt_page.set_low_fence(low_fence);
-            fbt_page.set_high_fence(high_fence);
-            fbt_page.set_right_most(true);
+            fbt_page.set_high_fence(&[]);
             fbt_page.check_fence_slots_exists();
 
             assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("b")), 0);
