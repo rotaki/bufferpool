@@ -17,6 +17,18 @@ pub enum TreeStatus {
     BPStatus(BPStatus),
 }
 
+enum OpType {
+    SPLIT = 0,
+    MERGE = 1,
+    ADOPT = 2,
+    ANTIADOPT = 3,
+    LIFTUP = 4,
+    LIFTDOWN = 5,
+    MAX = 6,
+}
+
+pub const MERGE_THRESHOLD: usize = 3269; // (4096 - BASE_HEADER_SIZE) * 0.8
+
 impl From<BPStatus> for TreeStatus {
     fn from(status: BPStatus) -> Self {
         TreeStatus::BPStatus(status)
@@ -58,6 +70,17 @@ impl FosterBtree {
         //     foster_page.set_lsn(lsn);
         // }
         page_key
+    }
+
+    /// Check if the parent page is the parent of the child page.
+    /// This includes the foster child relationship.
+    fn is_parent_and_child(parent: &Page, child: &Page) -> bool {
+        // Get the lowerfence of the child page.
+        let child_low_fence = child.get_raw_key(0);
+        // Find the slot id of the child page in the parent page.
+        let slot_id = parent.lower_bound_slot_id(&BTreeKey::new(child_low_fence));
+        // Check if the value of the slot id is the same as the child page id.
+        parent.get_val(slot_id) == child.get_id().to_be_bytes()
     }
 
     /// Move half of the slots to the foster child
@@ -347,11 +370,78 @@ impl FosterBtree {
         }
     }
 
-    fn modify_structure_if_necessary_in_read(
-        &self,
-        this: &mut FrameReadGuard,
-        child: &mut FrameReadGuard,
-    ) {
+    fn should_modify_structure(this: &Page, child: &Page) -> Option<OpType> {
+        None
+    }
+
+    fn should_merge(this: &Page, child: &Page) -> bool {
+        // Node& cur_node = get_cur_node();
+        // if (cur_node.nc.level != child.nc.level) return false; // not foster child.
+        // assert(cur_node.nc.has_foster_child);
+        // assert(on_foster_child_slot());
+        // assert(&cur_node.get_child(id_) == &child);
+
+        // if (cur_node.has_minimum_contents() && // After anti-adoption.
+        //     cur_node.size() + child.size() - 1 < Node::N_SLOTS) {
+        //     return true;
+        // }
+        // if (cur_node.size() + child.size() <= Node::merge_threshold()) {
+        //     return true;
+        // }
+        // return false;
+
+        if this.level() != child.level() {
+            return false; // Not foster child
+        }
+        assert!(this.has_foster_child()); // If same level, then this should have foster child.
+        assert_eq!(this.get_foster_page_id(), child.get_id());
+
+        let total_bytes = this.total_bytes_used() + child.total_bytes_used();
+        if total_bytes <= MERGE_THRESHOLD {
+            return true;
+        }
+        false
+    }
+
+    fn should_adopt(this: &Page, child: &Page) -> bool {
+        // Node& cur_node = get_cur_node();
+
+        // if (cur_node.nc.level == 0) return false;
+
+        // if (!child.nc.has_foster_child) return false;
+
+        // // A slot allocation is required for adoption.
+        // if (cur_node.full()) return false;
+
+        // // Check normal parent-child relationship.
+        // if (cur_node.is_foster_child_slot(id_)) return false;
+
+        // // After anti-adoption, child size must be small.
+        // // We should avoid repeating anti-adoption and adoption.
+        // if (child.size() <= Node::merge_threshold()) return false;
+
+        // return true;
+
+        let is_parent_and_child = FosterBtree::is_parent_and_child(this, child);
+        assert!(is_parent_and_child);
+
+        if this.level() == 0 {
+            return false;
+        }
+
+        if !child.has_foster_child() {
+            return false;
+        }
+
+        // Check if the parent page has enough space to adopt the foster child of the child page.
+
+        // Anti-adoption checking
+
+        true
+    }
+
+    fn should_antiadopt(this: &Page, child: &Page) -> bool {
+        false
     }
 
     fn traverse_to_leaf_for_read(&self, key: &[u8]) -> Result<FrameReadGuard, TreeStatus> {

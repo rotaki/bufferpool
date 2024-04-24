@@ -198,6 +198,7 @@ pub trait FosterBtreePage {
     fn update_slot(&mut self, slot_id: u16, slot: &Slot);
     fn contiguous_free_space(&self) -> usize;
     fn total_free_space(&self) -> usize;
+    fn total_bytes_used(&self) -> usize;
     fn shift_records(&mut self, shift_start_offset: u16, shift_size: u16);
     fn linear_search<F>(&self, f: F) -> u16
     where
@@ -435,13 +436,17 @@ impl FosterBtreePage for Page {
     }
 
     fn total_free_space(&self) -> usize {
+        self.len() - self.total_bytes_used()
+    }
+
+    fn total_bytes_used(&self) -> usize {
         let mut sum_used = PAGE_HEADER_SIZE;
         for i in 0..self.slot_count() {
             let slot = self.slot(i).unwrap();
             sum_used += slot.key_size() as usize + slot.value_size() as usize;
             sum_used += SLOT_SIZE;
         }
-        self.len() - sum_used
+        sum_used
     }
 
     // [ [rec4 ][rec3 ][rec2 ][rec1 ] ]
