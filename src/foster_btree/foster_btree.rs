@@ -22,9 +22,9 @@ enum OpType {
     MERGE = 1,
     ADOPT = 2,
     ANTIADOPT = 3,
-    LIFTUP = 4,
-    LIFTDOWN = 5,
-    MAX = 6,
+    LOADBALANCE = 4,
+    ASCENDROOT = 5,
+    DESCENDROOT = 6,
 }
 
 pub const MERGE_THRESHOLD: usize = 3269; // (4096 - BASE_HEADER_SIZE) * 0.8
@@ -57,9 +57,9 @@ pub struct FosterBtree {
 
 impl FosterBtree {
     /// System transaction that allocates a new page.
-    fn allocate_page(&self) -> PageKey {
+    fn allocate_page(&self) -> FrameWriteGuard {
         let mut foster_page = self.bp.create_new_page_for_write(self.c_key).unwrap();
-        let page_key = foster_page.key().unwrap();
+        foster_page.init();
         // Write log
         // {
         //     let log_record = LogRecord::SysTxnAllocPage {
@@ -69,7 +69,7 @@ impl FosterBtree {
         //     let lsn = self.wal_buffer.append_log(&log_record.to_bytes());
         //     foster_page.set_lsn(lsn);
         // }
-        page_key
+        foster_page
     }
 
     /// Check if the parent page is the parent of the child page.
@@ -340,6 +340,27 @@ impl FosterBtree {
         }
     }
 
+    /*
+    /// Anti-adopt.
+    /// Make a child a foster parent. This operation is needed when we do load balancing between siblings.
+    ///
+    /// Before:
+    /// parent [..., k0, k1, k2, ..., kN)
+    ///  +-------------------+
+    ///  |                   |
+    ///  v                   v
+    /// child1 [k0, k1)   child2 [k1, k2)
+    ///
+    /// After:
+    /// parent [..., k0, k2, ..., kN)
+    ///  |
+    ///  v
+    /// child1 [k0, k2) --> foster_child [k1, k2)
+    fn antiadopt(parent: &mut Page, child: &mut Page) {
+
+    }
+    */
+
     pub fn create_new(
         txn_id: u64,
         c_key: ContainerKey,
@@ -370,7 +391,32 @@ impl FosterBtree {
         }
     }
 
+    /*
     fn should_modify_structure(this: &Page, child: &Page) -> Option<OpType> {
+        // this and (foster) child operations
+        {
+            if should_merge(this, child) {
+                return Some(OpType::MERGE);
+            }
+            if should_load_balance(this, child) {
+                return Some(OpType::LOADBALANCE);
+            }
+            if should_split(this) {
+                return Some(OpType::SPLIT);
+            }
+        }
+        // normal parent and child operations
+        {
+            // Has foster child
+            if should_adopt(this, child) {
+                return Some(OpType::ADOPT);
+            }
+            if should_antiadopt(this, child) {
+                return Some(OpType::ANTIADOPT);
+            }
+
+        }
+
         None
     }
 
@@ -443,6 +489,7 @@ impl FosterBtree {
     fn should_antiadopt(this: &Page, child: &Page) -> bool {
         false
     }
+    */
 
     fn traverse_to_leaf_for_read(&self, key: &[u8]) -> Result<FrameReadGuard, TreeStatus> {
         let mut current_page = self.bp.get_page_for_read(self.root_key)?;
@@ -480,25 +527,32 @@ impl FosterBtree {
     fn traverse_to_leaf_for_write(&self, key: &[u8]) -> Result<FrameWriteGuard, TreeStatus> {
         let mut current_page = self.bp.get_page_for_write(self.root_key)?;
         loop {
-            let foster_page = &current_page;
-            if foster_page.is_leaf() {
-                break;
+            let this_page = &current_page;
+            // FosterBtree::print_page(this_page);
+            if this_page.is_leaf() {
+                if this_page.has_foster_child() && this_page.get_foster_key() <= key {
+                    // Check whether the foster child should be traversed.
+                    let foster_page_key = PageKey::new(self.c_key, this_page.get_foster_page_id());
+                    let foster_page = self.bp.get_page_for_write(foster_page_key)?;
+                    // Now we have two locks. We need to release the lock of the current page.
+                    // Do some structure modification between parent and child in the same level (foster relationship).
+
+                    current_page = foster_page;
+                    continue;
+                } else {
+                    break;
+                }
             }
             let page_key = {
-                let slot_id = foster_page.lower_bound_slot_id(&BTreeKey::new(key));
-                let page_id_bytes = foster_page.get_val(slot_id);
+                let slot_id = this_page.lower_bound_slot_id(&BTreeKey::new(key));
+                let page_id_bytes = this_page.get_val(slot_id);
                 let page_id = PageId::from_be_bytes(page_id_bytes.try_into().unwrap());
                 PageKey::new(self.c_key, page_id)
             };
 
             let next_page = self.bp.get_page_for_write(page_key)?;
-            // Check if there is foster child in the next page.
-            if next_page.has_foster_child() {
-                let new_page_key = self.allocate_page();
-                let new_page = self.bp.get_page_for_write(new_page_key).unwrap();
-            }
-
             // Now we have two locks. We need to release the lock of the current page.
+            // Do some structure modification between parent and child in a different level.
 
             current_page = next_page;
         }
@@ -553,6 +607,67 @@ impl FosterBtree {
             println!("Slot {}: Key: {}, Value: {}", i + 1, key, val);
         }
         println!("----------------------------------------------");
+    }
+
+    // Keep splitting and creating foster children until the key-value pair is inserted.
+    // There are some tricky cases where insertion causes the page to split into three pages.
+    // E.g. Page has capacity of 6 and the current page looks like this:
+    // [[x, x, x],[z, z, z]]
+    // We want to insert [y, y, y, y]
+    // In this case, we will first split the page into two pages:
+    // [[x, x, x]          ] and [[z, z, z]          ]
+    // Then we will insert [y, y, y, y] into the first page. (This will fail because the page only has 3 capacity left)
+    // If this fails, then we will insert [y, y, y] into the second page. (This will also fail because the page only has 3 capacity left)
+    // If this fails, we allocate a new page and insert [y, y, y, y] into the new page. (This will succeed)
+    // Then we will connect the new page to the foster child of the first page.
+    fn insert_until_success(page: &mut Page, key: &[u8], value: &[u8]) {
+        // There are three cases:
+        // 1. Insert can be done in the current page without splitting. (1 Page)
+        // 2. One splitting is required to insert the key-value pair. (2 Pages)
+        // 3. Two splitting is required to insert the key-value pair. (3 Pages)
+        //
+        // We have to determine which case we are in and plan accordingly.
+        let inserted = page.insert(key, value, false);
+        if inserted {
+            return; // Case 1
+        } else {
+            let slot_id = page.lower_bound_slot_id(&BTreeKey::new(key));
+            // If Case 2 works, then need to think about how to distribute the keys between the two pages.
+            // For example, if we have [[1], 2, 3, 4, 6, 9, [10]] and we are inserting 5,
+            // we have to identify x that fits in the following page format.
+            // [1, .. x, 10)  -> [x, .., 10)
+            // Naively, we will try to pack as many keys as possible into the first page including the new key.
+            //
+        }
+    }
+
+    pub fn insert(&self, key: &[u8], value: &[u8]) -> Result<(), TreeStatus> {
+        let mut leaf_page = self.traverse_to_leaf_for_write(key)?; // Hold X latch on the page
+        let slot_id = leaf_page.lower_bound_slot_id(&BTreeKey::new(key));
+        if slot_id == 0 {
+            // Lower fence so insert is ok
+        } else {
+            let existing_key = leaf_page.get_raw_key(slot_id);
+            if existing_key == key {
+                // Exact match
+                Err(TreeStatus::Duplicate)
+            } else {
+                let inserted = leaf_page.insert(key, value, false);
+                if inserted {
+                    Ok(())
+                } else {
+                    // Split the page
+                    let new_page = self.allocate_page();
+                    FosterBtree::split(&mut *leaf_page, &mut *new_page);
+                    // Insert in the foster child or the leaf page
+                    if key < new_page.get_low_fence() {
+                        leaf_page.insert(key, value, false);
+                    } else {
+                        new_page.insert(key, value, false);
+                    }
+                }
+            }
+        }
     }
 
     /*
