@@ -1,4 +1,4 @@
-use crate::page::Page;
+use crate::page::{Page, PAGE_SIZE};
 
 // Page layout:
 // 1 byte: flags (is_root, leftmost, rightmost, has_foster_children)
@@ -191,6 +191,7 @@ impl<'a> AsRef<[u8]> for BTreeKey<'a> {
 
 pub trait FosterBtreePage {
     // Helper functions
+    fn page_size(&self) -> usize;
     fn get_id(&self) -> u32;
     fn slot_offset(&self, slot_id: u16) -> usize;
     fn slot(&self, slot_id: u16) -> Option<Slot>;
@@ -199,6 +200,8 @@ pub trait FosterBtreePage {
     fn contiguous_free_space(&self) -> usize;
     fn total_free_space(&self) -> usize;
     fn total_bytes_used(&self) -> usize;
+    fn bytes_used(&self, range: std::ops::Range<u16>) -> usize;
+    fn bytes_needed(&self, key: &[u8], value: &[u8]) -> usize;
     fn shift_records(&mut self, shift_start_offset: u16, shift_size: u16);
     fn linear_search<F>(&self, f: F) -> u16
     where
@@ -276,6 +279,10 @@ pub trait FosterBtreePage {
 }
 
 impl FosterBtreePage for Page {
+    fn page_size(&self) -> usize {
+        self.len()
+    }
+
     fn is_root(&self) -> bool {
         self[0] & 0b1000_0000 != 0
     }
@@ -447,6 +454,24 @@ impl FosterBtreePage for Page {
             sum_used += SLOT_SIZE;
         }
         sum_used
+    }
+
+    fn bytes_used(&self, range: std::ops::Range<u16>) -> usize {
+        // Check if the range is valid
+        if range.end > self.slot_count() {
+            panic!("Invalid range");
+        }
+        let mut sum_used = 0;
+        for i in range {
+            let slot = self.slot(i).unwrap();
+            sum_used += slot.key_size() as usize + slot.value_size() as usize;
+            sum_used += SLOT_SIZE;
+        }
+        sum_used
+    }
+
+    fn bytes_needed(&self, key: &[u8], value: &[u8]) -> usize {
+        key.len() + value.len() + SLOT_SIZE
     }
 
     // [ [rec4 ][rec3 ][rec2 ][rec1 ] ]
@@ -763,7 +788,11 @@ impl FosterBtreePage for Page {
     /// slot_id + 1 to the end of the slots. Finally, insert the new key at slot_id + 1.
     fn lower_bound_slot_id(&self, key: &BTreeKey) -> u16 {
         if !self.inside_range(key) {
-            panic!("key is out of the range of the page");
+            panic!(
+                "key is out of the range of the page: {:?}, range: {:?}",
+                key,
+                self.range()
+            );
         }
         // Binary search returns the left-most slot_id where the key is greater than the given key.
         let slot_id = self.binary_search(|slot_key| *key < slot_key);
@@ -797,7 +826,10 @@ impl FosterBtreePage for Page {
         if key == &[] {
             self.set_left_most(true)
         }
-        self.update_at(self.low_fence_slot_id(), key, &[]);
+        let res = self.update_at(self.low_fence_slot_id(), key, &[]);
+        if res == false {
+            panic!("Failed to set the low fence");
+        }
     }
 
     /// Set the high fence of the page.
@@ -806,7 +838,10 @@ impl FosterBtreePage for Page {
         if key == &[] {
             self.set_right_most(true)
         }
-        self.update_at(self.high_fence_slot_id(), key, &[]);
+        let res = self.update_at(self.high_fence_slot_id(), key, &[]);
+        if res == false {
+            panic!("Failed to set the high fence");
+        }
     }
 
     /// Insert a key-value-pair at slot_id.
