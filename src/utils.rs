@@ -26,6 +26,7 @@ pub fn init_test_logger() {
         .filter_level(log::LevelFilter::Info) // Default to only show info
         .filter_module("bp::buffer_pool", log::LevelFilter::Trace) // Per module debugging
         .filter_module("bp::heap_page", log::LevelFilter::Trace)
+        .filter_module("bp::foster_btree", log::LevelFilter::Trace)
         .format(|buf, record| {
             writeln!(
                 buf,

@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
+use log::{debug, trace};
+
 use crate::{
     buffer_pool::prelude::*,
-    page::{Page, PageId},
+    page::{Page, PageId, BASE_PAGE_HEADER_SIZE, PAGE_SIZE},
     write_ahead_log::{prelude::LogRecord, LogBufferRef},
 };
 
@@ -17,17 +19,29 @@ pub enum TreeStatus {
     BPStatus(BPStatus),
 }
 
+#[derive(Clone, Copy, Debug)]
 enum OpType {
-    SPLIT = 0,
-    MERGE = 1,
-    ADOPT = 2,
-    ANTIADOPT = 3,
-    LOADBALANCE = 4,
-    ASCENDROOT = 5,
-    DESCENDROOT = 6,
+    MERGE,
+    LOADBALANCE,
+    ADOPT,
+    ANTIADOPT,
+    ASCENDROOT,
+    DESCENDROOT,
 }
 
-pub const MERGE_THRESHOLD: usize = 3269; // (4096 - BASE_HEADER_SIZE) * 0.8
+// The threshold for page modification.
+// If the page has less than MIN_BYTES_USED, then we need to MERGE or LOADBALANCE.
+pub const MIN_BYTES_USED: usize = (PAGE_SIZE - BASE_PAGE_HEADER_SIZE) / 5;
+// If the page has more than MAX_BYTES_USED, then we need to LOADBALANCE.
+pub const MAX_BYTES_USED: usize = (PAGE_SIZE - BASE_PAGE_HEADER_SIZE) * 4 / 5;
+
+fn too_small(page: &Page) -> bool {
+    page.total_bytes_used() < MIN_BYTES_USED
+}
+
+fn too_large(page: &Page) -> bool {
+    page.total_bytes_used() > MAX_BYTES_USED
+}
 
 impl From<BPStatus> for TreeStatus {
     fn from(status: BPStatus) -> Self {
@@ -56,6 +70,30 @@ pub struct FosterBtree {
 }
 
 impl FosterBtree {
+    fn info(page: &Page) -> String {
+        let foster = if page.has_foster_child() {
+            format!("FOS({}), ", page.get_foster_page_id())
+        } else {
+            "".to_string()
+        };
+        let size_cat = if page.total_bytes_used() < MIN_BYTES_USED {
+            "S"
+        } else if page.total_bytes_used() > MAX_BYTES_USED {
+            "L"
+        } else {
+            "N"
+        };
+        format!(
+            "[ID: {}, LEV: {}, LF: {:?}, {}HF: {:?}, SIZE: {}({})]",
+            page.get_id(),
+            page.level(),
+            page.get_low_fence(),
+            foster,
+            page.get_high_fence(),
+            page.total_bytes_used(),
+            size_cat
+        )
+    }
     /// System transaction that allocates a new page.
     fn allocate_page(&self) -> FrameWriteGuard {
         let mut foster_page = self.bp.create_new_page_for_write(self.c_key).unwrap();
@@ -75,12 +113,17 @@ impl FosterBtree {
     /// Check if the parent page is the parent of the child page.
     /// This includes the foster child relationship.
     fn is_parent_and_child(parent: &Page, child: &Page) -> bool {
-        // Get the lowerfence of the child page.
-        let child_low_fence = child.get_raw_key(0);
         // Find the slot id of the child page in the parent page.
-        let slot_id = parent.lower_bound_slot_id(&BTreeKey::new(child_low_fence));
+        let slot_id = parent.lower_bound_slot_id(&child.get_low_fence());
         // Check if the value of the slot id is the same as the child page id.
         parent.get_val(slot_id) == child.get_id().to_be_bytes()
+    }
+
+    /// Check if the parent page is the foster parent of the child page.
+    fn is_foster_relationship(parent: &Page, child: &Page) -> bool {
+        parent.level() == child.level()
+            && parent.has_foster_child()
+            && parent.get_foster_page_id() == child.get_id()
     }
 
     /// Move some slots from one page to another page so that the two pages approximately
@@ -91,9 +134,8 @@ impl FosterBtree {
     /// 3. Balancing does not move the foster key from one page to another.
     /// 4. Balancing does not move the low fence and high fence.
     fn balance(this: &mut Page, foster_child: &mut Page) {
-        assert!(this.level() == foster_child.level());
         assert!(FosterBtree::is_parent_and_child(this, foster_child));
-        assert!(this.has_foster_child());
+        assert!(FosterBtree::is_foster_relationship(this, foster_child));
 
         // Calculate the total bytes of the two pages.
         let this_total = this.total_bytes_used();
@@ -319,6 +361,7 @@ impl FosterBtree {
             // We want to insert [yyyy]
             // None of [[xxx],[yyyy]] or [[zzz],[yyyy]] can work.
             // We need to split the page into three pages.
+            // [[xxx]], [[yyyy]], [[zzz]]
 
             // If we cannot insert the key into one of the pages, then we need to split the page into three.
             // This: [l, r1, r2, ..., rk, (f)x h]
@@ -344,8 +387,8 @@ impl FosterBtree {
     // After:
     //   this [k0, k2)
     fn merge(this: &mut Page, foster_child: &mut Page) {
-        assert_eq!(this.level(), foster_child.level());
-        assert!(this.has_foster_child());
+        assert!(FosterBtree::is_parent_and_child(this, foster_child));
+        assert!(FosterBtree::is_foster_relationship(this, foster_child));
 
         let mut kvs = Vec::new();
         for i in 1..=foster_child.active_slot_count() {
@@ -360,7 +403,7 @@ impl FosterBtree {
             foster_child.remove_range(1, foster_child.high_fence_slot_id());
             foster_child.set_has_foster_child(false);
         } else {
-            todo!("Not enough space to merge the foster child");
+            panic!("Not enough space to merge the foster child");
         }
 
         #[cfg(debug_assertions)]
@@ -371,8 +414,6 @@ impl FosterBtree {
     }
 
     /// Adopt the foster child of the child page.
-    /// We first check if parent is full.
-    /// If not full, then the parent page adopt the foster child of the child page.
     /// The foster child of the child page is removed and becomes the child of the parent page.
     ///
     /// Parent page
@@ -395,9 +436,10 @@ impl FosterBtree {
     ///    v                   v
     ///   child0 [k0, k1)    child1 [k1, k2)
     fn adopt(parent: &mut Page, child: &mut Page) {
-        if !child.has_foster_child() {
-            panic!("The child page does not have a foster child");
-        }
+        assert!(FosterBtree::is_parent_and_child(parent, child));
+        assert!(!FosterBtree::is_foster_relationship(parent, child));
+        assert!(child.has_foster_child());
+
         let foster_child_slot_id = child.foster_child_slot_id();
         let foster_key = child.get_foster_key().to_owned();
         let foster_child_page_id = child.get_foster_page_id();
@@ -412,7 +454,46 @@ impl FosterBtree {
             child.set_high_fence(foster_key.as_ref());
         } else {
             // Need to split the parent page.
-            todo!("Need to split the parent page");
+            panic!("Need to split the parent page");
+        }
+    }
+
+    /// Anti-adopt.
+    /// Make a child a foster parent. This operation is needed when we do load balancing between siblings.
+    ///
+    /// Before:
+    /// parent [..., k0, k1, k2, ..., kN)
+    ///  +-------------------+
+    ///  |                   |
+    ///  v                   v
+    /// child1 [k0, k1)   child2 [k1, k2)
+    ///
+    /// After:
+    /// parent [..., k0, k2, ..., kN)
+    ///  |
+    ///  v
+    /// child1 [k0, k2) --> foster_child [k1, k2)
+    fn anti_adopt(parent: &mut Page, child: &mut Page) {
+        assert!(FosterBtree::is_parent_and_child(parent, child));
+        assert!(!FosterBtree::is_foster_relationship(parent, child));
+        assert!(!child.has_foster_child());
+
+        // Identify child1 slot
+        let slot_id = parent.lower_bound_slot_id(&child.get_low_fence());
+        if parent.has_foster_child() {
+            assert!(slot_id + 1 < parent.foster_child_slot_id());
+        } else {
+            assert!(slot_id + 1 < parent.high_fence_slot_id());
+        }
+        // Move the child1 slot to child0
+        let child1_key = parent.get_raw_key(slot_id + 1);
+        let child1_val = parent.get_val(slot_id + 1);
+        let new_fence = parent.get_raw_key(slot_id + 2);
+        child.set_high_fence(new_fence);
+        child.set_has_foster_child(true);
+        let res = child.insert(child1_key, child1_val, false);
+        if !res {
+            panic!("Cannot insert the slot into the child page");
         }
     }
 
@@ -506,27 +587,6 @@ impl FosterBtree {
         }
     }
 
-    /*
-    /// Anti-adopt.
-    /// Make a child a foster parent. This operation is needed when we do load balancing between siblings.
-    ///
-    /// Before:
-    /// parent [..., k0, k1, k2, ..., kN)
-    ///  +-------------------+
-    ///  |                   |
-    ///  v                   v
-    /// child1 [k0, k1)   child2 [k1, k2)
-    ///
-    /// After:
-    /// parent [..., k0, k2, ..., kN)
-    ///  |
-    ///  v
-    /// child1 [k0, k2) --> foster_child [k1, k2)
-    fn antiadopt(parent: &mut Page, child: &mut Page) {
-
-    }
-    */
-
     pub fn create_new(
         txn_id: u64,
         c_key: ContainerKey,
@@ -557,122 +617,260 @@ impl FosterBtree {
         }
     }
 
-    /*
-    fn should_modify_structure(this: &Page, child: &Page) -> Option<OpType> {
-        // this and (foster) child operations
-        {
-            if should_merge(this, child) {
+    fn should_modify_structure(this: &Page, child: &Page, no_balance: bool) -> Option<OpType> {
+        assert!(FosterBtree::is_parent_and_child(this, child));
+        let this_str = FosterBtree::info(this);
+        let child_str = FosterBtree::info(child);
+        if FosterBtree::is_foster_relationship(this, child) {
+            if FosterBtree::should_merge(this, child) {
+                // Start from this again
+                debug!("Merge: this: {}, child: {}", this_str, child_str);
                 return Some(OpType::MERGE);
             }
-            if should_load_balance(this, child) {
+            debug!("No Merge: this: {}, child: {}", this_str, child_str);
+            if !no_balance && FosterBtree::should_load_balance(this, child) {
+                // Start from this again
+                debug!("Load balance: this: {}, child: {}", this_str, child_str);
                 return Some(OpType::LOADBALANCE);
             }
-            if should_split(this) {
-                return Some(OpType::SPLIT);
+            debug!("No Load balance: this: {}, child: {}", this_str, child_str);
+            if FosterBtree::should_root_ascend(this, child) {
+                // Start from child
+                debug!("Ascend root: this: {}, child: {}", this_str, child_str);
+                return Some(OpType::ASCENDROOT);
             }
-        }
-        // normal parent and child operations
-        {
-            // Has foster child
-            if should_adopt(this, child) {
+            debug!("No Ascend root: this: {}, child: {}", this_str, child_str);
+        } else {
+            if FosterBtree::should_adopt(this, child) {
+                // Start from child
+                debug!("Adopt: this: {}, child: {}", this_str, child_str);
                 return Some(OpType::ADOPT);
             }
-            if should_antiadopt(this, child) {
+            debug!("No Adopt: this: {}, child: {}", this_str, child_str);
+            if FosterBtree::should_antiadopt(this, child) {
+                // Start from child
+                debug!("Antiadopt: this: {}, child: {}", this_str, child_str);
                 return Some(OpType::ANTIADOPT);
             }
-
+            debug!("No Antiadopt: this: {}, child: {}", this_str, child_str);
+            if FosterBtree::should_root_descend(this, child) {
+                // Start from this
+                debug!("Descend root: this: {}, child: {}", this_str, child_str);
+                return Some(OpType::DESCENDROOT);
+            }
+            debug!("No Descend root: this: {}, child: {}", this_str, child_str);
         }
-
+        debug!("No Modification: this: {}, child: {}", this_str, child_str);
         None
     }
 
+    /// There are 3 * 3 = 9 possible size
+    /// S: Small, N: Normal, L: Large
+    /// SS, NS, SN: Merge
+    /// SL, LS: Load balance
+    /// NN, LN, NL, LL: Do nothing
     fn should_merge(this: &Page, child: &Page) -> bool {
-        // Node& cur_node = get_cur_node();
-        // if (cur_node.nc.level != child.nc.level) return false; // not foster child.
-        // assert(cur_node.nc.has_foster_child);
-        // assert(on_foster_child_slot());
-        // assert(&cur_node.get_child(id_) == &child);
-
-        // if (cur_node.has_minimum_contents() && // After anti-adoption.
-        //     cur_node.size() + child.size() - 1 < Node::N_SLOTS) {
-        //     return true;
-        // }
-        // if (cur_node.size() + child.size() <= Node::merge_threshold()) {
-        //     return true;
-        // }
-        // return false;
-
-        if this.level() != child.level() {
-            return false; // Not foster child
+        assert!(FosterBtree::is_parent_and_child(this, child));
+        assert!(FosterBtree::is_foster_relationship(this, child));
+        // Check if this is small and child is not too large
+        if (too_small(this) && !too_large(child)) {
+            return true;
         }
-        assert!(this.has_foster_child()); // If same level, then this should have foster child.
-        assert_eq!(this.get_foster_page_id(), child.get_id());
 
-        let total_bytes = this.total_bytes_used() + child.total_bytes_used();
-        if total_bytes <= MERGE_THRESHOLD {
+        if !too_large(this) && too_small(child) {
+            return true;
+        }
+        false
+    }
+
+    /// There are 3 * 3 = 9 possible size
+    /// S: Small, N: Normal, L: Large
+    /// SS, NS, SN: Merge
+    /// SL, LS: Load balance
+    /// NN, LN, NL, LL: Do nothing
+    fn should_load_balance(this: &Page, child: &Page) -> bool {
+        assert!(FosterBtree::is_parent_and_child(this, child));
+        assert!(FosterBtree::is_foster_relationship(this, child));
+        // Check if this is not too small and child is too large
+        if (too_small(this) && too_large(child)) || (too_large(this) && too_small(child)) {
             return true;
         }
         false
     }
 
     fn should_adopt(this: &Page, child: &Page) -> bool {
-        // Node& cur_node = get_cur_node();
-
-        // if (cur_node.nc.level == 0) return false;
-
-        // if (!child.nc.has_foster_child) return false;
-
-        // // A slot allocation is required for adoption.
-        // if (cur_node.full()) return false;
-
-        // // Check normal parent-child relationship.
-        // if (cur_node.is_foster_child_slot(id_)) return false;
-
-        // // After anti-adoption, child size must be small.
-        // // We should avoid repeating anti-adoption and adoption.
-        // if (child.size() <= Node::merge_threshold()) return false;
-
-        // return true;
-
-        let is_parent_and_child = FosterBtree::is_parent_and_child(this, child);
-        assert!(is_parent_and_child);
-
-        if this.level() == 0 {
-            return false;
-        }
-
+        assert!(FosterBtree::is_parent_and_child(this, child));
+        assert!(!FosterBtree::is_foster_relationship(this, child));
+        // Check if the parent page has enough space to adopt the foster child of the child page.
         if !child.has_foster_child() {
             return false;
         }
-
-        // Check if the parent page has enough space to adopt the foster child of the child page.
-
-        // Anti-adoption checking
-
+        if this.total_free_space()
+            < this.bytes_needed(
+                &child.get_foster_key(),
+                &child.get_foster_page_id().to_be_bytes(),
+            )
+        {
+            return false;
+        }
+        // We want to do anti-adoption as less as possible.
+        // Therefore, if child will need merge or load balance, we prioritize them over adoption.
+        // If child is small, there is a high chance that the parent will need to merge or load balance.
+        if too_small(child) {
+            return false;
+        }
         true
     }
 
     fn should_antiadopt(this: &Page, child: &Page) -> bool {
+        assert!(FosterBtree::is_parent_and_child(this, child));
+        assert!(!FosterBtree::is_foster_relationship(this, child));
+        if child.has_foster_child() {
+            return false;
+        }
+        let slot_id = this.lower_bound_slot_id(&child.get_low_fence());
+        if this.has_foster_child() {
+            if slot_id + 1 >= this.foster_child_slot_id() {
+                return false;
+            }
+        } else {
+            if slot_id + 1 >= this.high_fence_slot_id() {
+                return false;
+            }
+        }
+
+        if !too_small(child) {
+            return false;
+        }
+
+        true
+    }
+
+    fn should_root_ascend(this: &Page, child: &Page) -> bool {
+        assert!(FosterBtree::is_parent_and_child(this, child));
+        assert!(FosterBtree::is_foster_relationship(this, child));
+        if !this.is_root() {
+            return false;
+        }
+        true
+    }
+
+    fn should_root_descend(this: &Page, child: &Page) -> bool {
+        assert!(FosterBtree::is_parent_and_child(this, child));
+        assert!(!FosterBtree::is_foster_relationship(this, child));
+        if !this.is_root() {
+            return false;
+        }
+        if this.active_slot_count() != 1 {
+            return false;
+        }
+        if child.has_foster_child() {
+            return false;
+        }
+        // Same low fence and high fence
+        assert_eq!(this.get_low_fence(), child.get_low_fence());
+        assert_eq!(this.get_high_fence(), child.get_high_fence());
         false
     }
-    */
+
+    fn modify_structure_if_needed_for_read<'a>(
+        this: FrameReadGuard<'a>,
+        child: FrameReadGuard<'a>,
+    ) -> (Option<OpType>, FrameReadGuard<'a>, FrameReadGuard<'a>) {
+        if let Some(op) = FosterBtree::should_modify_structure(&this, &child, false) {
+            let this = this.try_upgrade(false);
+            let child = child.try_upgrade(false);
+            let (mut this, mut child) = {
+                match (this, child) {
+                    (Ok(this), Ok(child)) => (this, child),
+                    (Ok(this), Err(child)) => {
+                        return (None, this.downgrade(), child);
+                    }
+                    (Err(this), Ok(child)) => {
+                        return (None, this, child.downgrade());
+                    }
+                    (Err(this), Err(child)) => {
+                        return (None, this, child);
+                    }
+                }
+            };
+            FosterBtree::modify_structure(op.clone(), &mut this, &mut child);
+            (Some(op), this.downgrade(), child.downgrade())
+        } else {
+            (None, this, child)
+        }
+    }
+
+    fn modify_structure_if_needed_for_write<'a>(
+        mut this: FrameWriteGuard<'a>,
+        mut child: FrameWriteGuard<'a>,
+    ) -> (Option<OpType>, FrameWriteGuard<'a>, FrameWriteGuard<'a>) {
+        if let Some(op) = FosterBtree::should_modify_structure(&this, &child, false) {
+            FosterBtree::modify_structure(op.clone(), &mut this, &mut child);
+            (Some(op), this, child)
+        } else {
+            (None, this, child)
+        }
+    }
+
+    fn modify_structure(op: OpType, this: &mut Page, child: &mut Page) {
+        match op {
+            OpType::MERGE => {
+                // Merge the foster child into this page
+                FosterBtree::merge(this, child);
+            }
+            OpType::LOADBALANCE => {
+                // Load balance between this and the foster child
+                FosterBtree::balance(this, child);
+            }
+            OpType::ADOPT => {
+                // Adopt the foster child of the child page
+                FosterBtree::adopt(this, child);
+            }
+            OpType::ANTIADOPT => {
+                // Anti-adopt the foster child of the child page
+                // FosterBtree::antiadopt(this, child);
+            }
+            OpType::ASCENDROOT => {
+                // Ascend the root page to the parent page
+                FosterBtree::ascend_root(this, child);
+            }
+            OpType::DESCENDROOT => {
+                // Descend the root page to the child page
+                FosterBtree::descend_root(this, child);
+            }
+        }
+    }
 
     fn traverse_to_leaf_for_read(&self, key: &[u8]) -> Result<FrameReadGuard, TreeStatus> {
         let mut current_page = self.bp.get_page_for_read(self.root_key)?;
         loop {
-            let this_page = &current_page;
-            // FosterBtree::print_page(this_page);
+            let this_page = current_page;
+            FosterBtree::print_page(&this_page);
             if this_page.is_leaf() {
                 if this_page.has_foster_child() && this_page.get_foster_key() <= key {
                     // Check whether the foster child should be traversed.
                     let foster_page_key = PageKey::new(self.c_key, this_page.get_foster_page_id());
                     let foster_page = self.bp.get_page_for_read(foster_page_key)?;
                     // Now we have two locks. We need to release the lock of the current page.
-
-                    current_page = foster_page;
-                    continue;
+                    let (op, this_page, foster_page) =
+                        FosterBtree::modify_structure_if_needed_for_read(this_page, foster_page);
+                    match op {
+                        Some(OpType::MERGE) | Some(OpType::LOADBALANCE) => {
+                            current_page = this_page;
+                            continue;
+                        }
+                        None | Some(OpType::ASCENDROOT) => {
+                            // Start from the child
+                            current_page = foster_page;
+                            continue;
+                        }
+                        _ => {
+                            panic!("Unexpected operation");
+                        }
+                    }
                 } else {
-                    break;
+                    return Ok(this_page);
                 }
             }
             let page_key = {
@@ -684,17 +882,27 @@ impl FosterBtree {
 
             let next_page = self.bp.get_page_for_read(page_key)?;
             // Now we have two locks. We need to release the lock of the current page.
-
-            current_page = next_page;
+            let (op, this_page, next_page) =
+                FosterBtree::modify_structure_if_needed_for_read(this_page, next_page);
+            match op {
+                Some(OpType::MERGE) | Some(OpType::LOADBALANCE) | Some(OpType::DESCENDROOT) => {
+                    current_page = this_page;
+                    continue;
+                }
+                None | Some(OpType::ASCENDROOT) | Some(OpType::ADOPT) | Some(OpType::ANTIADOPT) => {
+                    // Start from the child
+                    current_page = next_page;
+                    continue;
+                }
+            }
         }
-        Ok(current_page)
     }
 
     fn traverse_to_leaf_for_write(&self, key: &[u8]) -> Result<FrameWriteGuard, TreeStatus> {
         let mut current_page = self.bp.get_page_for_write(self.root_key)?;
         loop {
             let this_page = &current_page;
-            // FosterBtree::print_page(this_page);
+            FosterBtree::print_page(this_page);
             if this_page.is_leaf() {
                 if this_page.has_foster_child() && this_page.get_foster_key() <= key {
                     // Check whether the foster child should be traversed.
@@ -898,9 +1106,11 @@ impl FosterBtree {
 
 #[cfg(test)]
 mod tests {
+    use env_logger::init;
+    use log::trace;
     use tempfile::TempDir;
 
-    use crate::{buffer_pool::CacheEvictionPolicy, page::Page};
+    use crate::{buffer_pool::CacheEvictionPolicy, page::Page, utils::init_test_logger};
 
     use super::{BufferPool, BufferPoolRef, ContainerKey, FosterBtree, FosterBtreePage, PageKey};
 
@@ -1032,6 +1242,7 @@ mod tests {
 
     #[test]
     fn test_page_merge() {
+        test_page_merge_detail(10, 20, 30, vec![], vec![]);
         test_page_merge_detail(10, 20, 30, vec![10, 15], vec![20, 25, 29]);
         test_page_merge_detail(10, 20, 30, vec![], vec![20, 25]);
         test_page_merge_detail(10, 20, 30, vec![10, 15], vec![]);
@@ -1709,5 +1920,13 @@ mod tests {
             btree.insert(&key, &val).unwrap();
         }
         drop(temp_dir);
+    }
+
+    #[test]
+    fn test_modify_structure_if_needed_for_read() {
+        init_test_logger();
+        let (temp_dir, btree) = setup_btree_with_foster_child();
+        let key = to_bytes(0);
+        let leaf = btree.traverse_to_leaf_for_read(&key).unwrap();
     }
 }

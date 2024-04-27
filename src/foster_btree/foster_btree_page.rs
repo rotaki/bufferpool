@@ -741,7 +741,12 @@ impl FosterBtreePage for Page {
         } else if slot_id == self.high_fence_slot_id() {
             self.get_high_fence()
         } else {
-            BTreeKey::Normal(self.get_raw_key(slot_id))
+            let key = self.get_raw_key(slot_id);
+            if key == &[] {
+                BTreeKey::MinusInfty
+            } else {
+                BTreeKey::Normal(key)
+            }
         }
     }
 

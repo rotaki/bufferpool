@@ -3,6 +3,7 @@ use crate::page::Page;
 use crate::rwlatch::RwLatch;
 use std::{
     cell::UnsafeCell,
+    fmt::Debug,
     ops::{Deref, DerefMut},
     sync::atomic::{AtomicBool, Ordering},
 };
@@ -88,18 +89,18 @@ impl<'a> FrameReadGuard<'a> {
         &self.buffer_frame.is_dirty
     }
 
-    pub fn try_upgrade(self, make_dirty: bool) -> Option<FrameWriteGuard<'a>> {
+    pub fn try_upgrade(self, make_dirty: bool) -> Result<FrameWriteGuard<'a>, FrameReadGuard<'a>> {
         if self.buffer_frame.latch.try_upgrade() {
             self.upgraded.store(true, Ordering::Relaxed);
             if make_dirty {
                 self.buffer_frame.is_dirty.store(true, Ordering::Release);
             }
-            Some(FrameWriteGuard {
+            Ok(FrameWriteGuard {
                 downgraded: AtomicBool::new(false),
                 buffer_frame: self.buffer_frame,
             })
         } else {
-            None
+            Err(self)
         }
     }
 }
@@ -118,6 +119,15 @@ impl Deref for FrameReadGuard<'_> {
     fn deref(&self) -> &Self::Target {
         // SAFETY: This is safe because the latch is held shared.
         unsafe { &*self.buffer_frame.page.get() }
+    }
+}
+
+impl Debug for FrameReadGuard<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FrameReadGuard")
+            .field("key", &self.key())
+            .field("dirty", &self.dirty().load(Ordering::Relaxed))
+            .finish()
     }
 }
 
@@ -172,6 +182,15 @@ impl DerefMut for FrameWriteGuard<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         // SAFETY: This is safe because the latch is held exclusively.
         unsafe { &mut *self.buffer_frame.page.get() }
+    }
+}
+
+impl Debug for FrameWriteGuard<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FrameWriteGuard")
+            .field("key", &self.key())
+            .field("dirty", &self.dirty().load(Ordering::Relaxed))
+            .finish()
     }
 }
 
@@ -317,6 +336,6 @@ mod tests {
         let buffer_frame = BufferFrame::default();
         let guard1 = buffer_frame.read();
         let guard2 = buffer_frame.read();
-        assert!(guard1.try_upgrade(true).is_none());
+        assert!(guard1.try_upgrade(true).is_err());
     }
 }
