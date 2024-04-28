@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    sync::Arc,
+};
 
 use log::{debug, trace};
 
@@ -16,6 +19,7 @@ pub enum TreeStatus {
     NotInPageRange,
     Duplicate,
     NotReadyForPhysicalDelete,
+    WriteLockFailed,
     BPStatus(BPStatus),
 }
 
@@ -30,17 +34,20 @@ enum OpType {
 }
 
 // The threshold for page modification.
+// [0, MIN_BYTES_USED) is small.
+// [MIN_BYTES_USED, MAX_BYTES_USED) is normal.
+// [MAX_BYTES_USED, PAGE_SIZE) is large.
 // If the page has less than MIN_BYTES_USED, then we need to MERGE or LOADBALANCE.
 pub const MIN_BYTES_USED: usize = (PAGE_SIZE - BASE_PAGE_HEADER_SIZE) / 5;
 // If the page has more than MAX_BYTES_USED, then we need to LOADBALANCE.
 pub const MAX_BYTES_USED: usize = (PAGE_SIZE - BASE_PAGE_HEADER_SIZE) * 4 / 5;
 
-fn too_small(page: &Page) -> bool {
+fn is_small(page: &Page) -> bool {
     page.total_bytes_used() < MIN_BYTES_USED
 }
 
-fn too_large(page: &Page) -> bool {
-    page.total_bytes_used() > MAX_BYTES_USED
+fn is_large(page: &Page) -> bool {
+    page.total_bytes_used() >= MAX_BYTES_USED
 }
 
 impl From<BPStatus> for TreeStatus {
@@ -57,6 +64,7 @@ impl std::fmt::Debug for TreeStatus {
             TreeStatus::NotInPageRange => write!(f, "NotInPageRange"),
             TreeStatus::Duplicate => write!(f, "Duplicate"),
             TreeStatus::NotReadyForPhysicalDelete => write!(f, "NotReadyForPhysicalDelete"),
+            TreeStatus::WriteLockFailed => write!(f, "WriteLockFailed"),
             TreeStatus::BPStatus(status) => write!(f, "{:?}", status),
         }
     }
@@ -84,16 +92,100 @@ impl FosterBtree {
             "N"
         };
         format!(
-            "[ID: {}, LEV: {}, LF: {:?}, {}HF: {:?}, SIZE: {}({})]",
+            "[ID: {}, LEV: {}, LF: {:?}, {}HF: {:?}, SLOTS: {}, SIZE: {}({})]",
             page.get_id(),
             page.level(),
             page.get_low_fence(),
             foster,
             page.get_high_fence(),
+            page.slot_count(),
             page.total_bytes_used(),
             size_cat
         )
     }
+
+    fn to_dot_string(page: &Page) -> String {
+        let mut result = format!("\t{} [label=\"[P{}](", page.get_id(), page.get_id());
+        // If page is a leaf, add the key-value pairs
+        let low_fence = page.get_raw_key(page.low_fence_slot_id());
+        if low_fence == &[] {
+            result.push_str("L[-∞], ");
+        } else {
+            let low_fence_usize = usize::from_be_bytes(low_fence.try_into().unwrap());
+            result.push_str(&format!("L[{}], ", low_fence_usize));
+        }
+        for i in 1..=page.active_slot_count() {
+            let key = page.get_raw_key(i);
+            let key = if key == &[] {
+                "-∞".to_string()
+            } else {
+                let key_usize = usize::from_be_bytes(key.try_into().unwrap());
+                key_usize.to_string()
+            };
+            result.push_str(&format!("{}, ", key));
+        }
+        let high_fence = page.get_raw_key(page.high_fence_slot_id());
+        if high_fence == &[] {
+            result.push_str("H[+∞])\"];");
+        } else {
+            let high_fence_usize = usize::from_be_bytes(high_fence.try_into().unwrap());
+            result.push_str(&format!("H[{}])\"];", high_fence_usize));
+        }
+        result.push_str("\n");
+        result
+    }
+
+    fn generate_dot(&self) -> String {
+        let mut result = "digraph G {\n".to_string();
+        // rectangle nodes
+        result.push_str("\tnode [shape=rectangle];\n");
+        let current_page = self.bp.get_page_for_read(self.root_key).unwrap();
+        let mut levels = HashMap::new();
+        let mut stack = VecDeque::new();
+        stack.push_back(current_page);
+        while let Some(page) = stack.pop_front() {
+            result.push_str(&FosterBtree::to_dot_string(&page));
+            levels
+                .entry(page.level())
+                .or_insert(HashSet::new())
+                .insert(page.get_id());
+            if page.has_foster_child() {
+                // Push the foster child to front of the stack
+                let foster_child_page_id = page.get_foster_page_id();
+                let foster_child_page = self
+                    .bp
+                    .get_page_for_read(PageKey::new(self.c_key, foster_child_page_id))
+                    .unwrap();
+                result.push_str(&format!(
+                    "\t{} -> {};\n",
+                    page.get_id(),
+                    foster_child_page_id
+                ));
+                stack.push_front(foster_child_page);
+            }
+            if page.is_leaf() {
+                continue;
+            }
+            for i in 1..=page.active_slot_count() {
+                let child_page_id = PageId::from_be_bytes(page.get_val(i).try_into().unwrap());
+                let child_page = self
+                    .bp
+                    .get_page_for_read(PageKey::new(self.c_key, child_page_id))
+                    .unwrap();
+                result.push_str(&format!("\t{} -> {};\n", page.get_id(), child_page_id));
+                stack.push_back(child_page);
+            }
+        }
+        // Map the same level pages to the same rank
+        for (level, page_ids) in levels {
+            result.push_str(&format!("\t{{rank=same; {:?}}}\n", page_ids));
+        }
+
+        result.push_str("}\n");
+
+        result
+    }
+
     /// System transaction that allocates a new page.
     fn allocate_page(&self) -> FrameWriteGuard {
         let mut foster_page = self.bp.create_new_page_for_write(self.c_key).unwrap();
@@ -113,8 +205,9 @@ impl FosterBtree {
     /// Check if the parent page is the parent of the child page.
     /// This includes the foster child relationship.
     fn is_parent_and_child(parent: &Page, child: &Page) -> bool {
+        let low_key = BTreeKey::new(&child.get_raw_key(child.low_fence_slot_id()));
         // Find the slot id of the child page in the parent page.
-        let slot_id = parent.lower_bound_slot_id(&child.get_low_fence());
+        let slot_id = parent.lower_bound_slot_id(&low_key);
         // Check if the value of the slot id is the same as the child page id.
         parent.get_val(slot_id) == child.get_id().to_be_bytes()
     }
@@ -253,6 +346,7 @@ impl FosterBtree {
             foster_child.set_level(this.level());
             foster_child.set_low_fence(key);
             foster_child.set_high_fence(this.get_raw_key(this.high_fence_slot_id()));
+            foster_child.set_right_most(this.is_right_most());
             let res = foster_child.insert(key, value, false);
             assert!(res);
             // Insert the foster key into this page.
@@ -302,6 +396,7 @@ impl FosterBtree {
                     foster_child.set_level(this.level());
                     foster_child.set_low_fence(&foster_key);
                     foster_child.set_high_fence(this.get_raw_key(this.high_fence_slot_id()));
+                    foster_child.set_right_most(this.is_right_most());
                     foster_child.set_has_foster_child(this.has_foster_child());
                     let mut kvs = Vec::new();
                     for i in slot_id..=this.active_slot_count() {
@@ -338,6 +433,7 @@ impl FosterBtree {
                     foster_child.set_level(this.level());
                     foster_child.set_low_fence(key);
                     foster_child.set_high_fence(this.get_raw_key(this.high_fence_slot_id()));
+                    foster_child.set_right_most(this.is_right_most());
                     foster_child.set_has_foster_child(this.has_foster_child());
                     let mut kvs = Vec::new();
                     kvs.push((key, value));
@@ -473,28 +569,29 @@ impl FosterBtree {
     ///  |
     ///  v
     /// child1 [k0, k2) --> foster_child [k1, k2)
-    fn anti_adopt(parent: &mut Page, child: &mut Page) {
-        assert!(FosterBtree::is_parent_and_child(parent, child));
-        assert!(!FosterBtree::is_foster_relationship(parent, child));
-        assert!(!child.has_foster_child());
+    fn anti_adopt(parent: &mut Page, child1: &mut Page) {
+        assert!(FosterBtree::is_parent_and_child(parent, child1));
+        assert!(!FosterBtree::is_foster_relationship(parent, child1));
+        assert!(!child1.has_foster_child());
 
         // Identify child1 slot
-        let slot_id = parent.lower_bound_slot_id(&child.get_low_fence());
+        let low_key = BTreeKey::new(&child1.get_raw_key(child1.low_fence_slot_id()));
+        let slot_id = parent.lower_bound_slot_id(&low_key);
         if parent.has_foster_child() {
             assert!(slot_id + 1 < parent.foster_child_slot_id());
         } else {
             assert!(slot_id + 1 < parent.high_fence_slot_id());
         }
-        // Move the child1 slot to child0
-        let child1_key = parent.get_raw_key(slot_id + 1);
-        let child1_val = parent.get_val(slot_id + 1);
-        let new_fence = parent.get_raw_key(slot_id + 2);
-        child.set_high_fence(new_fence);
-        child.set_has_foster_child(true);
-        let res = child.insert(child1_key, child1_val, false);
+        let k1 = parent.get_raw_key(slot_id + 1);
+        let child2_ptr = parent.get_val(slot_id + 1);
+        let k2 = parent.get_raw_key(slot_id + 2);
+        child1.set_high_fence(k2);
+        child1.set_has_foster_child(true);
+        let res = child1.insert(k1, child2_ptr, false);
         if !res {
             panic!("Cannot insert the slot into the child page");
         }
+        parent.remove_at(slot_id + 1);
     }
 
     /// Descend the root page to the child page if the root page
@@ -561,7 +658,8 @@ impl FosterBtree {
         // Set level, has_foster_child flag, and fence keys
         child.init();
         child.set_level(root.level());
-        child.set_low_fence(&[]);
+        child.set_low_fence(root.get_raw_key(root.low_fence_slot_id()));
+        child.set_left_most(root.is_left_most());
         child.set_high_fence(&foster_key);
         root.increment_level();
         root.set_has_foster_child(false);
@@ -624,43 +722,67 @@ impl FosterBtree {
         if FosterBtree::is_foster_relationship(this, child) {
             if FosterBtree::should_merge(this, child) {
                 // Start from this again
-                debug!("Merge: this: {}, child: {}", this_str, child_str);
+                debug!("Merge: \n\tthis: {}, \n\tnext: {}", this_str, child_str);
                 return Some(OpType::MERGE);
             }
-            debug!("No Merge: this: {}, child: {}", this_str, child_str);
+            debug!("No Merge: \n\tthis: {}, \n\tnext: {}", this_str, child_str);
             if !no_balance && FosterBtree::should_load_balance(this, child) {
                 // Start from this again
-                debug!("Load balance: this: {}, child: {}", this_str, child_str);
+                debug!(
+                    "Load balance: \n\tthis: {}, \n\tnext: {}",
+                    this_str, child_str
+                );
                 return Some(OpType::LOADBALANCE);
             }
-            debug!("No Load balance: this: {}, child: {}", this_str, child_str);
+            debug!(
+                "No Load balance: \n\tthis: {}, \n\tnext: {}",
+                this_str, child_str
+            );
             if FosterBtree::should_root_ascend(this, child) {
                 // Start from child
-                debug!("Ascend root: this: {}, child: {}", this_str, child_str);
+                debug!(
+                    "Ascend root: \n\tthis: {}, \n\tnext: {}",
+                    this_str, child_str
+                );
                 return Some(OpType::ASCENDROOT);
             }
-            debug!("No Ascend root: this: {}, child: {}", this_str, child_str);
+            debug!(
+                "No Ascend root: \n\tthis: {}, \n\tnext: {}",
+                this_str, child_str
+            );
         } else {
             if FosterBtree::should_adopt(this, child) {
                 // Start from child
-                debug!("Adopt: this: {}, child: {}", this_str, child_str);
+                debug!("Adopt: \n\tthis: {}, \n\tnext: {}", this_str, child_str);
                 return Some(OpType::ADOPT);
             }
-            debug!("No Adopt: this: {}, child: {}", this_str, child_str);
+            debug!("No Adopt: \n\tthis: {}, \n\tnext: {}", this_str, child_str);
             if FosterBtree::should_antiadopt(this, child) {
                 // Start from child
-                debug!("Antiadopt: this: {}, child: {}", this_str, child_str);
+                debug!("Antiadopt: \n\tthis: {}, \n\tnext: {}", this_str, child_str);
                 return Some(OpType::ANTIADOPT);
             }
-            debug!("No Antiadopt: this: {}, child: {}", this_str, child_str);
+            debug!(
+                "No Antiadopt: \n\tthis: {}, \n\tnext: {}",
+                this_str, child_str
+            );
             if FosterBtree::should_root_descend(this, child) {
                 // Start from this
-                debug!("Descend root: this: {}, child: {}", this_str, child_str);
+                debug!(
+                    "Descend root: \n\tthis: {}, \n\tnext: {}",
+                    this_str, child_str
+                );
                 return Some(OpType::DESCENDROOT);
             }
-            debug!("No Descend root: this: {}, child: {}", this_str, child_str);
+            debug!(
+                "No Descend root: \n\tthis: {}, \n\tnext: {}",
+                this_str, child_str
+            );
         }
-        debug!("No Modification: this: {}, child: {}", this_str, child_str);
+        debug!(
+            "No Modification: \n\tthis: {}, \n\tnext: {}",
+            this_str, child_str
+        );
         None
     }
 
@@ -673,11 +795,11 @@ impl FosterBtree {
         assert!(FosterBtree::is_parent_and_child(this, child));
         assert!(FosterBtree::is_foster_relationship(this, child));
         // Check if this is small and child is not too large
-        if (too_small(this) && !too_large(child)) {
+        if is_small(this) && !is_large(child) {
             return true;
         }
 
-        if !too_large(this) && too_small(child) {
+        if !is_large(this) && is_small(child) {
             return true;
         }
         false
@@ -692,7 +814,7 @@ impl FosterBtree {
         assert!(FosterBtree::is_parent_and_child(this, child));
         assert!(FosterBtree::is_foster_relationship(this, child));
         // Check if this is not too small and child is too large
-        if (too_small(this) && too_large(child)) || (too_large(this) && too_small(child)) {
+        if (is_small(this) && is_large(child)) || (is_large(this) && is_small(child)) {
             return true;
         }
         false
@@ -715,8 +837,9 @@ impl FosterBtree {
         }
         // We want to do anti-adoption as less as possible.
         // Therefore, if child will need merge or load balance, we prioritize them over adoption.
+        // If this is large, there is a high chance that the parent will need to split when adopting the foster child.
         // If child is small, there is a high chance that the parent will need to merge or load balance.
-        if too_small(child) {
+        if is_large(this) || is_small(child) {
             return false;
         }
         true
@@ -728,7 +851,8 @@ impl FosterBtree {
         if child.has_foster_child() {
             return false;
         }
-        let slot_id = this.lower_bound_slot_id(&child.get_low_fence());
+        let low_key = BTreeKey::new(&child.get_raw_key(child.low_fence_slot_id()));
+        let slot_id = this.lower_bound_slot_id(&low_key);
         if this.has_foster_child() {
             if slot_id + 1 >= this.foster_child_slot_id() {
                 return false;
@@ -739,7 +863,8 @@ impl FosterBtree {
             }
         }
 
-        if !too_small(child) {
+        if !is_small(child) {
+            // If child is not small, there is no need to antiadopt because the child will not need to merge or load balance.
             return false;
         }
 
@@ -770,10 +895,11 @@ impl FosterBtree {
         // Same low fence and high fence
         assert_eq!(this.get_low_fence(), child.get_low_fence());
         assert_eq!(this.get_high_fence(), child.get_high_fence());
-        false
+        true
     }
 
     fn modify_structure_if_needed_for_read<'a>(
+        &self,
         this: FrameReadGuard<'a>,
         child: FrameReadGuard<'a>,
     ) -> (Option<OpType>, FrameReadGuard<'a>, FrameReadGuard<'a>) {
@@ -794,7 +920,7 @@ impl FosterBtree {
                     }
                 }
             };
-            FosterBtree::modify_structure(op.clone(), &mut this, &mut child);
+            self.modify_structure(op.clone(), &mut this, &mut child);
             (Some(op), this.downgrade(), child.downgrade())
         } else {
             (None, this, child)
@@ -802,18 +928,19 @@ impl FosterBtree {
     }
 
     fn modify_structure_if_needed_for_write<'a>(
+        &self,
         mut this: FrameWriteGuard<'a>,
         mut child: FrameWriteGuard<'a>,
     ) -> (Option<OpType>, FrameWriteGuard<'a>, FrameWriteGuard<'a>) {
         if let Some(op) = FosterBtree::should_modify_structure(&this, &child, false) {
-            FosterBtree::modify_structure(op.clone(), &mut this, &mut child);
+            self.modify_structure(op.clone(), &mut this, &mut child);
             (Some(op), this, child)
         } else {
             (None, this, child)
         }
     }
 
-    fn modify_structure(op: OpType, this: &mut Page, child: &mut Page) {
+    fn modify_structure(&self, op: OpType, this: &mut Page, child: &mut Page) {
         match op {
             OpType::MERGE => {
                 // Merge the foster child into this page
@@ -829,11 +956,13 @@ impl FosterBtree {
             }
             OpType::ANTIADOPT => {
                 // Anti-adopt the foster child of the child page
-                // FosterBtree::antiadopt(this, child);
+                FosterBtree::anti_adopt(this, child);
             }
             OpType::ASCENDROOT => {
+                let mut new_page = self.bp.create_new_page_for_write(self.c_key).unwrap();
+                new_page.init();
                 // Ascend the root page to the parent page
-                FosterBtree::ascend_root(this, child);
+                FosterBtree::ascend_root(this, &mut new_page);
             }
             OpType::DESCENDROOT => {
                 // Descend the root page to the child page
@@ -854,7 +983,7 @@ impl FosterBtree {
                     let foster_page = self.bp.get_page_for_read(foster_page_key)?;
                     // Now we have two locks. We need to release the lock of the current page.
                     let (op, this_page, foster_page) =
-                        FosterBtree::modify_structure_if_needed_for_read(this_page, foster_page);
+                        self.modify_structure_if_needed_for_read(this_page, foster_page);
                     match op {
                         Some(OpType::MERGE) | Some(OpType::LOADBALANCE) => {
                             current_page = this_page;
@@ -883,7 +1012,7 @@ impl FosterBtree {
             let next_page = self.bp.get_page_for_read(page_key)?;
             // Now we have two locks. We need to release the lock of the current page.
             let (op, this_page, next_page) =
-                FosterBtree::modify_structure_if_needed_for_read(this_page, next_page);
+                self.modify_structure_if_needed_for_read(this_page, next_page);
             match op {
                 Some(OpType::MERGE) | Some(OpType::LOADBALANCE) | Some(OpType::DESCENDROOT) => {
                     current_page = this_page;
@@ -899,22 +1028,47 @@ impl FosterBtree {
     }
 
     fn traverse_to_leaf_for_write(&self, key: &[u8]) -> Result<FrameWriteGuard, TreeStatus> {
-        let mut current_page = self.bp.get_page_for_write(self.root_key)?;
+        let mut current_page = self.bp.get_page_for_read(self.root_key)?;
         loop {
-            let this_page = &current_page;
-            FosterBtree::print_page(this_page);
+            let this_page = current_page;
+            FosterBtree::print_page(&this_page);
             if this_page.is_leaf() {
                 if this_page.has_foster_child() && this_page.get_foster_key() <= key {
                     // Check whether the foster child should be traversed.
                     let foster_page_key = PageKey::new(self.c_key, this_page.get_foster_page_id());
-                    let foster_page = self.bp.get_page_for_write(foster_page_key)?;
+                    let foster_page = self.bp.get_page_for_read(foster_page_key)?;
                     // Now we have two locks. We need to release the lock of the current page.
-                    // Do some structure modification between parent and child in the same level (foster relationship).
-
-                    current_page = foster_page;
-                    continue;
+                    let (op, this_page, foster_page) =
+                        self.modify_structure_if_needed_for_read(this_page, foster_page);
+                    match op {
+                        Some(OpType::MERGE) | Some(OpType::LOADBALANCE) => {
+                            current_page = this_page;
+                            continue;
+                        }
+                        None | Some(OpType::ASCENDROOT) => {
+                            // Start from the child
+                            current_page = foster_page;
+                            continue;
+                        }
+                        _ => {
+                            panic!("Unexpected operation");
+                        }
+                    }
                 } else {
-                    break;
+                    // Spin loop for upgrade lock
+                    let mut dest_page = this_page;
+                    for _ in 0..100 {
+                        match dest_page.try_upgrade(false) {
+                            Ok(upgraded) => {
+                                return Ok(upgraded);
+                            }
+                            Err(this_page) => {
+                                dest_page = this_page;
+                                std::hint::spin_loop();
+                            }
+                        }
+                    }
+                    return Err(TreeStatus::WriteLockFailed);
                 }
             }
             let page_key = {
@@ -924,13 +1078,22 @@ impl FosterBtree {
                 PageKey::new(self.c_key, page_id)
             };
 
-            let next_page = self.bp.get_page_for_write(page_key)?;
+            let next_page = self.bp.get_page_for_read(page_key)?;
             // Now we have two locks. We need to release the lock of the current page.
-            // Do some structure modification between parent and child in a different level.
-
-            current_page = next_page;
+            let (op, this_page, next_page) =
+                self.modify_structure_if_needed_for_read(this_page, next_page);
+            match op {
+                Some(OpType::MERGE) | Some(OpType::LOADBALANCE) | Some(OpType::DESCENDROOT) => {
+                    current_page = this_page;
+                    continue;
+                }
+                None | Some(OpType::ASCENDROOT) | Some(OpType::ADOPT) | Some(OpType::ANTIADOPT) => {
+                    // Start from the child
+                    current_page = next_page;
+                    continue;
+                }
+            }
         }
-        Ok(current_page)
     }
 
     pub fn get_key(&self, key: &[u8]) -> Result<Vec<u8>, TreeStatus> {
@@ -990,7 +1153,22 @@ impl FosterBtree {
     }
 
     pub fn insert(&self, key: &[u8], value: &[u8]) -> Result<(), TreeStatus> {
-        let mut leaf_page = self.traverse_to_leaf_for_write(key)?; // Hold X latch on the page
+        let mut leaf_page = {
+            loop {
+                match self.traverse_to_leaf_for_write(key) {
+                    Ok(leaf_page) => {
+                        break leaf_page;
+                    }
+                    Err(TreeStatus::WriteLockFailed) => {
+                        std::hint::spin_loop();
+                    }
+                    Err(e) => {
+                        return Err(e);
+                    }
+                }
+            }
+        };
+
         let slot_id = leaf_page.lower_bound_slot_id(&BTreeKey::new(key));
         if slot_id == 0 {
             // Lower fence so insert is ok
@@ -1110,9 +1288,17 @@ mod tests {
     use log::trace;
     use tempfile::TempDir;
 
-    use crate::{buffer_pool::CacheEvictionPolicy, page::Page, utils::init_test_logger};
+    use crate::{
+        buffer_pool::CacheEvictionPolicy,
+        foster_btree::foster_btree::{is_large, is_small, MIN_BYTES_USED},
+        page::Page,
+        utils::init_test_logger,
+    };
 
-    use super::{BufferPool, BufferPoolRef, ContainerKey, FosterBtree, FosterBtreePage, PageKey};
+    use super::{
+        BufferPool, BufferPoolRef, ContainerKey, FosterBtree, FosterBtreePage, PageKey,
+        MAX_BYTES_USED,
+    };
 
     fn get_buffer_pool(db_id: u16) -> (TempDir, BufferPoolRef) {
         let temp_dir = TempDir::new().unwrap();
@@ -1344,9 +1530,26 @@ mod tests {
         test_page_balance_detail(10, 20, 30, vec![10, 11, 12, 13, 14, 15], vec![20, 21]);
     }
 
-    #[test]
-    fn test_page_adopt() {
-        // One parent page. One child page with foster child.
+    fn test_page_adopt_detail(
+        k0: usize,
+        k1: usize,
+        k2: usize,
+        left: Vec<usize>,
+        right: Vec<usize>,
+    ) {
+        // check left and right are sorted and in the correct range
+        assert!(left.iter().all(|&x| k0 <= x && x < k1));
+        if left.len() > 0 {
+            for i in 0..left.len() - 1 {
+                assert!(left[i] < left[i + 1]);
+            }
+        }
+        assert!(right.iter().all(|&x| k1 <= x && x < k2));
+        if right.len() > 0 {
+            for i in 0..right.len() - 1 {
+                assert!(right[i] < right[i + 1]);
+            }
+        }
         let (db_id, c_id) = (0, 0);
         let c_key = ContainerKey::new(db_id, c_id);
         let (temp_dir, bp) = get_buffer_pool(db_id);
@@ -1354,22 +1557,9 @@ mod tests {
         let mut child0 = bp.create_new_page_for_write(c_key).unwrap();
         let mut child1 = bp.create_new_page_for_write(c_key).unwrap();
 
-        // Before:
-        //   parent [k0, k2)
-        //    |
-        //    v
-        //   child0 [k0, k2) --> child1 [k1, k2)
-        //
-        // After:
-        //   parent [k0, k2)
-        //    +-------------------+
-        //    |                   |
-        //    v                   v
-        //   child0 [k0, k1)    child1 [k1, k2)
-
-        let k0 = to_bytes(10);
-        let k1 = to_bytes(20);
-        let k2 = to_bytes(30);
+        let k0 = to_bytes(k0);
+        let k1 = to_bytes(k1);
+        let k2 = to_bytes(k2);
 
         parent.init();
         parent.set_low_fence(&k0);
@@ -1381,11 +1571,7 @@ mod tests {
         child0.set_low_fence(&k0);
         child0.set_high_fence(&k2);
         child0.set_level(0);
-        // Insert 10 slots
-        for i in 0..10 {
-            let key = to_bytes(i + 10);
-            child0.insert(&key, &key, false);
-        }
+        child0.append_sorted(left.iter().map(|&x| (to_bytes(x), to_bytes(x))).collect());
         child0.set_has_foster_child(true);
         child0.insert(&k1, &child1.get_id().to_be_bytes(), false);
 
@@ -1393,101 +1579,169 @@ mod tests {
         child1.set_low_fence(&k1);
         child1.set_high_fence(&k2);
         child1.set_level(0);
-        // Insert 10 slots
-        for i in 0..10 {
-            let key = to_bytes(i + 20);
-            child1.insert(&key, &key, false);
-        }
+        child1.append_sorted(right.iter().map(|&x| (to_bytes(x), to_bytes(x))).collect());
 
         // Run consistency checks
-        parent.run_consistency_checks(false);
-        child0.run_consistency_checks(false);
-        child1.run_consistency_checks(false);
+        parent.run_consistency_checks(true);
+        child0.run_consistency_checks(true);
+        child1.run_consistency_checks(true);
         assert_eq!(parent.active_slot_count(), 1);
-        assert_eq!(child0.active_slot_count(), 11);
-        assert_eq!(child1.active_slot_count(), 10);
+        assert_eq!(child0.active_slot_count() as usize, left.len() + 1);
+        assert_eq!(child1.active_slot_count() as usize, right.len());
         assert_eq!(parent.get_val(1), child0.get_id().to_be_bytes());
         assert!(child0.has_foster_child());
-        assert_eq!(child0.get_foster_key(), k1);
+        assert_eq!(child0.get_foster_key(), child1.get_raw_key(0));
         assert_eq!(child0.get_foster_page_id(), child1.get_id());
 
+        // Adopt
         FosterBtree::adopt(&mut parent, &mut child0);
 
         // Run consistency checks
         parent.run_consistency_checks(false);
         child0.run_consistency_checks(false);
         child1.run_consistency_checks(false);
+
+        // Check the contents of parent
         assert_eq!(parent.active_slot_count(), 2);
-        assert_eq!(child0.active_slot_count(), 10);
-        assert_eq!(child1.active_slot_count(), 10);
         assert_eq!(parent.get_val(1), child0.get_id().to_be_bytes());
         assert_eq!(parent.get_val(2), child1.get_id().to_be_bytes());
-        assert_eq!(child0.has_foster_child(), false);
-
-        // print_page(&parent);
-        // print_page(&child0);
-        // print_page(&child1);
+        assert_eq!(child0.active_slot_count() as usize, left.len());
+        assert!(!child0.has_foster_child());
+        for i in 0..left.len() {
+            let key = child0.get_raw_key((i + 1) as u16);
+            assert_eq!(key, to_bytes(left[i]));
+            let val = child0.get_val((i + 1) as u16);
+            assert_eq!(val, to_bytes(left[i]));
+        }
+        assert_eq!(child1.active_slot_count() as usize, right.len());
+        for i in 0..right.len() {
+            let key = child1.get_raw_key((i + 1) as u16);
+            assert_eq!(key, to_bytes(right[i]));
+            let val = child1.get_val((i + 1) as u16);
+            assert_eq!(val, to_bytes(right[i]));
+        }
 
         drop(temp_dir);
     }
 
     #[test]
-    fn test_root_page_descend() {
+    fn test_page_adopt() {
+        test_page_adopt_detail(10, 20, 30, vec![], vec![]);
+        test_page_adopt_detail(10, 20, 30, vec![10, 15], vec![20, 25, 29]);
+        test_page_adopt_detail(10, 20, 30, vec![], vec![20, 25]);
+        test_page_adopt_detail(10, 20, 30, vec![10, 15], vec![]);
+    }
+
+    fn test_page_anti_adopt_detail(
+        k0: usize,
+        k1: usize,
+        k2: usize,
+        left: Vec<usize>,
+        right: Vec<usize>,
+    ) {
+        // check left and right are sorted and in the correct range
+        assert!(left.iter().all(|&x| k0 <= x && x < k1));
+        if left.len() > 0 {
+            for i in 0..left.len() - 1 {
+                assert!(left[i] < left[i + 1]);
+            }
+        }
+        assert!(right.iter().all(|&x| k1 <= x && x < k2));
+        if right.len() > 0 {
+            for i in 0..right.len() - 1 {
+                assert!(right[i] < right[i + 1]);
+            }
+        }
         let (db_id, c_id) = (0, 0);
         let c_key = ContainerKey::new(db_id, c_id);
         let (temp_dir, bp) = get_buffer_pool(db_id);
-        let mut root = bp.create_new_page_for_write(c_key).unwrap();
-        let mut child = bp.create_new_page_for_write(c_key).unwrap();
+        let mut parent = bp.create_new_page_for_write(c_key).unwrap();
+        let mut child0 = bp.create_new_page_for_write(c_key).unwrap();
+        let mut child1 = bp.create_new_page_for_write(c_key).unwrap();
 
-        // Before:
-        //   root [k0, k1)
-        //    |
-        //    v
-        //   child [k0, k1)
-        //
-        //
-        // After:
-        //   root [k0, k1)
+        let k0 = to_bytes(k0);
+        let k1 = to_bytes(k1);
+        let k2 = to_bytes(k2);
 
-        root.init_as_root();
-        root.increment_level();
-        root.insert(&[], &child.get_id().to_be_bytes(), false);
+        parent.init();
+        parent.set_low_fence(&k0);
+        parent.set_high_fence(&k2);
+        parent.set_level(1);
+        parent.insert(&k0, &child0.get_id().to_be_bytes(), false);
+        parent.insert(&k1, &child1.get_id().to_be_bytes(), false);
 
-        child.init();
-        child.set_low_fence(&[]);
-        child.set_high_fence(&[]);
-        // Insert 10 slots
-        for i in 1..=10 {
-            let key = to_bytes(i);
-            child.insert(&key, &key, false);
-        }
-        child.set_level(0);
+        child0.init();
+        child0.set_low_fence(&k0);
+        child0.set_high_fence(&k1);
+        child0.set_level(0);
+        child0.append_sorted(left.iter().map(|&x| (to_bytes(x), to_bytes(x))).collect());
 
-        // Run consistency checks
-        root.run_consistency_checks(false);
-        child.run_consistency_checks(false);
-
-        FosterBtree::descend_root(&mut root, &mut child);
+        child1.init();
+        child1.set_low_fence(&k1);
+        child1.set_high_fence(&k2);
+        child1.set_level(0);
+        child1.append_sorted(right.iter().map(|&x| (to_bytes(x), to_bytes(x))).collect());
 
         // Run consistency checks
-        root.run_consistency_checks(false);
-        child.run_consistency_checks(false);
-        assert_eq!(root.active_slot_count(), 10);
-        assert_eq!(root.level(), 0);
-        assert_eq!(root.has_foster_child(), false);
-        assert!(child.empty());
-        assert_eq!(child.active_slot_count(), 0);
-        for i in 1..=root.active_slot_count() {
-            let key = root.get_raw_key(i);
-            let val = root.get_val(i);
-            assert_eq!(key, to_bytes(i as usize));
-            assert_eq!(val, to_bytes(i as usize));
+        parent.run_consistency_checks(true);
+        child0.run_consistency_checks(true);
+        child1.run_consistency_checks(true);
+        assert_eq!(parent.active_slot_count(), 2);
+        assert_eq!(child0.active_slot_count() as usize, left.len());
+        assert_eq!(child1.active_slot_count() as usize, right.len());
+
+        // FosterBtree::print_page(&parent);
+        // FosterBtree::print_page(&child0);
+        // FosterBtree::print_page(&child1);
+
+        // Anti-adopt
+        FosterBtree::anti_adopt(&mut parent, &mut child0);
+
+        // Run consistency checks
+        parent.run_consistency_checks(false);
+        child0.run_consistency_checks(false);
+        child1.run_consistency_checks(false);
+
+        // Check the contents of parent
+        assert_eq!(parent.active_slot_count(), 1);
+        assert_eq!(parent.get_val(1), child0.get_id().to_be_bytes());
+
+        assert_eq!(child0.active_slot_count() as usize, left.len() + 1);
+        assert_eq!(child0.get_low_fence().as_ref(), k0);
+        assert_eq!(child0.get_high_fence().as_ref(), k2);
+        assert!(child0.has_foster_child());
+        assert_eq!(child0.get_foster_key(), child1.get_raw_key(0));
+        assert_eq!(child0.get_foster_page_id(), child1.get_id());
+        for i in 0..left.len() {
+            let key = child0.get_raw_key((i + 1) as u16);
+            assert_eq!(key, to_bytes(left[i]));
+            let val = child0.get_val((i + 1) as u16);
+            assert_eq!(val, to_bytes(left[i]));
         }
 
-        FosterBtree::print_page(&root);
-        FosterBtree::print_page(&child);
+        assert_eq!(child1.active_slot_count() as usize, right.len());
+        assert_eq!(child1.get_low_fence().as_ref(), k1);
+        assert_eq!(child1.get_high_fence().as_ref(), k2);
+        for i in 0..right.len() {
+            let key = child1.get_raw_key((i + 1) as u16);
+            assert_eq!(key, to_bytes(right[i]));
+            let val = child1.get_val((i + 1) as u16);
+            assert_eq!(val, to_bytes(right[i]));
+        }
+
+        // FosterBtree::print_page(&parent);
+        // FosterBtree::print_page(&child0);
+        // FosterBtree::print_page(&child1);
 
         drop(temp_dir);
+    }
+
+    #[test]
+    fn test_page_anti_adopt() {
+        test_page_anti_adopt_detail(10, 20, 30, vec![], vec![]);
+        test_page_anti_adopt_detail(10, 20, 30, vec![10, 15], vec![20, 25, 29]);
+        test_page_anti_adopt_detail(10, 20, 30, vec![], vec![20, 25]);
+        test_page_anti_adopt_detail(10, 20, 30, vec![10, 15], vec![]);
     }
 
     #[test]
@@ -1556,6 +1810,7 @@ mod tests {
         assert_eq!(child.active_slot_count(), 10);
         assert_eq!(child.level(), 0);
         assert_eq!(child.has_foster_child(), false);
+        assert_eq!(child.is_left_most(), true);
         for i in 1..=child.active_slot_count() {
             let key = child.get_raw_key(i);
             let val = child.get_val(i);
@@ -1579,298 +1834,490 @@ mod tests {
         drop(temp_dir);
     }
 
-    fn setup_btree_simple() -> (TempDir, FosterBtree) {
+    #[test]
+    fn test_root_page_descend() {
         let (db_id, c_id) = (0, 0);
         let c_key = ContainerKey::new(db_id, c_id);
         let (temp_dir, bp) = get_buffer_pool(db_id);
-        let root_key = {
-            let mut root = bp.create_new_page_for_write(c_key).unwrap();
-            let mut inner0 = bp.create_new_page_for_write(c_key).unwrap();
-            let mut inner1 = bp.create_new_page_for_write(c_key).unwrap();
-            let mut leaf0 = bp.create_new_page_for_write(c_key).unwrap();
-            let mut leaf1 = bp.create_new_page_for_write(c_key).unwrap();
-            let mut leaf2 = bp.create_new_page_for_write(c_key).unwrap();
-            let mut leaf3 = bp.create_new_page_for_write(c_key).unwrap();
+        let mut root = bp.create_new_page_for_write(c_key).unwrap();
+        let mut child = bp.create_new_page_for_write(c_key).unwrap();
 
-            //
-            // root [-inf, +inf)
-            //  +------------------------------------------+
-            //  |                                          |
-            //  v                                          v
-            // inner0 [-inf, k0)                           inner1 [k0, +inf)
-            //  +-------------------+                      +-------------------+
-            //  |                   |                      |                   |
-            //  v                   v                      v                   v
-            // leaf0 [-inf, k1)    leaf1 [k1, k0)         leaf2 [k0, k2)      leaf3 [k2, +inf)
+        // Before:
+        //   root [k0, k1)
+        //    |
+        //    v
+        //   child [k0, k1)
+        //
+        //
+        // After:
+        //   root [k0, k1)
 
-            let k0 = to_bytes(20);
-            let k1 = to_bytes(10);
-            let k2 = to_bytes(30);
+        root.init_as_root();
+        root.increment_level();
+        root.insert(&[], &child.get_id().to_be_bytes(), false);
 
-            root.init_as_root();
-            root.set_level(2);
-            root.insert(&[], &inner0.get_id().to_be_bytes(), false);
-            root.insert(&k0, &inner1.get_id().to_be_bytes(), false);
+        child.init();
+        child.set_low_fence(&[]);
+        child.set_high_fence(&[]);
+        // Insert 10 slots
+        for i in 1..=10 {
+            let key = to_bytes(i);
+            child.insert(&key, &key, false);
+        }
+        child.set_level(0);
 
-            inner0.init();
-            inner0.set_low_fence(&[]);
-            inner0.set_high_fence(&k0);
-            inner0.set_level(1);
-            inner0.insert(&[], &leaf0.get_id().to_be_bytes(), false);
-            inner0.insert(&k1, &leaf1.get_id().to_be_bytes(), false);
+        // Run consistency checks
+        root.run_consistency_checks(false);
+        child.run_consistency_checks(false);
 
-            inner1.init();
-            inner1.set_low_fence(&k0);
-            inner1.set_high_fence(&[]);
-            inner1.set_level(1);
-            inner1.insert(&k0, &leaf2.get_id().to_be_bytes(), false);
-            inner1.insert(&k2, &leaf3.get_id().to_be_bytes(), false);
+        FosterBtree::descend_root(&mut root, &mut child);
 
-            leaf0.init();
-            leaf0.set_low_fence(&[]);
-            leaf0.set_high_fence(&k1);
-            leaf0.set_level(0);
-            for i in 0..10 {
-                let key = to_bytes(i);
-                leaf0.insert(&key, &key, false);
-            }
+        // Run consistency checks
+        root.run_consistency_checks(false);
+        child.run_consistency_checks(false);
+        assert_eq!(root.active_slot_count(), 10);
+        assert_eq!(root.level(), 0);
+        assert_eq!(root.has_foster_child(), false);
+        assert!(child.empty());
+        assert_eq!(child.active_slot_count(), 0);
+        for i in 1..=root.active_slot_count() {
+            let key = root.get_raw_key(i);
+            let val = root.get_val(i);
+            assert_eq!(key, to_bytes(i as usize));
+            assert_eq!(val, to_bytes(i as usize));
+        }
 
-            leaf1.init();
-            leaf1.set_low_fence(&k1);
-            leaf1.set_high_fence(&k0);
-            leaf1.set_level(0);
-            for i in 10..20 {
-                let key = to_bytes(i);
-                leaf1.insert(&key, &key, false);
-            }
+        FosterBtree::print_page(&root);
+        FosterBtree::print_page(&child);
 
-            leaf2.init();
-            leaf2.set_low_fence(&k0);
-            leaf2.set_high_fence(&k2);
-            leaf2.set_level(0);
-            for i in 20..30 {
-                let key = to_bytes(i);
-                leaf2.insert(&key, &key, false);
-            }
-
-            leaf3.init();
-            leaf3.set_low_fence(&k2);
-            leaf3.set_high_fence(&[]);
-            leaf3.set_level(0);
-            for i in 30..40 {
-                let key = to_bytes(i);
-                leaf3.insert(&key, &key, false);
-            }
-
-            root.key().unwrap()
-        };
-
-        let btree = FosterBtree {
-            c_key,
-            root_key,
-            bp: bp.clone(),
-        };
-        (temp_dir, btree)
+        drop(temp_dir);
     }
 
-    fn setup_btree_with_foster_child() -> (TempDir, FosterBtree) {
+    // Foster relationship between two pages.
+    // Returns (temp_dir, bp, this_page_id, foster_page_id)
+    // If is_root is true, then this_page is a root page.
+    fn build_foster_relationship(
+        is_root: bool,
+        this_size: usize,
+        foster_size: usize,
+    ) -> (TempDir, BufferPoolRef, PageKey, PageKey) {
+        // Create a foster relationship between two pages.
         let (db_id, c_id) = (0, 0);
         let c_key = ContainerKey::new(db_id, c_id);
         let (temp_dir, bp) = get_buffer_pool(db_id);
+        let mut this = bp.create_new_page_for_write(c_key).unwrap();
+        let mut foster = bp.create_new_page_for_write(c_key).unwrap();
 
-        let root_key = {
-            let mut root = bp.create_new_page_for_write(c_key).unwrap();
-            let mut inner0 = bp.create_new_page_for_write(c_key).unwrap();
-            let mut inner1 = bp.create_new_page_for_write(c_key).unwrap();
-            let mut leaf0 = bp.create_new_page_for_write(c_key).unwrap();
-            let mut leaf1 = bp.create_new_page_for_write(c_key).unwrap();
-            let mut leaf2 = bp.create_new_page_for_write(c_key).unwrap();
-            let mut leaf3 = bp.create_new_page_for_write(c_key).unwrap();
+        // This [k0, k2) --> Foster [k1, k2)
 
-            //
-            // root [-inf, +inf)
+        let k0 = to_bytes(10);
+        let k1 = to_bytes(20);
+        let k2 = to_bytes(30);
+
+        if is_root {
+            this.init_as_root();
+        } else {
+            this.init();
+        }
+        this.set_low_fence(&k0);
+        this.set_high_fence(&k2);
+        this.set_has_foster_child(true);
+        this.insert(&k1, &foster.get_id().to_be_bytes(), false);
+        {
+            // Insert a slot into this page so that the total size of the page is this_size
+            let current_size = this.total_bytes_used();
+            let val_size = this_size - current_size - this.bytes_needed(&k0, &[]);
+            let val = vec![2_u8; val_size];
+            this.insert(&k0, &val, false);
+        }
+        assert_eq!(this.total_bytes_used(), this_size);
+
+        foster.init();
+        foster.set_low_fence(&k1);
+        foster.set_high_fence(&k2);
+        foster.set_right_most(this.is_right_most());
+        foster.set_has_foster_child(false);
+        {
+            // Insert a slot into foster page so that the total size of the page is foster_size
+            let current_size = foster.total_bytes_used();
+            let val_size = foster_size - current_size - this.bytes_needed(&k1, &[]);
+            let val = vec![2_u8; val_size];
+            foster.insert(&k1, &val, false);
+        }
+
+        // Run consistency checks
+        this.run_consistency_checks(true);
+        foster.run_consistency_checks(true);
+
+        let this_id = PageKey::new(c_key, this.get_id());
+        let foster_id = PageKey::new(c_key, foster.get_id());
+
+        drop(this);
+        drop(foster);
+
+        (temp_dir, bp, this_id, foster_id)
+    }
+
+    // In a foster relationship, MERGE, BALANCE, ROOT_ASCEND is allowed.
+    // [0, MIN_BYTES_USED) is small
+    // [MIN_BYTES_USED, MAX_BYTES_USED) is normal.
+    // [MAX_BYTES_USED, PAGE_SIZE) is large
+    // There are 3 * 3 = 9 possible size
+    // S: Small, N: Normal, L: Large
+    // SS, NS, SN: Merge
+    // SL, LS: Load balance
+    // NN, LN, NL, LL: Do nothing
+    // Root ascend is allowed only when the foster page is the root page.
+    #[test]
+    fn test_foster_relationship_structure_modification_criteria() {
+        {
+            // Should merge, root_ascend
+            // Should not balance
+            {
+                let (temp_dir, bp, this_id, foster_id) =
+                    build_foster_relationship(true, MIN_BYTES_USED - 1, MIN_BYTES_USED);
+                let this = bp.get_page_for_write(this_id).unwrap();
+                let foster = bp.get_page_for_write(foster_id).unwrap();
+                assert!(is_small(&this));
+                assert!(!is_large(&foster));
+                assert!(FosterBtree::should_merge(&this, &foster));
+                assert!(FosterBtree::should_root_ascend(&this, &foster));
+                assert!(!FosterBtree::should_load_balance(&this, &foster));
+            }
+            {
+                let (temp_dir, bp, this_id, foster_id) =
+                    build_foster_relationship(true, MIN_BYTES_USED, MIN_BYTES_USED - 1);
+                let this = bp.get_page_for_write(this_id).unwrap();
+                let foster = bp.get_page_for_write(foster_id).unwrap();
+                assert!(!is_large(&this));
+                assert!(is_small(&foster));
+                assert!(FosterBtree::should_merge(&this, &foster));
+                assert!(FosterBtree::should_root_ascend(&this, &foster));
+                assert!(!FosterBtree::should_load_balance(&this, &foster));
+            }
+            {
+                let (temp_dir, bp, this_id, foster_id) =
+                    build_foster_relationship(true, MIN_BYTES_USED - 1, MIN_BYTES_USED - 1);
+                let this = bp.get_page_for_write(this_id).unwrap();
+                let foster = bp.get_page_for_write(foster_id).unwrap();
+                assert!(is_small(&this));
+                assert!(is_small(&foster));
+                assert!(FosterBtree::should_merge(&this, &foster));
+                assert!(FosterBtree::should_root_ascend(&this, &foster));
+                assert!(!FosterBtree::should_load_balance(&this, &foster));
+            }
+        }
+        {
+            // Should load balance
+            // Should not merge, root_ascend
+            {
+                let (temp_dir, bp, this_id, foster_id) =
+                    build_foster_relationship(false, MIN_BYTES_USED - 1, MAX_BYTES_USED);
+                let this = bp.get_page_for_write(this_id).unwrap();
+                let foster = bp.get_page_for_write(foster_id).unwrap();
+                assert!(is_small(&this));
+                assert!(is_large(&foster));
+                assert!(!FosterBtree::should_merge(&this, &foster));
+                assert!(!FosterBtree::should_root_ascend(&this, &foster));
+                assert!(FosterBtree::should_load_balance(&this, &foster));
+            }
+            {
+                let (temp_dir, bp, this_id, foster_id) =
+                    build_foster_relationship(false, MAX_BYTES_USED, MIN_BYTES_USED - 1);
+                let this = bp.get_page_for_write(this_id).unwrap();
+                let foster = bp.get_page_for_write(foster_id).unwrap();
+                assert!(is_large(&this));
+                assert!(is_small(&foster));
+                assert!(!FosterBtree::should_merge(&this, &foster));
+                assert!(!FosterBtree::should_root_ascend(&this, &foster));
+                assert!(FosterBtree::should_load_balance(&this, &foster));
+            }
+        }
+        {
+            // Should not merge, balance, root_ascend
+            {
+                let (temp_dir, bp, this_id, foster_id) =
+                    build_foster_relationship(false, MAX_BYTES_USED, MAX_BYTES_USED);
+                let this = bp.get_page_for_write(this_id).unwrap();
+                let foster = bp.get_page_for_write(foster_id).unwrap();
+                assert!(is_large(&this));
+                assert!(is_large(&foster));
+                assert!(!FosterBtree::should_merge(&this, &foster));
+                assert!(!FosterBtree::should_root_ascend(&this, &foster));
+                assert!(!FosterBtree::should_load_balance(&this, &foster));
+            }
+            {
+                let (temp_dir, bp, this_id, foster_id) =
+                    build_foster_relationship(false, MIN_BYTES_USED, MIN_BYTES_USED);
+                let this = bp.get_page_for_write(this_id).unwrap();
+                let foster = bp.get_page_for_write(foster_id).unwrap();
+                assert!(!is_small(&this));
+                assert!(!is_small(&foster));
+                assert!(!FosterBtree::should_merge(&this, &foster));
+                assert!(!FosterBtree::should_root_ascend(&this, &foster));
+                assert!(!FosterBtree::should_load_balance(&this, &foster));
+            }
+        }
+    }
+
+    fn build_two_children_tree(child0_size: usize) -> (TempDir, BufferPoolRef, PageKey, PageKey) {
+        // Create a parent with two children.
+        let (db_id, c_id) = (0, 0);
+        let c_key = ContainerKey::new(db_id, c_id);
+        let (temp_dir, bp) = get_buffer_pool(db_id);
+        let mut parent = bp.create_new_page_for_write(c_key).unwrap();
+        let mut child0 = bp.create_new_page_for_write(c_key).unwrap();
+        let mut child1 = bp.create_new_page_for_write(c_key).unwrap();
+
+        // Parent [k0, k2)
+        //  +-------------------+
+        //  |                   |
+        //  v                   v
+        // Child0 [k0, k1)     Child1 [k1, k2)
+
+        let k0 = to_bytes(10);
+        let k1 = to_bytes(20);
+        let k2 = to_bytes(30);
+
+        parent.init();
+        parent.set_low_fence(&k0);
+        parent.set_high_fence(&k2);
+        parent.set_level(1);
+        parent.insert(&k0, &child0.get_id().to_be_bytes(), false);
+        parent.insert(&k1, &child1.get_id().to_be_bytes(), false);
+
+        child0.init();
+        child0.set_low_fence(&k0);
+        child0.set_high_fence(&k2);
+        child0.set_level(0);
+        {
+            // Insert a slot into child0 page so that the total size of the page is child0_size
+            let current_size = child0.total_bytes_used();
+            let val_size = child0_size - current_size - child0.bytes_needed(&k0, &[]);
+            let val = vec![2_u8; val_size];
+            child0.insert(&k0, &val, false);
+        }
+
+        child1.init();
+        child1.set_low_fence(&k1);
+        child1.set_high_fence(&k2);
+        child1.set_level(0);
+
+        // Run consistency checks
+        parent.run_consistency_checks(true);
+        child0.run_consistency_checks(true);
+        child1.run_consistency_checks(true);
+
+        let parent_id = PageKey::new(c_key, parent.get_id());
+        let child0_id = PageKey::new(c_key, child0.get_id());
+
+        drop(parent);
+        drop(child0);
+        drop(child1);
+
+        (temp_dir, bp, parent_id, child0_id)
+    }
+
+    fn build_single_child_with_foster_child_tree(
+        child0_size: usize,
+    ) -> (TempDir, BufferPoolRef, PageKey, PageKey) {
+        // Create a parent with a child and a foster child.
+        let (db_id, c_id) = (0, 0);
+        let c_key = ContainerKey::new(db_id, c_id);
+        let (temp_dir, bp) = get_buffer_pool(db_id);
+        let mut parent = bp.create_new_page_for_write(c_key).unwrap();
+        let mut child0 = bp.create_new_page_for_write(c_key).unwrap();
+        let mut child1 = bp.create_new_page_for_write(c_key).unwrap();
+
+        // Parent [k0, k2)
+        //  |
+        //  v
+        // Child0 [k0, k2) --> Child1 [k1, k2)
+
+        let k0 = to_bytes(10);
+        let k1 = to_bytes(20);
+        let k2 = to_bytes(30);
+
+        parent.init();
+        parent.set_low_fence(&k0);
+        parent.set_high_fence(&k2);
+        parent.set_level(1);
+        parent.insert(&k0, &child0.get_id().to_be_bytes(), false);
+
+        child0.init();
+        child0.set_low_fence(&k0);
+        child0.set_high_fence(&k2);
+        child0.set_level(0);
+        child0.set_has_foster_child(true);
+        child0.insert(&k1, &child1.get_id().to_be_bytes(), false);
+        {
+            // Insert a slot into child0 page so that the total size of the page is child0_size
+            let current_size = child0.total_bytes_used();
+            let val_size = child0_size - current_size - child0.bytes_needed(&k0, &[]);
+            let val = vec![2_u8; val_size];
+            child0.insert(&k0, &val, false);
+        }
+
+        child1.init();
+        child1.set_low_fence(&k1);
+        child1.set_high_fence(&k2);
+        child1.set_level(0);
+
+        // Run consistency checks
+        parent.run_consistency_checks(true);
+        child0.run_consistency_checks(true);
+        child1.run_consistency_checks(true);
+
+        let parent_id = PageKey::new(c_key, parent.get_id());
+        let child0_id = PageKey::new(c_key, child0.get_id());
+
+        drop(parent);
+        drop(child0);
+        drop(child1);
+
+        (temp_dir, bp, parent_id, child0_id)
+    }
+
+    fn build_single_child_tree(child0_size: usize) -> (TempDir, BufferPoolRef, PageKey, PageKey) {
+        // Create a parent with a child.
+        let (db_id, c_id) = (0, 0);
+        let c_key = ContainerKey::new(db_id, c_id);
+        let (temp_dir, bp) = get_buffer_pool(db_id);
+        let mut parent = bp.create_new_page_for_write(c_key).unwrap();
+        let mut child0 = bp.create_new_page_for_write(c_key).unwrap();
+
+        // Parent [k0, k2)
+        //  |
+        //  v
+        // Child0 [k0, k2)
+
+        let k0 = to_bytes(10);
+        // let k1 = to_bytes(20);
+        let k2 = to_bytes(30);
+
+        parent.init_as_root();
+        parent.set_low_fence(&k0);
+        parent.set_high_fence(&k2);
+        parent.set_level(1);
+        parent.insert(&k0, &child0.get_id().to_be_bytes(), false);
+
+        child0.init();
+        child0.set_low_fence(&k0);
+        child0.set_high_fence(&k2);
+        child0.set_left_most(true);
+        child0.set_right_most(true);
+        child0.set_level(0);
+        {
+            // Insert a slot into child0 page so that the total size of the page is child0_size
+            let current_size = child0.total_bytes_used();
+            let val_size = child0_size - current_size - child0.bytes_needed(&k0, &[]);
+            let val = vec![2_u8; val_size];
+            child0.insert(&k0, &val, false);
+        }
+
+        // Run consistency checks
+        parent.run_consistency_checks(true);
+        child0.run_consistency_checks(true);
+
+        FosterBtree::print_page(&parent);
+        FosterBtree::print_page(&child0);
+
+        let parent_id = PageKey::new(c_key, parent.get_id());
+        let child0_id = PageKey::new(c_key, child0.get_id());
+
+        drop(parent);
+        drop(child0);
+
+        (temp_dir, bp, parent_id, child0_id)
+    }
+
+    // In a parent-child relationship, ADOPT, ANTI_ADOPT, ROOT_DESCEND is allowed.
+    // [0, MIN_BYTES_USED) is small
+    // [MIN_BYTES_USED, MAX_BYTES_USED) is normal.
+    // [MAX_BYTES_USED, PAGE_SIZE) is large
+    // There are 3 * 3 * 3 = 9 possible size
+    // S: Small, N: Normal, L: Large
+    // SS, NS, LS: AntiAdopt if parent has more than 1 child.
+    // SN, SL, NN, NL: Adopt if child has foster child.
+    // LN, LL: Nothing
+    #[test]
+    fn test_parent_child_relationship_structure_modification_criteria() {
+        init_test_logger();
+
+        {
+            // Parent [k0, k2)
+            //  +-------------------+
+            //  |                   |
+            //  v                   v
+            // Child0 [k0, k1)     Child1 [k1, k2)
+            {
+                // Should anti_adopt
+                // Should not adopt, root descend
+                let (temp_dir, bp, parent_id, child0_id) =
+                    build_two_children_tree(MIN_BYTES_USED - 1);
+                let parent = bp.get_page_for_write(parent_id).unwrap();
+                let child0 = bp.get_page_for_write(child0_id).unwrap();
+                assert!(is_small(&child0));
+                assert!(FosterBtree::should_antiadopt(&parent, &child0));
+                assert!(!FosterBtree::should_adopt(&parent, &child0));
+                assert!(!FosterBtree::should_root_descend(&parent, &child0));
+            }
+            {
+                // Should not adopt, anti_adopt, root_descend
+                let (temp_dir, bp, parent_id, child0_id) = build_two_children_tree(MIN_BYTES_USED);
+                let parent = bp.get_page_for_write(parent_id).unwrap();
+                let child0 = bp.get_page_for_write(child0_id).unwrap();
+                assert!(!is_small(&child0));
+                assert!(!FosterBtree::should_antiadopt(&parent, &child0));
+                assert!(!FosterBtree::should_adopt(&parent, &child0));
+                assert!(!FosterBtree::should_root_descend(&parent, &child0));
+            }
+        }
+        {
+            // Parent [k0, k2)
             //  |
             //  v
-            // inner0 [-inf, +inf) -------------------> inner1 [k0, +inf)
-            //  |                                          |
-            //  v                                          v
-            // leaf0 [-inf, k0) --> leaf1 [k1, k0)        leaf2 [k0, +inf) --> leaf3 [k2, +inf)
-
-            let k0 = to_bytes(20);
-            let k1 = to_bytes(10);
-            let k2 = to_bytes(30);
-
-            root.init_as_root();
-            root.set_level(2);
-            root.insert(&[], &inner0.get_id().to_be_bytes(), false);
-
-            inner0.init();
-            inner0.set_low_fence(&[]);
-            inner0.set_high_fence(&[]);
-            inner0.set_level(1);
-            inner0.set_has_foster_child(true);
-            inner0.insert(&[], &leaf0.get_id().to_be_bytes(), false);
-            inner0.insert(&k0, &inner1.get_id().to_be_bytes(), false);
-
-            inner1.init();
-            inner1.set_low_fence(&k0);
-            inner1.set_high_fence(&[]);
-            inner1.set_level(1);
-            inner1.insert(&k0, &leaf2.get_id().to_be_bytes(), false);
-
-            leaf0.init();
-            leaf0.set_low_fence(&[]);
-            leaf0.set_high_fence(&k0);
-            leaf0.set_level(0);
-            for i in 0..5 {
-                let key = to_bytes(i);
-                leaf0.insert(&key, &key, false);
+            // Child0 [k0, k2) --> Child1 [k1, k2)
+            {
+                // Should adopt
+                // Should not anti_adopt, root_descend
+                let (temp_dir, bp, parent_id, child0_id) =
+                    build_single_child_with_foster_child_tree(MIN_BYTES_USED);
+                let parent = bp.get_page_for_write(parent_id).unwrap();
+                let child0 = bp.get_page_for_write(child0_id).unwrap();
+                assert!(!is_small(&child0));
+                assert!(FosterBtree::should_adopt(&parent, &child0));
+                assert!(!FosterBtree::should_antiadopt(&parent, &child0));
+                assert!(!FosterBtree::should_root_descend(&parent, &child0));
             }
-            leaf0.set_has_foster_child(true);
-            leaf0.insert(&k1, &leaf1.get_id().to_be_bytes(), false);
-
-            leaf1.init();
-            leaf1.set_low_fence(&k1);
-            leaf1.set_high_fence(&k0);
-            leaf1.set_level(0);
-            for i in 10..15 {
-                let key = to_bytes(i);
-                leaf1.insert(&key, &key, false);
-            }
-
-            leaf2.init();
-            leaf2.set_low_fence(&k0);
-            leaf2.set_high_fence(&[]);
-            leaf2.set_level(0);
-            for i in 20..25 {
-                let key = to_bytes(i);
-                leaf2.insert(&key, &key, false);
-            }
-            leaf2.set_has_foster_child(true);
-            leaf2.insert(&k2, &leaf3.get_id().to_be_bytes(), false);
-
-            leaf3.init();
-            leaf3.set_low_fence(&k2);
-            leaf3.set_high_fence(&[]);
-            leaf3.set_level(0);
-            for i in 30..35 {
-                let key = to_bytes(i);
-                leaf3.insert(&key, &key, false);
-            }
-
-            root.key().unwrap()
-        };
-
-        let btree = FosterBtree {
-            c_key,
-            root_key,
-            bp: bp.clone(),
-        };
-        (temp_dir, btree)
-    }
-    #[test]
-    fn test_btree_traverse_to_leaf_for_read_simple() {
-        let (temp_dir, btree) = setup_btree_simple();
-
-        {
-            let key = to_bytes(0);
-            let leaf = btree.traverse_to_leaf_for_read(&key).unwrap();
-            assert_eq!(leaf.active_slot_count(), 10);
-            for i in 1..=leaf.active_slot_count() {
-                let key = leaf.get_raw_key(i);
-                assert_eq!(key, to_bytes(i as usize - 1));
-                let val = leaf.get_val(i);
-                assert_eq!(val, to_bytes(i as usize - 1));
+            {
+                // Should not adopt, anti_adopt, root_descend
+                let (temp_dir, bp, parent_id, child0_id) =
+                    build_single_child_with_foster_child_tree(MIN_BYTES_USED - 1);
+                let parent = bp.get_page_for_write(parent_id).unwrap();
+                let child0 = bp.get_page_for_write(child0_id).unwrap();
+                assert!(is_small(&child0));
+                assert!(!FosterBtree::should_adopt(&parent, &child0));
+                assert!(!FosterBtree::should_antiadopt(&parent, &child0));
+                assert!(!FosterBtree::should_root_descend(&parent, &child0));
             }
         }
         {
-            let key = to_bytes(10);
-            let leaf = btree.traverse_to_leaf_for_read(&key).unwrap();
-            assert_eq!(leaf.active_slot_count(), 10);
-            for i in 1..=leaf.active_slot_count() {
-                let key = leaf.get_raw_key(i);
-                assert_eq!(key, to_bytes(i as usize + 10 - 1));
-                let val = leaf.get_val(i);
-                assert_eq!(val, to_bytes(i as usize + 10 - 1));
+            // Parent [k0, k2)
+            //  |
+            //  v
+            // Child0 [k0, k2)
+            {
+                // Should not adopt, anti_adopt, root_descend
+                let (temp_dir, bp, parent_id, child0_id) =
+                    build_single_child_tree(MIN_BYTES_USED - 1);
+                let parent = bp.get_page_for_write(parent_id).unwrap();
+                let child0 = bp.get_page_for_write(child0_id).unwrap();
+                assert!(!FosterBtree::should_adopt(&parent, &child0));
+                assert!(!FosterBtree::should_antiadopt(&parent, &child0));
+                assert!(FosterBtree::should_root_descend(&parent, &child0));
             }
         }
-        {
-            let key = to_bytes(20);
-            let leaf = btree.traverse_to_leaf_for_read(&key).unwrap();
-            assert_eq!(leaf.active_slot_count(), 10);
-            for i in 1..=leaf.active_slot_count() {
-                let key = leaf.get_raw_key(i);
-                assert_eq!(key, to_bytes(i as usize + 20 - 1));
-                let val = leaf.get_val(i);
-                assert_eq!(val, to_bytes(i as usize + 20 - 1));
-            }
-        }
-        {
-            let key = to_bytes(30);
-            let leaf = btree.traverse_to_leaf_for_read(&key).unwrap();
-            assert_eq!(leaf.active_slot_count(), 10);
-            for i in 1..=leaf.active_slot_count() {
-                let key = leaf.get_raw_key(i);
-                assert_eq!(key, to_bytes(i as usize + 30 - 1));
-                let val = leaf.get_val(i);
-                assert_eq!(val, to_bytes(i as usize + 30 - 1));
-            }
-        }
-
-        drop(temp_dir);
-    }
-
-    #[test]
-    fn test_btree_traverse_to_leaf_for_read_with_foster_child() {
-        let (temp_dir, btree) = setup_btree_with_foster_child();
-
-        {
-            let key = to_bytes(0);
-            let leaf = btree.traverse_to_leaf_for_read(&key).unwrap();
-            assert_eq!(leaf.active_slot_count(), 6);
-            assert!(leaf.has_foster_child());
-            for i in 1..=leaf.active_slot_count() - 1 {
-                let key = leaf.get_raw_key(i);
-                assert_eq!(key, to_bytes(i as usize - 1));
-                let val = leaf.get_val(i);
-                assert_eq!(val, to_bytes(i as usize - 1));
-            }
-        }
-        {
-            let key = to_bytes(10);
-            let leaf = btree.traverse_to_leaf_for_read(&key).unwrap();
-            assert_eq!(leaf.active_slot_count(), 5);
-            for i in 1..=leaf.active_slot_count() {
-                let key = leaf.get_raw_key(i);
-                assert_eq!(key, to_bytes(i as usize + 10 - 1));
-                let val = leaf.get_val(i);
-                assert_eq!(val, to_bytes(i as usize + 10 - 1));
-            }
-        }
-        {
-            let key = to_bytes(20);
-            let leaf = btree.traverse_to_leaf_for_read(&key).unwrap();
-            assert_eq!(leaf.active_slot_count(), 6);
-            for i in 1..=leaf.active_slot_count() - 1 {
-                let key = leaf.get_raw_key(i);
-                assert_eq!(key, to_bytes(i as usize + 20 - 1));
-                let val = leaf.get_val(i);
-                assert_eq!(val, to_bytes(i as usize + 20 - 1));
-            }
-        }
-        {
-            let key = to_bytes(30);
-            let leaf = btree.traverse_to_leaf_for_read(&key).unwrap();
-            assert_eq!(leaf.active_slot_count(), 5);
-            for i in 1..=leaf.active_slot_count() {
-                let key = leaf.get_raw_key(i);
-                assert_eq!(key, to_bytes(i as usize + 30 - 1));
-                let val = leaf.get_val(i);
-                assert_eq!(val, to_bytes(i as usize + 30 - 1));
-            }
-        }
-
-        drop(temp_dir);
     }
 
     fn setup_btree_empty() -> (TempDir, FosterBtree) {
@@ -1894,19 +2341,33 @@ mod tests {
 
     #[test]
     fn test_sorted_insertion() {
+        init_test_logger();
         let (temp_dir, btree) = setup_btree_empty();
         // Insert 1024 bytes
         let val = vec![2_u8; 1024];
         for i in 0..10 {
-            println!("Inserting key {}", i);
+            println!(
+                "**************************** Inserting key {} **************************",
+                i
+            );
             let key = to_bytes(i);
             btree.insert(&key, &val).unwrap();
+        }
+        for i in 0..10 {
+            println!(
+                "**************************** Getting key {} **************************",
+                i
+            );
+            let key = to_bytes(i);
+            let current_val = btree.get_key(&key).unwrap();
+            assert_eq!(current_val, val);
         }
         drop(temp_dir);
     }
 
     #[test]
     fn test_random_insertion() {
+        init_test_logger();
         let (temp_dir, btree) = setup_btree_empty();
         // Insert 1024 bytes
         let val = vec![3_u8; 1024];
@@ -1919,14 +2380,17 @@ mod tests {
             let key = to_bytes(*i);
             btree.insert(&key, &val).unwrap();
         }
+        let string = btree.generate_dot();
+        println!("{}", string);
+        // for i in order.iter() {
+        //     println!(
+        //         "**************************** Getting key {} **************************",
+        //         i
+        //     );
+        //     let key = to_bytes(*i);
+        //     let current_val = btree.get_key(&key).unwrap();
+        //     assert_eq!(current_val, val);
+        // }
         drop(temp_dir);
-    }
-
-    #[test]
-    fn test_modify_structure_if_needed_for_read() {
-        init_test_logger();
-        let (temp_dir, btree) = setup_btree_with_foster_child();
-        let key = to_bytes(0);
-        let leaf = btree.traverse_to_leaf_for_read(&key).unwrap();
     }
 }
