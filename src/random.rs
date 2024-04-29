@@ -51,3 +51,12 @@ pub fn gen_random_byte_vec(min: usize, max: usize) -> Vec<u8> {
     let length = gen_random_int(min, max);
     gen_random_byte_vec_with_length(length)
 }
+
+pub fn gen_random_permutation<T>(mut vec: Vec<T>) -> Vec<T> {
+    let len = vec.len();
+    for i in 0..len {
+        let j = gen_random_int(i, len - 1);
+        vec.swap(i, j);
+    }
+    vec
+}
