@@ -23,6 +23,7 @@ wasm-pack build --target web
 python3 -m http.server
 ```
 Then open `http://localhost:8000` in your browser.
+May need to comment out `criterion` in `Cargo.toml` to build for wasm.
 
 
 ## Multi-thread logger
