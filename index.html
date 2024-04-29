@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Foster B-tree Visualizer</title>
+    <link rel="icon" href="data:,">
+    <script src="//d3js.org/d3.v5.min.js"></script>
+    <script src="https://unpkg.com/@hpcc-js/wasm@0.3.11/dist/index.min.js"></script>
+    <script src="https://unpkg.com/d3-graphviz@3.0.5/build/d3-graphviz.js"></script>
+    <script type="module" src="script.js"></script>
+    <style>
+        /* Add CSS to increase button size */
+        #insertButton,
+        #searchButton,
+        #clearLogsButton {
+            font-size: 16px; /* Adjust font size */
+            padding: 10px 20px; /* Adjust padding */
+        }
+        /* Add CSS to increase placeholder size */
+        input[type="number"] {
+            width: 200px; /* Adjust width */
+            height: 30px; /* Adjust height */
+            font-size: 16px; /* Adjust font size */
+        }
+    </style>
+</head>
+<body>
+    <h1>Foster B-tree Visualizer</h1>
+    <div>
+        <input type="number" id="insertKey" placeholder="Key to insert">
+        <input type="number" id="payloadSize" placeholder="Payload Size">
+        <button id="insertButton">Insert</button>
+    </div>
+    <div>
+        <input type="number" id="searchKey" placeholder="Key to search">
+        <button id="searchButton">Search</button>
+    </div>
+    <div>
+        <button id="clearLogsButton">Clear Old Logs</button>
+    </div>
+    <div id="contentContainer" style="margin-top: 20px; border: 1px solid #ccc; padding: 10px;">
+        <h2>Activity Log</h2>
+    </div>
+</body>
+</html>

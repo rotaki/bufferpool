@@ -1,4 +1,4 @@
-use super::buffer_pool::PageKey;
+use super::mem_pool_trait::PageKey;
 use crate::page::Page;
 use crate::rwlatch::RwLatch;
 use std::{
@@ -13,6 +13,8 @@ pub struct BufferFrame {
     pub is_dirty: AtomicBool,
     pub key: UnsafeCell<Option<PageKey>>,
     pub page: UnsafeCell<Page>,
+    // phantom pinned to prevent moving out of the buffer frame
+    _phantom: std::marker::PhantomPinned,
 }
 
 impl Default for BufferFrame {
@@ -22,6 +24,7 @@ impl Default for BufferFrame {
             is_dirty: AtomicBool::new(false),
             key: UnsafeCell::new(None),
             page: UnsafeCell::new(Page::new_empty()),
+            _phantom: std::marker::PhantomPinned,
         }
     }
 }

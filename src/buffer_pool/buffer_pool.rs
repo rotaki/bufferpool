@@ -2,6 +2,7 @@ use log::debug;
 
 use super::{
     buffer_frame::{BufferFrame, FrameReadGuard, FrameWriteGuard},
+    mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, PageKey},
     EvictionPolicy,
 };
 
@@ -18,74 +19,10 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-pub type DatabaseId = u16;
-pub type ContainerId = u16;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ContainerKey {
-    pub db_id: DatabaseId,
-    pub c_id: ContainerId,
-}
-
-impl ContainerKey {
-    pub fn new(db_id: DatabaseId, c_id: ContainerId) -> Self {
-        ContainerKey { db_id, c_id }
-    }
-}
-
-impl std::fmt::Display for ContainerKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "(db:{}, c:{})", self.db_id, self.c_id)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PageKey {
-    pub c_key: ContainerKey,
-    pub page_id: PageId,
-}
-
-impl PageKey {
-    pub fn new(c_key: ContainerKey, page_id: PageId) -> Self {
-        PageKey { c_key, page_id }
-    }
-}
-
-impl std::fmt::Display for PageKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "({}, p:{})", self.c_key, self.page_id)
-    }
-}
-
-#[derive(Debug)]
-pub enum BPStatus {
-    FileManagerNotFound,
-    FileManagerError(FMStatus),
-    PageNotFound,
-    FrameLatchGrantFailed,
-}
-
-impl From<FMStatus> for BPStatus {
-    fn from(s: FMStatus) -> Self {
-        BPStatus::FileManagerError(s)
-    }
-}
-
-impl std::fmt::Display for BPStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            BPStatus::FileManagerNotFound => write!(f, "[BP] File manager not found"),
-            BPStatus::FileManagerError(s) => s.fmt(f),
-            BPStatus::PageNotFound => write!(f, "[BP] Page not found"),
-            BPStatus::FrameLatchGrantFailed => write!(f, "[BP] Frame latch grant failed"),
-        }
-    }
-}
-
 pub struct BufferPool<T: EvictionPolicy> {
     path: PathBuf,
     latch: AtomicBool,
-    frames: UnsafeCell<Vec<BufferFrame>>,
+    frames: UnsafeCell<Vec<BufferFrame>>, // frames is fixed size. If not fixed size, then Pin must be used to ensure that the frame does not move when the vector is resized.
     id_to_index: UnsafeCell<HashMap<PageKey, usize>>, // (c_id, page_id) -> index
     container_to_file: UnsafeCell<HashMap<ContainerKey, FileManager>>,
     eviction_policy: UnsafeCell<T>,
@@ -99,7 +36,7 @@ where
         path: P,
         num_frames: usize,
         eviction_policy: T,
-    ) -> Result<Self, BPStatus> {
+    ) -> Result<Self, MemPoolStatus> {
         init_logger();
         debug!("Buffer pool created: num_frames: {}", num_frames);
 
@@ -147,7 +84,11 @@ where
     }
 
     // Invariant: The latch must be held when calling this function
-    fn handle_page_fault(&self, key: PageKey, new_page: bool) -> Result<FrameWriteGuard, BPStatus> {
+    fn handle_page_fault(
+        &self,
+        key: PageKey,
+        new_page: bool,
+    ) -> Result<FrameWriteGuard, MemPoolStatus> {
         let pages = unsafe { &mut *self.frames.get() };
         let id_to_index = unsafe { &mut *self.id_to_index.get() };
         let container_to_file = unsafe { &mut *self.container_to_file.get() };
@@ -156,14 +97,14 @@ where
         let index = eviction_policy.choose_victim();
         let mut guard = pages[index]
             .try_write(false)
-            .ok_or(BPStatus::FrameLatchGrantFailed)?;
+            .ok_or(MemPoolStatus::FrameLatchGrantFailed)?;
 
         // Evict old page if necessary
         if let Some(old_key) = guard.key() {
             if guard.dirty().swap(false, Ordering::Acquire) {
                 let file = container_to_file
                     .get(&old_key.c_key)
-                    .ok_or(BPStatus::FileManagerNotFound)?;
+                    .ok_or(MemPoolStatus::FileManagerNotFound)?;
                 file.write_page(old_key.page_id, &*guard)?;
             }
             id_to_index.remove(&old_key);
@@ -176,7 +117,7 @@ where
         } else {
             let file = container_to_file
                 .get(&key.c_key)
-                .ok_or(BPStatus::FileManagerNotFound)?;
+                .ok_or(MemPoolStatus::FileManagerNotFound)?;
             file.read_page(key.page_id)?
         };
 
@@ -196,7 +137,7 @@ where
     pub fn create_new_page_for_write(
         &self,
         c_key: ContainerKey,
-    ) -> Result<FrameWriteGuard, BPStatus> {
+    ) -> Result<FrameWriteGuard, MemPoolStatus> {
         self.latch();
 
         let fm = (unsafe { &mut *self.container_to_file.get() })
@@ -222,7 +163,7 @@ where
         res
     }
 
-    pub fn get_page_for_write(&self, key: PageKey) -> Result<FrameWriteGuard, BPStatus> {
+    pub fn get_page_for_write(&self, key: PageKey) -> Result<FrameWriteGuard, MemPoolStatus> {
         self.latch();
 
         let result = match unsafe { &mut *self.id_to_index.get() }.get(&key) {
@@ -231,7 +172,7 @@ where
                 if guard.is_some() {
                     unsafe { &mut *self.eviction_policy.get() }.update(index);
                 }
-                guard.ok_or(BPStatus::FrameLatchGrantFailed)
+                guard.ok_or(MemPoolStatus::FrameLatchGrantFailed)
             }
             None => {
                 let res = self.handle_page_fault(key, false);
@@ -249,14 +190,14 @@ where
     pub fn get_last_page_for_write(
         &self,
         c_key: ContainerKey,
-    ) -> Result<FrameWriteGuard, BPStatus> {
+    ) -> Result<FrameWriteGuard, MemPoolStatus> {
         self.latch();
 
         let fm = if let Some(fm) = (unsafe { &mut *self.container_to_file.get() }).get(&c_key) {
             fm
         } else {
             self.unlatch();
-            return Err(BPStatus::FileManagerNotFound);
+            return Err(MemPoolStatus::FileManagerNotFound);
         };
 
         let num_pages = fm.get_num_pages();
@@ -271,7 +212,7 @@ where
                 if guard.is_some() {
                     unsafe { &mut *self.eviction_policy.get() }.update(index);
                 }
-                guard.ok_or(BPStatus::FrameLatchGrantFailed)
+                guard.ok_or(MemPoolStatus::FrameLatchGrantFailed)
             }
             None => {
                 let res = self.handle_page_fault(key, false);
@@ -286,7 +227,7 @@ where
         result
     }
 
-    pub fn get_page_for_read(&self, key: PageKey) -> Result<FrameReadGuard, BPStatus> {
+    pub fn get_page_for_read(&self, key: PageKey) -> Result<FrameReadGuard, MemPoolStatus> {
         self.latch();
 
         let result = match unsafe { &mut *self.id_to_index.get() }.get(&key) {
@@ -295,7 +236,7 @@ where
                 if guard.is_some() {
                     unsafe { &mut *self.eviction_policy.get() }.update(index);
                 }
-                guard.ok_or(BPStatus::FrameLatchGrantFailed)
+                guard.ok_or(MemPoolStatus::FrameLatchGrantFailed)
             }
             None => self
                 .handle_page_fault(key, false)
@@ -305,7 +246,7 @@ where
         result
     }
 
-    pub fn flush_all(&self) -> Result<(), BPStatus> {
+    pub fn flush_all(&self) -> Result<(), MemPoolStatus> {
         self.latch();
 
         for frame in unsafe { &*self.frames.get() }.iter() {
@@ -324,7 +265,7 @@ where
                     file.write_page(key.page_id, &*frame)?;
                 } else {
                     self.unlatch();
-                    return Err(BPStatus::FileManagerNotFound);
+                    return Err(MemPoolStatus::FileManagerNotFound);
                 }
             }
         }
@@ -361,6 +302,30 @@ where
         }
 
         self.unlatch();
+    }
+}
+
+impl<T> MemPool for BufferPool<T>
+where
+    T: EvictionPolicy,
+{
+    fn create_new_page_for_write(
+        &self,
+        c_key: ContainerKey,
+    ) -> Result<FrameWriteGuard, MemPoolStatus> {
+        BufferPool::create_new_page_for_write(self, c_key)
+    }
+
+    fn get_page_for_write(&self, key: PageKey) -> Result<FrameWriteGuard, MemPoolStatus> {
+        BufferPool::get_page_for_write(self, key)
+    }
+
+    fn get_page_for_read(&self, key: PageKey) -> Result<FrameReadGuard, MemPoolStatus> {
+        BufferPool::get_page_for_read(self, key)
+    }
+
+    fn reset(&self) {
+        BufferPool::reset(self);
     }
 }
 

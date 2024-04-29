@@ -1,5 +1,7 @@
 mod buffer_frame;
 mod buffer_pool;
+mod in_mem_pool;
+mod mem_pool_trait;
 
 mod eviction_policy;
 use eviction_policy::eviction_policy::EvictionPolicy;
@@ -11,8 +13,12 @@ pub type CacheEvictionPolicy = LFUEvictionPolicy;
 pub type BufferPool = TempBP<CacheEvictionPolicy>;
 pub type BufferPoolRef = std::sync::Arc<BufferPool>;
 
+pub use in_mem_pool::InMemPool;
+pub type InMemPoolRef = std::sync::Arc<InMemPool>;
+
 pub mod prelude {
     pub use super::buffer_frame::{BufferFrame, FrameReadGuard, FrameWriteGuard};
-    pub use super::buffer_pool::{BPStatus, ContainerKey, PageKey};
+    pub use super::mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, PageKey};
     pub use super::{BufferPool, BufferPoolRef, CacheEvictionPolicy};
+    pub use super::{InMemPool, InMemPoolRef};
 }
