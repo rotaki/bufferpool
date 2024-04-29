@@ -1,5 +1,5 @@
 use super::page::{Page, PageId, PAGE_SIZE};
-use log::trace;
+use crate::{log, log_trace};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -59,7 +59,7 @@ impl FileManager {
     pub fn read_page(&self, page_id: PageId) -> Result<Page, FMStatus> {
         let mut page = Page::new_empty();
         let mut file = self.file.lock().unwrap();
-        trace!("Reading page: {} from file: {:?}", page_id, self.path);
+        log_trace!("Reading page: {} from file: {:?}", page_id, self.path);
         file.seek(SeekFrom::Start((page_id * PAGE_SIZE as PageId) as u64))
             .map_err(|_| FMStatus::SeekError)?;
         file.read_exact(page.get_raw_bytes_mut())
@@ -70,7 +70,7 @@ impl FileManager {
 
     pub fn write_page(&self, page_id: PageId, page: &Page) -> Result<(), FMStatus> {
         let mut file = self.file.lock().unwrap();
-        trace!("Writing page: {} to file: {:?}", page_id, self.path);
+        log_trace!("Writing page: {} to file: {:?}", page_id, self.path);
         file.seek(SeekFrom::Start((page_id * PAGE_SIZE as PageId) as u64))
             .map_err(|_| FMStatus::SeekError)?;
         file.write_all(page.get_raw_bytes())
@@ -80,7 +80,7 @@ impl FileManager {
 
     pub fn flush(&mut self) -> Result<(), FMStatus> {
         let mut file = self.file.lock().unwrap();
-        trace!("Flushing file: {:?}", self.path);
+        log_trace!("Flushing file: {:?}", self.path);
         file.flush().map_err(|_| FMStatus::FlushError)
     }
 }

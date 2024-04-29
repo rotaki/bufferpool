@@ -152,13 +152,11 @@ impl LogChecker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{random::gen_random_byte_vec, utils::init_test_logger};
+    use crate::random::gen_random_byte_vec;
     use tempfile::tempdir;
 
     #[test]
     fn test_append_log_and_flush() {
-        init_test_logger();
-
         let dir = tempdir().unwrap();
         let path = dir.path().join("test_log.db");
         let log_buffer = LogBuffer::new(&path, 2);

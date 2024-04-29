@@ -46,7 +46,8 @@ pub enum MemPoolStatus {
     FileManagerNotFound,
     FileManagerError(FMStatus),
     PageNotFound,
-    FrameLatchGrantFailed,
+    FrameReadLatchGrantFailed,
+    FrameWriteLatchGrantFailed,
 }
 
 impl From<FMStatus> for MemPoolStatus {
@@ -58,10 +59,15 @@ impl From<FMStatus> for MemPoolStatus {
 impl std::fmt::Display for MemPoolStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            MemPoolStatus::FileManagerNotFound => write!(f, "[BP] File manager not found"),
+            MemPoolStatus::FileManagerNotFound => write!(f, "[MP] File manager not found"),
             MemPoolStatus::FileManagerError(s) => s.fmt(f),
-            MemPoolStatus::PageNotFound => write!(f, "[BP] Page not found"),
-            MemPoolStatus::FrameLatchGrantFailed => write!(f, "[BP] Frame latch grant failed"),
+            MemPoolStatus::PageNotFound => write!(f, "[MP] Page not found"),
+            MemPoolStatus::FrameReadLatchGrantFailed => {
+                write!(f, "[MP] Frame read latch grant failed")
+            }
+            MemPoolStatus::FrameWriteLatchGrantFailed => {
+                write!(f, "[MP] Frame write latch grant failed")
+            }
         }
     }
 }

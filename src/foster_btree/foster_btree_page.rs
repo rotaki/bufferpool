@@ -105,7 +105,7 @@ mod slot {
     }
 }
 
-use log::trace;
+use crate::{log, log_trace};
 pub const PAGE_HEADER_SIZE: usize = 6;
 use slot::{Slot, SLOT_SIZE};
 
@@ -494,7 +494,7 @@ impl FosterBtreePage for Page {
     fn shift_records(&mut self, shift_start_offset: u16, shift_size: u16) {
         // Chunks of records to be shifted is in the range of [start..end)
         // The new range is [new_start..new_end)
-        trace!(
+        log_trace!(
             "Shifting records. Start offset: {}, size: {}",
             shift_start_offset,
             shift_size

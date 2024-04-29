@@ -1,15 +1,17 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    sync::Arc,
+    sync::{atomic::Ordering, Arc},
+    thread,
+    time::Duration,
 };
 
-use log::{debug, trace};
 use tempfile::TempDir;
 use wasm_bindgen::prelude::*;
 
 use crate::{
     buffer_pool::prelude::*,
     foster_btree::foster_btree_page::PAGE_HEADER_SIZE,
+    log, log_trace,
     page::{Page, PageId, BASE_PAGE_HEADER_SIZE, PAGE_SIZE},
     write_ahead_log::{prelude::LogRecord, LogBufferRef},
 };
@@ -886,7 +888,7 @@ impl<T: MemPool> FosterBtree<T> {
         let mut result = "digraph G {\n".to_string();
         // rectangle nodes
         result.push_str("\tnode [shape=rectangle];\n");
-        let current_page = self.mem_pool.get_page_for_read(self.root_key).unwrap();
+        let current_page = self.read_page(self.root_key);
         let mut levels = HashMap::new();
         let mut stack = VecDeque::new();
         stack.push_back(current_page);
@@ -935,7 +937,18 @@ impl<T: MemPool> FosterBtree<T> {
 
     /// System transaction that allocates a new page.
     fn allocate_page(&self) -> FrameWriteGuard {
-        let mut foster_page = self.mem_pool.create_new_page_for_write(self.c_key).unwrap();
+        let mut foster_page = loop {
+            let page = self.mem_pool.create_new_page_for_write(self.c_key);
+            match page {
+                Ok(page) => break page,
+                Err(MemPoolStatus::FrameWriteLatchGrantFailed) => {
+                    std::hint::spin_loop();
+                }
+                _ => {
+                    panic!("Unexpected error");
+                }
+            }
+        };
         foster_page.init();
         // Write log
         // {
@@ -947,6 +960,22 @@ impl<T: MemPool> FosterBtree<T> {
         //     foster_page.set_lsn(lsn);
         // }
         foster_page
+    }
+
+    fn read_page(&self, page_key: PageKey) -> FrameReadGuard {
+        let page = loop {
+            let page = self.mem_pool.get_page_for_read(page_key);
+            match page {
+                Ok(page) => break page,
+                Err(MemPoolStatus::FrameReadLatchGrantFailed) => {
+                    std::hint::spin_loop();
+                }
+                _ => {
+                    panic!("Unexpected error");
+                }
+            }
+        };
+        page
     }
 
     fn insert_inner(&self, this: &mut Page, key: &[u8], value: &[u8]) {
@@ -964,6 +993,12 @@ impl<T: MemPool> FosterBtree<T> {
         op_byte: &mut OpByte,
     ) -> (Option<OpType>, FrameReadGuard<'a>, FrameReadGuard<'a>) {
         if let Some(op) = should_modify_structure(&this, &child, op_byte) {
+            log_trace!(
+                "Should modify structure: {:?}, This: {}, Child: {}",
+                op,
+                this.get_id(),
+                child.get_id()
+            );
             let this = this.try_upgrade(false);
             let child = child.try_upgrade(false);
             let (mut this, mut child) = {
@@ -980,6 +1015,15 @@ impl<T: MemPool> FosterBtree<T> {
                     }
                 }
             };
+            log_trace!(
+                "Ready to modify structure: {:?}, This: {}, Child: {}",
+                op,
+                this.get_id(),
+                child.get_id()
+            );
+            // make both pages dirty
+            this.dirty().store(true, Ordering::Relaxed);
+            child.dirty().store(true, Ordering::Relaxed);
             self.modify_structure(op.clone(), &mut this, &mut child);
             (Some(op), this.downgrade(), child.downgrade())
         } else {
@@ -1020,7 +1064,7 @@ impl<T: MemPool> FosterBtree<T> {
                 anti_adopt(this, child);
             }
             OpType::ASCENDROOT => {
-                let mut new_page = self.mem_pool.create_new_page_for_write(self.c_key).unwrap();
+                let mut new_page = self.allocate_page();
                 new_page.init();
                 // Ascend the root page to the parent page
                 ascend_root(this, &mut new_page);
@@ -1033,15 +1077,16 @@ impl<T: MemPool> FosterBtree<T> {
     }
 
     fn traverse_to_leaf_for_read(&self, key: &[u8]) -> Result<FrameReadGuard, TreeStatus> {
-        let mut current_page = self.mem_pool.get_page_for_read(self.root_key)?;
+        let mut current_page = self.read_page(self.root_key);
         let mut op_byte = OpByte::new();
         loop {
             let this_page = current_page;
+            log_trace!("Traversal for read, page: {}", this_page.get_id());
             if this_page.is_leaf() {
                 if this_page.has_foster_child() && this_page.get_foster_key() <= key {
                     // Check whether the foster child should be traversed.
                     let foster_page_key = PageKey::new(self.c_key, this_page.get_foster_page_id());
-                    let foster_page = self.mem_pool.get_page_for_read(foster_page_key)?;
+                    let foster_page = self.read_page(foster_page_key);
                     // Now we have two locks. We need to release the lock of the current page.
                     let (op, this_page, foster_page) = self.modify_structure_if_needed_for_read(
                         this_page,
@@ -1074,7 +1119,7 @@ impl<T: MemPool> FosterBtree<T> {
                 PageKey::new(self.c_key, page_id)
             };
 
-            let next_page = self.mem_pool.get_page_for_read(page_key)?;
+            let next_page = self.read_page(page_key);
             // Now we have two locks. We need to release the lock of the current page.
             let (op, this_page, next_page) =
                 self.modify_structure_if_needed_for_read(this_page, next_page, &mut op_byte);
@@ -1097,15 +1142,16 @@ impl<T: MemPool> FosterBtree<T> {
     }
 
     fn traverse_to_leaf_for_write(&self, key: &[u8]) -> Result<FrameWriteGuard, TreeStatus> {
-        let mut current_page = self.mem_pool.get_page_for_read(self.root_key)?;
+        let mut current_page = self.read_page(self.root_key);
         let mut op_byte = OpByte::new();
         loop {
             let this_page = current_page;
+            log_trace!("Traversal for write, page: {}", this_page.get_id());
             if this_page.is_leaf() {
                 if this_page.has_foster_child() && this_page.get_foster_key() <= key {
                     // Check whether the foster child should be traversed.
                     let foster_page_key = PageKey::new(self.c_key, this_page.get_foster_page_id());
-                    let foster_page = self.mem_pool.get_page_for_read(foster_page_key)?;
+                    let foster_page = self.read_page(foster_page_key);
                     // Now we have two locks. We need to release the lock of the current page.
                     let (op, this_page, foster_page) = self.modify_structure_if_needed_for_read(
                         this_page,
@@ -1128,20 +1174,16 @@ impl<T: MemPool> FosterBtree<T> {
                         }
                     }
                 } else {
-                    // Spin loop for upgrade lock
-                    let mut dest_page = this_page;
-                    for _ in 0..100 {
-                        match dest_page.try_upgrade(false) {
-                            Ok(upgraded) => {
-                                return Ok(upgraded);
-                            }
-                            Err(this_page) => {
-                                dest_page = this_page;
-                                std::hint::spin_loop();
-                            }
+                    match this_page.try_upgrade(true) {
+                        Ok(upgraded) => {
+                            return Ok(upgraded);
+                        }
+                        Err(_) => {
+                            // If upgrade fails, it means that the page is read by another transaction.
+                            // Release everything and retry.
+                            return Err(TreeStatus::WriteLockFailed);
                         }
                     }
-                    return Err(TreeStatus::WriteLockFailed);
                 }
             }
             let page_key = {
@@ -1151,7 +1193,7 @@ impl<T: MemPool> FosterBtree<T> {
                 PageKey::new(self.c_key, page_id)
             };
 
-            let next_page = self.mem_pool.get_page_for_read(page_key)?;
+            let next_page = self.read_page(page_key);
             // Now we have two locks. We need to release the lock of the current page.
             let (op, this_page, next_page) =
                 self.modify_structure_if_needed_for_read(this_page, next_page, &mut op_byte);
@@ -1190,6 +1232,8 @@ impl<T: MemPool> FosterBtree<T> {
     }
 
     pub fn insert(&self, key: &[u8], value: &[u8]) -> Result<(), TreeStatus> {
+        let base = Duration::from_millis(1);
+        let mut attmepts = 0;
         let mut leaf_page = {
             loop {
                 match self.traverse_to_leaf_for_write(key) {
@@ -1197,7 +1241,13 @@ impl<T: MemPool> FosterBtree<T> {
                         break leaf_page;
                     }
                     Err(TreeStatus::WriteLockFailed) => {
-                        std::hint::spin_loop();
+                        attmepts += 1;
+                        log_trace!(
+                            "Failed to acquire write lock (#attempt {}). Sleeping for {:?}",
+                            attmepts,
+                            base * attmepts
+                        );
+                        std::thread::sleep(base * attmepts);
                     }
                     Err(e) => {
                         return Err(e);
@@ -1205,6 +1255,7 @@ impl<T: MemPool> FosterBtree<T> {
                 }
             }
         };
+        log_trace!("Acquired write lock for page {}", leaf_page.get_id());
 
         let slot_id = leaf_page.lower_bound_slot_id(&BTreeKey::new(key));
         if slot_id == 0 {
@@ -1224,7 +1275,7 @@ impl<T: MemPool> FosterBtree<T> {
 
     #[cfg(any(test, debug_assertions))]
     fn debug_traverse_to_leaf_for_read(&self, key: &[u8]) -> Result<FrameReadGuard, TreeStatus> {
-        let mut current_page = self.mem_pool.get_page_for_read(self.root_key)?;
+        let mut current_page = self.read_page(self.root_key);
         let mut op_byte = OpByte::new();
         loop {
             let this_page = current_page;
@@ -1233,7 +1284,7 @@ impl<T: MemPool> FosterBtree<T> {
                 if this_page.has_foster_child() && this_page.get_foster_key() <= key {
                     // Check whether the foster child should be traversed.
                     let foster_page_key = PageKey::new(self.c_key, this_page.get_foster_page_id());
-                    let foster_page = self.mem_pool.get_page_for_read(foster_page_key)?;
+                    let foster_page = self.read_page(foster_page_key);
                     // Now we have two locks. We need to release the lock of the current page.
                     let (op, this_page, foster_page) = self.modify_structure_if_needed_for_read(
                         this_page,
@@ -1266,7 +1317,7 @@ impl<T: MemPool> FosterBtree<T> {
                 PageKey::new(self.c_key, page_id)
             };
 
-            let next_page = self.mem_pool.get_page_for_read(page_key)?;
+            let next_page = self.read_page(page_key);
             // Now we have two locks. We need to release the lock of the current page.
             let (op, this_page, next_page) =
                 self.modify_structure_if_needed_for_read(this_page, next_page, &mut op_byte);
@@ -1290,7 +1341,7 @@ impl<T: MemPool> FosterBtree<T> {
 
     #[cfg(any(test, debug_assertions))]
     fn debug_traverse_to_leaf_for_write(&self, key: &[u8]) -> Result<FrameWriteGuard, TreeStatus> {
-        let mut current_page = self.mem_pool.get_page_for_read(self.root_key)?;
+        let mut current_page = self.read_page(self.root_key);
         let mut op_byte = OpByte::new();
         loop {
             let this_page = current_page;
@@ -1299,7 +1350,7 @@ impl<T: MemPool> FosterBtree<T> {
                 if this_page.has_foster_child() && this_page.get_foster_key() <= key {
                     // Check whether the foster child should be traversed.
                     let foster_page_key = PageKey::new(self.c_key, this_page.get_foster_page_id());
-                    let foster_page = self.mem_pool.get_page_for_read(foster_page_key)?;
+                    let foster_page = self.read_page(foster_page_key);
                     // Now we have two locks. We need to release the lock of the current page.
                     let (op, this_page, foster_page) = self.modify_structure_if_needed_for_read(
                         this_page,
@@ -1322,20 +1373,16 @@ impl<T: MemPool> FosterBtree<T> {
                         }
                     }
                 } else {
-                    // Spin loop for upgrade lock
-                    let mut dest_page = this_page;
-                    for _ in 0..100 {
-                        match dest_page.try_upgrade(false) {
-                            Ok(upgraded) => {
-                                return Ok(upgraded);
-                            }
-                            Err(this_page) => {
-                                dest_page = this_page;
-                                std::hint::spin_loop();
-                            }
+                    match this_page.try_upgrade(true) {
+                        Ok(upgraded) => {
+                            return Ok(upgraded);
+                        }
+                        Err(_) => {
+                            // If upgrade fails, it means that the page is read by another transaction.
+                            // Release everything and retry.
+                            return Err(TreeStatus::WriteLockFailed);
                         }
                     }
-                    return Err(TreeStatus::WriteLockFailed);
                 }
             }
             let page_key = {
@@ -1345,7 +1392,7 @@ impl<T: MemPool> FosterBtree<T> {
                 PageKey::new(self.c_key, page_id)
             };
 
-            let next_page = self.mem_pool.get_page_for_read(page_key)?;
+            let next_page = self.read_page(page_key);
             // Now we have two locks. We need to release the lock of the current page.
             let (op, this_page, next_page) =
                 self.modify_structure_if_needed_for_read(this_page, next_page, &mut op_byte);
@@ -1369,6 +1416,8 @@ impl<T: MemPool> FosterBtree<T> {
 
     #[cfg(any(test, debug_assertions))]
     fn debug_insert(&self, key: &[u8], value: &[u8]) -> Result<(), TreeStatus> {
+        let base = Duration::from_millis(1);
+        let mut attmepts = 0;
         let mut leaf_page = {
             loop {
                 match self.debug_traverse_to_leaf_for_write(key) {
@@ -1376,7 +1425,8 @@ impl<T: MemPool> FosterBtree<T> {
                         break leaf_page;
                     }
                     Err(TreeStatus::WriteLockFailed) => {
-                        std::hint::spin_loop();
+                        attmepts += 1;
+                        std::thread::sleep(base * attmepts);
                     }
                     Err(e) => {
                         return Err(e);
@@ -1578,10 +1628,16 @@ impl FosterBtreeVisualizer {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs::File, io::Write, sync::Arc};
+    use std::{
+        fs::File,
+        io::Write,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+        thread,
+    };
 
-    use env_logger::init;
-    use log::trace;
     use tempfile::TempDir;
 
     use crate::{
@@ -1591,9 +1647,9 @@ mod tests {
             print_page, should_adopt, should_antiadopt, should_load_balance, should_merge,
             should_root_ascend, should_root_descend, MIN_BYTES_USED,
         },
+        log, log_trace,
         page::Page,
-        random::{gen_random_byte_vec, gen_random_permutation},
-        utils::init_test_logger,
+        random::{gen_random_byte_vec, gen_random_permutation, RandomKVs},
     };
 
     use super::{
@@ -2543,8 +2599,6 @@ mod tests {
     // LN, LL: Nothing
     #[test]
     fn test_parent_child_relationship_structure_modification_criteria() {
-        init_test_logger();
-
         {
             // Parent [k0, k2)
             //  +-------------------+
@@ -2642,7 +2696,6 @@ mod tests {
 
     #[test]
     fn test_sorted_insertion() {
-        init_test_logger();
         let (temp_dir, btree) = setup_btree_empty();
         // Insert 1024 bytes
         let val = vec![2_u8; 1024];
@@ -2688,7 +2741,6 @@ mod tests {
 
     #[test]
     fn test_random_insertion() {
-        init_test_logger();
         let btree = setup_inmem_btree_empty();
         // Insert 1024 bytes
         let val = vec![3_u8; 1024];
@@ -2712,56 +2764,23 @@ mod tests {
         }
     }
 
-    use serde::{Deserialize, Serialize};
-    #[derive(Serialize, Deserialize)]
-    struct KVs {
-        kvs: Vec<(usize, Vec<u8>)>,
-    }
-
-    impl KVs {
-        fn new(num_keys: usize, val_min_size: usize, val_max_size: usize) -> Self {
-            let keys = (0..num_keys).collect::<Vec<usize>>();
-            let keys = gen_random_permutation(keys);
-            let vals = (0..num_keys)
-                .map(|_| gen_random_byte_vec(val_min_size, val_max_size))
-                .collect::<Vec<Vec<u8>>>();
-            let kvs = keys
-                .iter()
-                .zip(vals.iter())
-                .map(|(&k, v)| (k, v.clone()))
-                .collect();
-            KVs { kvs }
-        }
-
-        fn iter(&self) -> impl Iterator<Item = (&usize, &Vec<u8>)> {
-            self.kvs.iter().map(|(k, v)| (k, v))
-        }
-    }
-
-    impl std::ops::Index<usize> for KVs {
-        type Output = (usize, Vec<u8>);
-
-        fn index(&self, index: usize) -> &Self::Output {
-            &self.kvs[index]
-        }
-    }
-
     #[test]
     fn test_stress() {
-        init_test_logger();
         let num_keys = 5000;
         let val_min_size = 50;
         let val_max_size = 100;
-        let kvs = KVs::new(num_keys, val_min_size, val_max_size);
+        let kvs = RandomKVs::new(num_keys, val_min_size, val_max_size);
 
         let btree = setup_inmem_btree_empty();
 
+        /*
         // Write kvs to file
         let kvs_file = "kvs.dat";
         // serde cbor to write to file
         let mut file = File::create(kvs_file).unwrap();
         let kvs_str = serde_cbor::to_vec(&kvs).unwrap();
         file.write_all(&kvs_str).unwrap();
+        */
 
         for (i, (key, val)) in kvs.iter().enumerate() {
             // println!(
@@ -2789,12 +2808,11 @@ mod tests {
     #[test]
     #[ignore]
     fn replay_stress() {
-        init_test_logger();
         let btree = setup_inmem_btree_empty();
 
         let kvs_file = "kvs.dat";
         let file = File::open(kvs_file).unwrap();
-        let kvs: KVs = serde_cbor::from_reader(file).unwrap();
+        let kvs: RandomKVs = serde_cbor::from_reader(file).unwrap();
 
         let bug_occurred_at = 1138;
         for (i, (key, val)) in kvs.iter().enumerate() {
@@ -2835,5 +2853,51 @@ mod tests {
         // let mut file = File::create(dot_file).unwrap();
         // // write dot_string as txt
         // file.write_all(dot_string.as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn test_parallel_insertion() {
+        // init_test_logger();
+        let btree = Arc::new(setup_inmem_btree_empty());
+        let num_keys = 1000;
+        let val_min_size = 50;
+        let val_max_size = 100;
+        let kvs = Arc::new(RandomKVs::new(num_keys, val_min_size, val_max_size));
+
+        log_trace!("Number of keys: {}", num_keys);
+
+        // Use 3 threads to insert keys into the tree.
+        // Increment the counter for each key inserted and if the counter is equal to the number of keys, then all keys have been inserted.
+        let counter = Arc::new(AtomicUsize::new(0));
+        thread::scope(
+            // issue three threads to insert keys into the tree
+            |s| {
+                for i in 0..3 {
+                    let btree = btree.clone();
+                    let kvs = kvs.clone();
+                    let counter = counter.clone();
+                    s.spawn(move || {
+                        log_trace!("Spawned");
+                        loop {
+                            let counter = counter.fetch_add(1, Ordering::AcqRel);
+                            if counter >= num_keys {
+                                break;
+                            }
+                            let (key, val) = &kvs[counter];
+                            log_trace!("Inserting key {}", key);
+                            let key = to_bytes(*key);
+                            btree.insert(&key, val).unwrap();
+                        }
+                    });
+                }
+            },
+        );
+
+        // Check if all keys have been inserted.
+        for (key, val) in kvs.iter() {
+            let key = to_bytes(*key);
+            let current_val = btree.get_key(&key).unwrap();
+            assert_eq!(current_val, *val);
+        }
     }
 }

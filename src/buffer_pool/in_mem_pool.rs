@@ -24,7 +24,7 @@ use super::{
 
 pub struct InMemPool {
     latch: RwLatch,
-    frames: UnsafeCell<Vec<Pin<Box<BufferFrame>>>>, // Pin is required to ensure that the frame does not move when the vector is resized
+    frames: UnsafeCell<Vec<Box<BufferFrame>>>, // Box is required to ensure that the frame does not move when the vector is resized
     id_to_index: UnsafeCell<HashMap<PageKey, usize>>,
     container_page_count: UnsafeCell<HashMap<ContainerKey, u32>>,
 }
@@ -80,7 +80,7 @@ impl MemPool for InMemPool {
         let page = Page::new(page_id);
 
         let page_key = PageKey::new(c_key, page_id);
-        let frame = Box::pin(BufferFrame::default());
+        let frame = Box::new(BufferFrame::default());
         let frame_index = frames.len();
         frames.push(frame);
         id_to_index.insert(page_key, frame_index);
@@ -104,9 +104,13 @@ impl MemPool for InMemPool {
             }
         };
 
-        let frame = (frames.get(frame_index).unwrap()).write(true);
+        let frame = (frames.get(frame_index).unwrap()).try_write(true);
         self.release_shared();
-        Ok(frame)
+        if let Some(frame) = frame {
+            Ok(frame)
+        } else {
+            Err(MemPoolStatus::FrameWriteLatchGrantFailed)
+        }
     }
 
     fn get_page_for_read(&self, key: PageKey) -> Result<FrameReadGuard, MemPoolStatus> {
@@ -121,9 +125,13 @@ impl MemPool for InMemPool {
             }
         };
 
-        let frame = (frames.get(frame_index).unwrap()).read();
+        let frame = (frames.get(frame_index).unwrap()).try_read();
         self.release_shared();
-        Ok(frame)
+        if let Some(frame) = frame {
+            Ok(frame)
+        } else {
+            Err(MemPoolStatus::FrameReadLatchGrantFailed)
+        }
     }
 
     fn reset(&self) {

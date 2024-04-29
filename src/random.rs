@@ -60,3 +60,37 @@ pub fn gen_random_permutation<T>(mut vec: Vec<T>) -> Vec<T> {
     }
     vec
 }
+
+use serde::{Deserialize, Serialize};
+#[derive(Serialize, Deserialize)]
+pub struct RandomKVs {
+    kvs: Vec<(usize, Vec<u8>)>,
+}
+
+impl RandomKVs {
+    pub fn new(num_keys: usize, val_min_size: usize, val_max_size: usize) -> Self {
+        let keys = (0..num_keys).collect::<Vec<usize>>();
+        let keys = gen_random_permutation(keys);
+        let vals = (0..num_keys)
+            .map(|_| gen_random_byte_vec(val_min_size, val_max_size))
+            .collect::<Vec<Vec<u8>>>();
+        let kvs = keys
+            .iter()
+            .zip(vals.iter())
+            .map(|(&k, v)| (k, v.clone()))
+            .collect();
+        RandomKVs { kvs }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&usize, &Vec<u8>)> {
+        self.kvs.iter().map(|(k, v)| (k, v))
+    }
+}
+
+impl std::ops::Index<usize> for RandomKVs {
+    type Output = (usize, Vec<u8>);
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.kvs[index]
+    }
+}

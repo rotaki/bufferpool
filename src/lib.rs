@@ -4,7 +4,9 @@ pub mod write_ahead_log;
 
 mod file_manager;
 mod heap_page;
+mod logger;
 mod page;
-mod random;
+pub mod random;
 mod rwlatch;
-mod utils;
+
+pub use logger::log;

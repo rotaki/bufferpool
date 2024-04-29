@@ -1,4 +1,4 @@
-use log::debug;
+use crate::{log, log_debug};
 
 use super::{
     buffer_frame::{BufferFrame, FrameReadGuard, FrameWriteGuard},
@@ -9,7 +9,6 @@ use super::{
 use crate::{
     file_manager::{FMStatus, FileManager},
     page::{Page, PageId},
-    utils::init_logger,
 };
 
 use std::{
@@ -37,8 +36,7 @@ where
         num_frames: usize,
         eviction_policy: T,
     ) -> Result<Self, MemPoolStatus> {
-        init_logger();
-        debug!("Buffer pool created: num_frames: {}", num_frames);
+        log_debug!("Buffer pool created: num_frames: {}", num_frames);
 
         // Identify all the directories. A directory corresponds to a database.
         // A file in the directory corresponds to a container.
@@ -97,7 +95,7 @@ where
         let index = eviction_policy.choose_victim();
         let mut guard = pages[index]
             .try_write(false)
-            .ok_or(MemPoolStatus::FrameLatchGrantFailed)?;
+            .ok_or(MemPoolStatus::FrameWriteLatchGrantFailed)?;
 
         // Evict old page if necessary
         if let Some(old_key) = guard.key() {
@@ -108,7 +106,7 @@ where
                 file.write_page(old_key.page_id, &*guard)?;
             }
             id_to_index.remove(&old_key);
-            debug!("Page evicted: {}", old_key);
+            log_debug!("Page evicted: {}", old_key);
         }
 
         // Create a new page or read from disk
@@ -127,7 +125,7 @@ where
         eviction_policy.reset(index);
         eviction_policy.update(index);
 
-        debug!("Page loaded: key: {}", key);
+        log_debug!("Page loaded: key: {}", key);
         Ok(guard)
     }
 
@@ -172,7 +170,7 @@ where
                 if guard.is_some() {
                     unsafe { &mut *self.eviction_policy.get() }.update(index);
                 }
-                guard.ok_or(MemPoolStatus::FrameLatchGrantFailed)
+                guard.ok_or(MemPoolStatus::FrameWriteLatchGrantFailed)
             }
             None => {
                 let res = self.handle_page_fault(key, false);
@@ -212,7 +210,7 @@ where
                 if guard.is_some() {
                     unsafe { &mut *self.eviction_policy.get() }.update(index);
                 }
-                guard.ok_or(MemPoolStatus::FrameLatchGrantFailed)
+                guard.ok_or(MemPoolStatus::FrameWriteLatchGrantFailed)
             }
             None => {
                 let res = self.handle_page_fault(key, false);
@@ -236,7 +234,7 @@ where
                 if guard.is_some() {
                     unsafe { &mut *self.eviction_policy.get() }.update(index);
                 }
-                guard.ok_or(MemPoolStatus::FrameLatchGrantFailed)
+                guard.ok_or(MemPoolStatus::FrameReadLatchGrantFailed)
             }
             None => self
                 .handle_page_fault(key, false)
@@ -377,6 +375,8 @@ unsafe impl<T: EvictionPolicy> Sync for BufferPool<T> {}
 
 #[cfg(test)]
 mod tests {
+    use crate::{log, log_trace};
+
     use super::super::LFUEvictionPolicy;
     use super::*;
     use std::thread;
@@ -409,7 +409,7 @@ mod tests {
                                     break;
                                 } else {
                                     // spin
-                                    println!("spin: {:?}", thread::current().id());
+                                    log_trace!("Spin");
                                     std::hint::spin_loop();
                                 }
                             }
