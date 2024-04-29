@@ -16,6 +16,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_cbor = "0.11"
 chrono = "0.4"
 lazy_static = "1.4"
+criterion = "0.5"
 
 [features]
 log_trace = []
@@ -23,3 +24,12 @@ log_debug = []
 log_info = []
 log_warn = []
 log_error = []
+
+[release]
+lto = true
+panic = "abort"
+codegen-units = 1
+
+[[bench]]
+name = "random_insert"
+harness = false

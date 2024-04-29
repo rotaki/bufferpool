@@ -82,6 +82,10 @@ impl RandomKVs {
         RandomKVs { kvs }
     }
 
+    pub fn len(&self) -> usize {
+        self.kvs.len()
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (&usize, &Vec<u8>)> {
         self.kvs.iter().map(|(k, v)| (k, v))
     }
