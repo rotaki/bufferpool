@@ -54,7 +54,7 @@ Found 5 outliers among 100 measurements (5.00%)
 Benchmarking Random Insertion/Foster BTree Insertion Parallel: Warming up for 3.0000 s
 Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 10.1s, or reduce sample count to 40.
 Benchmarking Random Insertion/Foster BTree Insertion Parallel: Collecting 100 samples in estimated 10.063 s (1
-Random Insertion/Foster BTree Insertion Parallel
+Random Insertion/Foster BTree Insertion Parallel [Note: 10 threads!]
                         time:   [92.059 ms 93.532 ms 95.642 ms]
 Found 4 outliers among 100 measurements (4.00%)
   2 (2.00%) high mild
