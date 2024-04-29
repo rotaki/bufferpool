@@ -38,6 +38,21 @@ cargo bench
 ```
 
 ### Result (temp)
+
+#### Test scenario
+
+Inserting to a Foster BTree and BTreeMap with 100000 keys and values of size 50-100 bytes.
+```
+    let num_keys = 100000;
+    let val_min_size = 50;
+    let val_max_size = 100;
+```
+
+1. Inserting 100000 keys to Foster BTree single-threaded
+2. Inserting 100000 keys to Foster BTree multi-threaded (10 threads)
+3. Inserting 100000 keys to BTreeMap
+
+
 ```
      Running benches/random_insert.rs (target/release/deps/random_insert-0798ecc00b9f7801)
 Gnuplot not found, using plotters backend
@@ -54,7 +69,7 @@ Found 5 outliers among 100 measurements (5.00%)
 Benchmarking Random Insertion/Foster BTree Insertion Parallel: Warming up for 3.0000 s
 Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 10.1s, or reduce sample count to 40.
 Benchmarking Random Insertion/Foster BTree Insertion Parallel: Collecting 100 samples in estimated 10.063 s (1
-Random Insertion/Foster BTree Insertion Parallel [Note: 10 threads!]
+Random Insertion/Foster BTree Insertion Parallel
                         time:   [92.059 ms 93.532 ms 95.642 ms]
 Found 4 outliers among 100 measurements (4.00%)
   2 (2.00%) high mild
@@ -66,5 +81,5 @@ Random Insertion/BTreeMap Insertion
                         Performance has regressed.
 Found 5 outliers among 100 measurements (5.00%)
   3 (3.00%) high mild
-  2 (2.00%) high severe
+  2 (2.00%) high severe 
 ```
