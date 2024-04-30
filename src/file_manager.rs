@@ -64,7 +64,7 @@ impl FileManager {
             .map_err(|_| FMStatus::SeekError)?;
         file.read_exact(page.get_raw_bytes_mut())
             .map_err(|_| FMStatus::ReadError)?;
-        assert!(page.get_id() == page_id, "Page id mismatch");
+        debug_assert!(page.get_id() == page_id, "Page id mismatch");
         Ok(page)
     }
 

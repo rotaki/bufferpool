@@ -55,34 +55,30 @@ Inserting to a Foster BTree and BTreeMap with 100000 keys and values of size 50-
 
 
 ```
-     Running benches/random_insert.rs (target/release/deps/random_insert-0798ecc00b9f7801)
+     Running benches/random_insert.rs (target/release/deps/random_insert-e8a151c04c64f10c)
 Gnuplot not found, using plotters backend
-Benchmarking Random Insertion/Foster BTree Insertion: Warming up for 3.0000 s
-Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 32.9s, or reduce sample count to 10.
-Benchmarking Random Insertion/Foster BTree Insertion: Collecting 100 samples in estimated 32.913 s (100 iterat
+Benchmarking Random Insertion/Foster BTree Insertion: Collecting 10 samples in estimated 7.525
 Random Insertion/Foster BTree Insertion
-                        time:   [329.75 ms 330.93 ms 332.27 ms]
-                        change: [+3495.4% +3520.1% +3542.5%] (p = 0.00 < 0.05)
-                        Performance has regressed.
-Found 5 outliers among 100 measurements (5.00%)
-  2 (2.00%) high mild
-  3 (3.00%) high severe
-Benchmarking Random Insertion/Foster BTree Insertion Parallel: Warming up for 3.0000 s
-Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 10.1s, or reduce sample count to 40.
-Benchmarking Random Insertion/Foster BTree Insertion Parallel: Collecting 100 samples in estimated 10.063 s (1
+                        time:   [66.547 ms 66.878 ms 67.419 ms]
+                        change: [-0.8256% +0.8573% +4.1165%] (p = 0.34 > 0.05)
+                        No change in performance detected.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+Benchmarking Random Insertion/Foster BTree Insertion Parallel: Collecting 10 samples in estima
 Random Insertion/Foster BTree Insertion Parallel
-                        time:   [92.059 ms 93.532 ms 95.642 ms]
-Found 4 outliers among 100 measurements (4.00%)
-  2 (2.00%) high mild
-  2 (2.00%) high severe
-Benchmarking Random Insertion/BTreeMap Insertion: Collecting 100 samples in estimated 8.4116 s (200 iterations
+                        time:   [44.699 ms 44.897 ms 45.236 ms]
+                        change: [-29.710% -28.647% -27.603%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) low mild
+Benchmarking Random Insertion/BTreeMap Insertion: Collecting 10 samples in estimated 6.6681 s 
 Random Insertion/BTreeMap Insertion
-                        time:   [41.386 ms 41.735 ms 42.126 ms]
-                        change: [+2114.6% +2137.5% +2162.7%] (p = 0.00 < 0.05)
-                        Performance has regressed.
-Found 5 outliers among 100 measurements (5.00%)
-  3 (3.00%) high mild
-  2 (2.00%) high severe 
+                        time:   [39.927 ms 40.194 ms 40.434 ms]
+                        change: [-2.2897% +0.8231% +5.8621%] (p = 0.65 > 0.05)
+                        No change in performance detected.
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) low mild
+  1 (10.00%) high severe
 ```
 
 

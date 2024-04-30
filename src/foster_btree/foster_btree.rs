@@ -139,34 +139,46 @@ fn is_foster_relationship(parent: &Page, child: &Page) -> bool {
         && parent.get_foster_page_id() == child.get_id()
 }
 
-fn should_modify_structure(this: &Page, child: &Page, op_byte: &mut OpByte) -> Option<OpType> {
-    assert!(is_parent_and_child(this, child));
-    if is_foster_relationship(this, child) {
-        if !op_byte.is_merge_done() && should_merge(this, child) {
-            op_byte.merge_done();
-            return Some(OpType::MERGE);
-        }
-        if !op_byte.is_load_balance_done() && should_load_balance(this, child) {
-            op_byte.load_balance_done();
-            return Some(OpType::LOADBALANCE);
-        }
-        if !op_byte.is_ascend_root_done() && should_root_ascend(this, child) {
-            op_byte.ascend_root_done();
-            return Some(OpType::ASCENDROOT);
-        }
-    } else {
-        if !op_byte.is_adopt_done() && should_adopt(this, child) {
-            op_byte.adopt_done();
-            return Some(OpType::ADOPT);
-        }
-        if !op_byte.is_antiadopt_done() && should_antiadopt(this, child) {
-            op_byte.antiadopt_done();
-            return Some(OpType::ANTIADOPT);
-        }
-        if !op_byte.is_descend_root_done() && should_root_descend(this, child) {
-            op_byte.descend_root_done();
-            return Some(OpType::DESCENDROOT);
-        }
+fn should_modify_structure_for_foster_relationship(
+    this: &Page,
+    child: &Page,
+    op_byte: &mut OpByte,
+) -> Option<OpType> {
+    debug_assert!(is_parent_and_child(this, child));
+    debug_assert!(is_foster_relationship(this, child));
+    if !op_byte.is_merge_done() && should_merge(this, child) {
+        op_byte.merge_done();
+        return Some(OpType::MERGE);
+    }
+    if !op_byte.is_load_balance_done() && should_load_balance(this, child) {
+        op_byte.load_balance_done();
+        return Some(OpType::LOADBALANCE);
+    }
+    if !op_byte.is_ascend_root_done() && should_root_ascend(this, child) {
+        op_byte.ascend_root_done();
+        return Some(OpType::ASCENDROOT);
+    }
+    None
+}
+
+fn should_modify_structure_for_parent_child_relationship(
+    this: &Page,
+    child: &Page,
+    op_byte: &mut OpByte,
+) -> Option<OpType> {
+    debug_assert!(is_parent_and_child(this, child));
+    debug_assert!(!is_foster_relationship(this, child));
+    if !op_byte.is_adopt_done() && should_adopt(this, child) {
+        op_byte.adopt_done();
+        return Some(OpType::ADOPT);
+    }
+    if !op_byte.is_antiadopt_done() && should_antiadopt(this, child) {
+        op_byte.antiadopt_done();
+        return Some(OpType::ANTIADOPT);
+    }
+    if !op_byte.is_descend_root_done() && should_root_descend(this, child) {
+        op_byte.descend_root_done();
+        return Some(OpType::DESCENDROOT);
     }
     None
 }
@@ -177,8 +189,8 @@ fn should_modify_structure(this: &Page, child: &Page, op_byte: &mut OpByte) -> O
 /// SL, LS: Load balance
 /// NN, LN, NL, LL: Do nothing
 fn should_merge(this: &Page, child: &Page) -> bool {
-    assert!(is_parent_and_child(this, child));
-    assert!(is_foster_relationship(this, child));
+    debug_assert!(is_parent_and_child(this, child));
+    debug_assert!(is_foster_relationship(this, child));
     // Check if this is small and child is not too large
     if is_small(this) && !is_large(child) {
         return true;
@@ -196,8 +208,8 @@ fn should_merge(this: &Page, child: &Page) -> bool {
 /// SL, LS: Load balance
 /// NN, LN, NL, LL: Do nothing
 fn should_load_balance(this: &Page, child: &Page) -> bool {
-    assert!(is_parent_and_child(this, child));
-    assert!(is_foster_relationship(this, child));
+    debug_assert!(is_parent_and_child(this, child));
+    debug_assert!(is_foster_relationship(this, child));
     // Check if this is not too small and child is too large
     if (is_small(this) && is_large(child)) || (is_large(this) && is_small(child)) {
         return true;
@@ -206,8 +218,8 @@ fn should_load_balance(this: &Page, child: &Page) -> bool {
 }
 
 fn should_adopt(this: &Page, child: &Page) -> bool {
-    assert!(is_parent_and_child(this, child));
-    assert!(!is_foster_relationship(this, child));
+    debug_assert!(is_parent_and_child(this, child));
+    debug_assert!(!is_foster_relationship(this, child));
     // Check if the parent page has enough space to adopt the foster child of the child page.
     if !child.has_foster_child() {
         return false;
@@ -231,8 +243,8 @@ fn should_adopt(this: &Page, child: &Page) -> bool {
 }
 
 fn should_antiadopt(this: &Page, child: &Page) -> bool {
-    assert!(is_parent_and_child(this, child));
-    assert!(!is_foster_relationship(this, child));
+    debug_assert!(is_parent_and_child(this, child));
+    debug_assert!(!is_foster_relationship(this, child));
     if child.has_foster_child() {
         return false;
     }
@@ -257,8 +269,8 @@ fn should_antiadopt(this: &Page, child: &Page) -> bool {
 }
 
 fn should_root_ascend(this: &Page, child: &Page) -> bool {
-    assert!(is_parent_and_child(this, child));
-    assert!(is_foster_relationship(this, child));
+    debug_assert!(is_parent_and_child(this, child));
+    debug_assert!(is_foster_relationship(this, child));
     if !this.is_root() {
         return false;
     }
@@ -266,8 +278,8 @@ fn should_root_ascend(this: &Page, child: &Page) -> bool {
 }
 
 fn should_root_descend(this: &Page, child: &Page) -> bool {
-    assert!(is_parent_and_child(this, child));
-    assert!(!is_foster_relationship(this, child));
+    debug_assert!(is_parent_and_child(this, child));
+    debug_assert!(!is_foster_relationship(this, child));
     if !this.is_root() {
         return false;
     }
@@ -291,8 +303,8 @@ fn should_root_descend(this: &Page, child: &Page) -> bool {
 /// 3. Balancing does not move the foster key from one page to another.
 /// 4. Balancing does not move the low fence and high fence.
 fn balance(this: &mut Page, foster_child: &mut Page) {
-    assert!(is_parent_and_child(this, foster_child));
-    assert!(is_foster_relationship(this, foster_child));
+    debug_assert!(is_parent_and_child(this, foster_child));
+    debug_assert!(is_foster_relationship(this, foster_child));
 
     // Calculate the total bytes of the two pages.
     let this_total = this.total_bytes_used();
@@ -573,8 +585,8 @@ fn split_insert(this: &mut Page, foster_child: &mut Page, key: &[u8], value: &[u
 // After:
 //   this [k0, k2)
 fn merge(this: &mut Page, foster_child: &mut Page) {
-    assert!(is_parent_and_child(this, foster_child));
-    assert!(is_foster_relationship(this, foster_child));
+    debug_assert!(is_parent_and_child(this, foster_child));
+    debug_assert!(is_foster_relationship(this, foster_child));
 
     let mut kvs = Vec::new();
     for i in 1..=foster_child.active_slot_count() {
@@ -622,9 +634,9 @@ fn merge(this: &mut Page, foster_child: &mut Page) {
 ///    v                   v
 ///   child0 [k0, k1)    child1 [k1, k2)
 fn adopt(parent: &mut Page, child: &mut Page) {
-    assert!(is_parent_and_child(parent, child));
-    assert!(!is_foster_relationship(parent, child));
-    assert!(child.has_foster_child());
+    debug_assert!(is_parent_and_child(parent, child));
+    debug_assert!(!is_foster_relationship(parent, child));
+    debug_assert!(child.has_foster_child());
 
     let foster_child_slot_id = child.foster_child_slot_id();
     let foster_key = child.get_foster_key().to_owned();
@@ -660,17 +672,17 @@ fn adopt(parent: &mut Page, child: &mut Page) {
 ///  v
 /// child1 [k0, k2) --> foster_child [k1, k2)
 fn anti_adopt(parent: &mut Page, child1: &mut Page) {
-    assert!(is_parent_and_child(parent, child1));
-    assert!(!is_foster_relationship(parent, child1));
-    assert!(!child1.has_foster_child());
+    debug_assert!(is_parent_and_child(parent, child1));
+    debug_assert!(!is_foster_relationship(parent, child1));
+    debug_assert!(!child1.has_foster_child());
 
     // Identify child1 slot
     let low_key = BTreeKey::new(&child1.get_raw_key(child1.low_fence_slot_id()));
     let slot_id = parent.lower_bound_slot_id(&low_key);
     if parent.has_foster_child() {
-        assert!(slot_id + 1 < parent.foster_child_slot_id());
+        debug_assert!(slot_id + 1 < parent.foster_child_slot_id());
     } else {
-        assert!(slot_id + 1 < parent.high_fence_slot_id());
+        debug_assert!(slot_id + 1 < parent.high_fence_slot_id());
     }
     let k1 = parent.get_raw_key(slot_id + 1);
     let child2_ptr = parent.get_val(slot_id + 1);
@@ -988,11 +1000,17 @@ impl<T: MemPool> FosterBtree<T> {
 
     fn modify_structure_if_needed_for_read<'a>(
         &self,
+        is_foster_relationship: bool,
         this: FrameReadGuard<'a>,
         child: FrameReadGuard<'a>,
         op_byte: &mut OpByte,
     ) -> (Option<OpType>, FrameReadGuard<'a>, FrameReadGuard<'a>) {
-        if let Some(op) = should_modify_structure(&this, &child, op_byte) {
+        let op = if is_foster_relationship {
+            should_modify_structure_for_foster_relationship(&this, &child, op_byte)
+        } else {
+            should_modify_structure_for_parent_child_relationship(&this, &child, op_byte)
+        };
+        if let Some(op) = op {
             log_trace!(
                 "Should modify structure: {:?}, This: {}, Child: {}",
                 op,
@@ -1026,20 +1044,6 @@ impl<T: MemPool> FosterBtree<T> {
             child.dirty().store(true, Ordering::Relaxed);
             self.modify_structure(op.clone(), &mut this, &mut child);
             (Some(op), this.downgrade(), child.downgrade())
-        } else {
-            (None, this, child)
-        }
-    }
-
-    fn modify_structure_if_needed_for_write<'a>(
-        &self,
-        mut this: FrameWriteGuard<'a>,
-        mut child: FrameWriteGuard<'a>,
-        op_byte: &mut OpByte,
-    ) -> (Option<OpType>, FrameWriteGuard<'a>, FrameWriteGuard<'a>) {
-        if let Some(op) = should_modify_structure(&this, &child, op_byte) {
-            self.modify_structure(op.clone(), &mut this, &mut child);
-            (Some(op), this, child)
         } else {
             (None, this, child)
         }
@@ -1089,6 +1093,7 @@ impl<T: MemPool> FosterBtree<T> {
                     let foster_page = self.read_page(foster_page_key);
                     // Now we have two locks. We need to release the lock of the current page.
                     let (op, this_page, foster_page) = self.modify_structure_if_needed_for_read(
+                        true,
                         this_page,
                         foster_page,
                         &mut op_byte,
@@ -1112,17 +1117,23 @@ impl<T: MemPool> FosterBtree<T> {
                     return Ok(this_page);
                 }
             }
-            let page_key = {
+            let (is_foster_relationship, page_key) = {
                 let slot_id = this_page.lower_bound_slot_id(&BTreeKey::new(key));
+                let is_foster_relationship =
+                    this_page.has_foster_child() && slot_id == this_page.foster_child_slot_id();
                 let page_id_bytes = this_page.get_val(slot_id);
                 let page_id = PageId::from_be_bytes(page_id_bytes.try_into().unwrap());
-                PageKey::new(self.c_key, page_id)
+                (is_foster_relationship, PageKey::new(self.c_key, page_id))
             };
 
             let next_page = self.read_page(page_key);
             // Now we have two locks. We need to release the lock of the current page.
-            let (op, this_page, next_page) =
-                self.modify_structure_if_needed_for_read(this_page, next_page, &mut op_byte);
+            let (op, this_page, next_page) = self.modify_structure_if_needed_for_read(
+                is_foster_relationship,
+                this_page,
+                next_page,
+                &mut op_byte,
+            );
             match op {
                 Some(OpType::MERGE)
                 | Some(OpType::LOADBALANCE)
@@ -1154,6 +1165,7 @@ impl<T: MemPool> FosterBtree<T> {
                     let foster_page = self.read_page(foster_page_key);
                     // Now we have two locks. We need to release the lock of the current page.
                     let (op, this_page, foster_page) = self.modify_structure_if_needed_for_read(
+                        true,
                         this_page,
                         foster_page,
                         &mut op_byte,
@@ -1186,17 +1198,23 @@ impl<T: MemPool> FosterBtree<T> {
                     }
                 }
             }
-            let page_key = {
+            let (is_foster_relation_ship, page_key) = {
                 let slot_id = this_page.lower_bound_slot_id(&BTreeKey::new(key));
+                let is_foster_relationship =
+                    this_page.has_foster_child() && slot_id == this_page.foster_child_slot_id();
                 let page_id_bytes = this_page.get_val(slot_id);
                 let page_id = PageId::from_be_bytes(page_id_bytes.try_into().unwrap());
-                PageKey::new(self.c_key, page_id)
+                (is_foster_relationship, PageKey::new(self.c_key, page_id))
             };
 
             let next_page = self.read_page(page_key);
             // Now we have two locks. We need to release the lock of the current page.
-            let (op, this_page, next_page) =
-                self.modify_structure_if_needed_for_read(this_page, next_page, &mut op_byte);
+            let (op, this_page, next_page) = self.modify_structure_if_needed_for_read(
+                is_foster_relation_ship,
+                this_page,
+                next_page,
+                &mut op_byte,
+            );
             match op {
                 Some(OpType::MERGE)
                 | Some(OpType::LOADBALANCE)
@@ -1287,6 +1305,7 @@ impl<T: MemPool> FosterBtree<T> {
                     let foster_page = self.read_page(foster_page_key);
                     // Now we have two locks. We need to release the lock of the current page.
                     let (op, this_page, foster_page) = self.modify_structure_if_needed_for_read(
+                        true,
                         this_page,
                         foster_page,
                         &mut op_byte,
@@ -1310,17 +1329,23 @@ impl<T: MemPool> FosterBtree<T> {
                     return Ok(this_page);
                 }
             }
-            let page_key = {
+            let (is_foster_relationship, page_key) = {
                 let slot_id = this_page.lower_bound_slot_id(&BTreeKey::new(key));
+                let is_foster_relationship =
+                    this_page.has_foster_child() && slot_id == this_page.foster_child_slot_id();
                 let page_id_bytes = this_page.get_val(slot_id);
                 let page_id = PageId::from_be_bytes(page_id_bytes.try_into().unwrap());
-                PageKey::new(self.c_key, page_id)
+                (is_foster_relationship, PageKey::new(self.c_key, page_id))
             };
 
             let next_page = self.read_page(page_key);
             // Now we have two locks. We need to release the lock of the current page.
-            let (op, this_page, next_page) =
-                self.modify_structure_if_needed_for_read(this_page, next_page, &mut op_byte);
+            let (op, this_page, next_page) = self.modify_structure_if_needed_for_read(
+                is_foster_relationship,
+                this_page,
+                next_page,
+                &mut op_byte,
+            );
             match op {
                 Some(OpType::MERGE)
                 | Some(OpType::LOADBALANCE)
@@ -1353,6 +1378,7 @@ impl<T: MemPool> FosterBtree<T> {
                     let foster_page = self.read_page(foster_page_key);
                     // Now we have two locks. We need to release the lock of the current page.
                     let (op, this_page, foster_page) = self.modify_structure_if_needed_for_read(
+                        true,
                         this_page,
                         foster_page,
                         &mut op_byte,
@@ -1385,17 +1411,23 @@ impl<T: MemPool> FosterBtree<T> {
                     }
                 }
             }
-            let page_key = {
+            let (is_foster_relationship, page_key) = {
                 let slot_id = this_page.lower_bound_slot_id(&BTreeKey::new(key));
+                let is_foster_relationship =
+                    this_page.has_foster_child() && slot_id == this_page.foster_child_slot_id();
                 let page_id_bytes = this_page.get_val(slot_id);
                 let page_id = PageId::from_be_bytes(page_id_bytes.try_into().unwrap());
-                PageKey::new(self.c_key, page_id)
+                (is_foster_relationship, PageKey::new(self.c_key, page_id))
             };
 
             let next_page = self.read_page(page_key);
             // Now we have two locks. We need to release the lock of the current page.
-            let (op, this_page, next_page) =
-                self.modify_structure_if_needed_for_read(this_page, next_page, &mut op_byte);
+            let (op, this_page, next_page) = self.modify_structure_if_needed_for_read(
+                is_foster_relationship,
+                this_page,
+                next_page,
+                &mut op_byte,
+            );
             match op {
                 Some(OpType::MERGE)
                 | Some(OpType::LOADBALANCE)
