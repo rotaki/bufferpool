@@ -750,13 +750,10 @@ impl FosterBtreePage for Page {
     /// is less than or equal to the given key. Then, shift the slots to the right starting from
     /// slot_id + 1 to the end of the slots. Finally, insert the new key at slot_id + 1.
     fn lower_bound_slot_id(&self, key: &BTreeKey) -> u16 {
-        if !self.inside_range(key) {
-            panic!(
-                "key is out of the range of the page: {:?}, range: {:?}",
-                key,
-                self.range()
-            );
-        }
+        debug_assert!(
+            self.inside_range(key),
+            "key is out of the range of the page"
+        );
         // Binary search returns the left-most slot_id where the key is greater than the given key.
         let slot_id = self.binary_search(|slot_key| *key < slot_key);
         assert!(self.low_fence_slot_id() + 1 <= slot_id && slot_id <= self.high_fence_slot_id());
@@ -770,9 +767,10 @@ impl FosterBtreePage for Page {
     /// key: search key
     ///  It must be in the range of the page. i.e. low_fence <= key < high_fence
     fn find_slot_id(&self, key: &BTreeKey) -> Option<u16> {
-        if !self.inside_range(key) {
-            panic!("key is out of the range of the page");
-        }
+        debug_assert!(
+            self.inside_range(key),
+            "key is out of the range of the page"
+        );
         // Binary search returns the left-most slot_id where the key is greater than the given key.
         let slot_id = self.binary_search(|slot_key| *key < slot_key);
         assert!(self.low_fence_slot_id() + 1 <= slot_id && slot_id <= self.high_fence_slot_id());
@@ -790,9 +788,7 @@ impl FosterBtreePage for Page {
             self.set_left_most(true)
         }
         let res = self.update_at(self.low_fence_slot_id(), key, &[]);
-        if res == false {
-            panic!("Failed to set the low fence");
-        }
+        assert!(res);
     }
 
     /// Set the high fence of the page.
@@ -802,9 +798,7 @@ impl FosterBtreePage for Page {
             self.set_right_most(true)
         }
         let res = self.update_at(self.high_fence_slot_id(), key, &[]);
-        if res == false {
-            panic!("Failed to set the high fence");
-        }
+        assert!(res);
     }
 
     /// Insert a key-value-pair at slot_id.
