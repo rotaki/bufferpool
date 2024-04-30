@@ -1,6 +1,7 @@
 use crate::page::{Page, PAGE_SIZE};
 
 // Page layout:
+// 2 byte: total bytes used (slots + records)
 // 1 byte: flags (is_root, leftmost, rightmost, has_foster_children)
 // 1 byte: level (0 for leaf)
 // 2 byte: slot count (generally >=2  because of low and high fences)
@@ -106,7 +107,7 @@ mod slot {
 }
 
 use crate::{log, log_trace};
-pub const PAGE_HEADER_SIZE: usize = 6;
+pub const PAGE_HEADER_SIZE: usize = 8;
 use slot::{Slot, SLOT_SIZE};
 
 pub enum BTreeKey<'a> {
@@ -197,11 +198,6 @@ pub trait FosterBtreePage {
     fn slot(&self, slot_id: u16) -> Option<Slot>;
     fn append_slot(&mut self, slot: &Slot);
     fn update_slot(&mut self, slot_id: u16, slot: &Slot);
-    fn contiguous_free_space(&self) -> u16;
-    fn total_free_space(&self) -> u16;
-    fn total_bytes_used(&self) -> u16;
-    fn bytes_used(&self, range: std::ops::Range<u16>) -> u16;
-    fn bytes_needed(&self, key: &[u8], value: &[u8]) -> u16;
     fn linear_search<F>(&self, f: F) -> u16
     where
         F: Fn(BTreeKey) -> bool;
@@ -218,6 +214,10 @@ pub trait FosterBtreePage {
     fn compact_space(&mut self);
 
     // Header operations
+    fn total_free_space(&self) -> u16;
+    fn total_bytes_used(&self) -> u16;
+    fn bytes_used(&self, range: std::ops::Range<u16>) -> u16;
+    fn bytes_needed(&self, key: &[u8], value: &[u8]) -> u16;
     fn is_root(&self) -> bool;
     fn set_root(&mut self, is_root: bool);
     fn is_leaf(&self) -> bool;
@@ -238,6 +238,7 @@ pub trait FosterBtreePage {
     fn decrement_slot_count(&mut self);
     fn rec_start_offset(&self) -> u16;
     fn set_rec_start_offset(&mut self, rec_start_offset: u16);
+    fn contiguous_free_space(&self) -> u16;
 
     // Page operations
     fn init(&mut self);
@@ -282,79 +283,110 @@ impl FosterBtreePage for Page {
         self.len()
     }
 
+    fn total_free_space(&self) -> u16 {
+        self.len() as u16 - self.total_bytes_used()
+    }
+
+    fn total_bytes_used(&self) -> u16 {
+        let mut sum_used = PAGE_HEADER_SIZE;
+        for i in 0..self.slot_count() {
+            let slot = self.slot(i).unwrap();
+            sum_used += slot.key_size() as usize + slot.value_size() as usize;
+            sum_used += SLOT_SIZE;
+        }
+        sum_used as u16
+    }
+
+    fn bytes_used(&self, range: std::ops::Range<u16>) -> u16 {
+        // Check if the range is valid
+        if range.end > self.slot_count() {
+            panic!("Invalid range");
+        }
+        let mut sum_used = 0;
+        for i in range {
+            let slot = self.slot(i).unwrap();
+            sum_used += slot.key_size() as usize + slot.value_size() as usize;
+            sum_used += SLOT_SIZE;
+        }
+        sum_used as u16
+    }
+
+    fn bytes_needed(&self, key: &[u8], value: &[u8]) -> u16 {
+        (key.len() + value.len() + SLOT_SIZE) as u16
+    }
     fn is_root(&self) -> bool {
-        self[0] & 0b1000_0000 != 0
+        self[2] & 0b1000_0000 != 0
     }
 
     fn set_root(&mut self, is_root: bool) {
         if is_root {
-            self[0] |= 0b1000_0000;
+            self[2] |= 0b1000_0000;
         } else {
-            self[0] &= 0b0111_1111;
+            self[2] &= 0b0111_1111;
         }
     }
 
     fn is_leaf(&self) -> bool {
-        self[1] == 0
+        self.level() == 0
     }
 
     fn is_left_most(&self) -> bool {
-        self[0] & 0b0100_0000 != 0
+        self[2] & 0b0100_0000 != 0
     }
 
     fn set_left_most(&mut self, is_left_most: bool) {
         if is_left_most {
-            self[0] |= 0b0100_0000;
+            self[2] |= 0b0100_0000;
         } else {
-            self[0] &= 0b1011_1111;
+            self[2] &= 0b1011_1111;
         }
     }
 
     fn is_right_most(&self) -> bool {
-        self[0] & 0b0010_0000 != 0
+        self[2] & 0b0010_0000 != 0
     }
 
     fn set_right_most(&mut self, is_right_most: bool) {
         if is_right_most {
-            self[0] |= 0b0010_0000;
+            self[2] |= 0b0010_0000;
         } else {
-            self[0] &= 0b1101_1111;
+            self[2] &= 0b1101_1111;
         }
     }
 
     fn has_foster_child(&self) -> bool {
-        self[0] & 0b0001_0000 != 0
+        self[2] & 0b0001_0000 != 0
     }
 
     fn set_has_foster_child(&mut self, has_foster_child: bool) {
         if has_foster_child {
-            self[0] |= 0b0001_0000;
+            self[2] |= 0b0001_0000;
         } else {
-            self[0] &= 0b1110_1111;
+            self[2] &= 0b1110_1111;
         }
     }
 
     fn level(&self) -> u8 {
-        self[1]
+        self[3]
     }
 
     fn set_level(&mut self, level: u8) {
-        self[1] = level;
+        self[3] = level;
     }
 
     fn increment_level(&mut self) {
-        self[1] += 1; // Towards the root
+        self[3] += 1; // Towards the root
     }
 
     fn decrement_level(&mut self) {
-        self[1] -= 1; // Towards the leaf
+        self[3] -= 1; // Towards the leaf
     }
 
     /// The number of slots in the page.
     /// The low fence and high fence are always present.
     /// Therefore, the slot count should be at least 2 after the initialization.
     fn slot_count(&self) -> u16 {
-        u16::from_be_bytes([self[2], self[3]])
+        u16::from_be_bytes([self[4], self[5]])
     }
 
     /// The number of active slots in the page.
@@ -366,8 +398,8 @@ impl FosterBtreePage for Page {
 
     fn set_slot_count(&mut self, slot_count: u16) {
         let bytes = slot_count.to_be_bytes();
-        self[2] = bytes[0];
-        self[3] = bytes[1];
+        self[4] = bytes[0];
+        self[5] = bytes[1];
     }
 
     fn increment_slot_count(&mut self) {
@@ -381,13 +413,19 @@ impl FosterBtreePage for Page {
     }
 
     fn rec_start_offset(&self) -> u16 {
-        u16::from_be_bytes([self[4], self[5]])
+        u16::from_be_bytes([self[6], self[7]])
     }
 
     fn set_rec_start_offset(&mut self, rec_start_offset: u16) {
         let bytes = rec_start_offset.to_be_bytes();
-        self[4] = bytes[0];
-        self[5] = bytes[1];
+        self[6] = bytes[0];
+        self[7] = bytes[1];
+    }
+
+    fn contiguous_free_space(&self) -> u16 {
+        let next_slot_offset = self.slot_offset(self.slot_count());
+        let rec_start_offset = self.rec_start_offset();
+        rec_start_offset - next_slot_offset as u16
     }
 
     fn get_id(&self) -> u32 {
@@ -433,44 +471,6 @@ impl FosterBtreePage for Page {
         // Update the header
         let offset = self.rec_start_offset().min(slot.offset());
         self.set_rec_start_offset(offset);
-    }
-
-    fn contiguous_free_space(&self) -> u16 {
-        let next_slot_offset = self.slot_offset(self.slot_count());
-        let rec_start_offset = self.rec_start_offset();
-        rec_start_offset - next_slot_offset as u16
-    }
-
-    fn total_free_space(&self) -> u16 {
-        self.len() as u16 - self.total_bytes_used()
-    }
-
-    fn total_bytes_used(&self) -> u16 {
-        let mut sum_used = PAGE_HEADER_SIZE;
-        for i in 0..self.slot_count() {
-            let slot = self.slot(i).unwrap();
-            sum_used += slot.key_size() as usize + slot.value_size() as usize;
-            sum_used += SLOT_SIZE;
-        }
-        sum_used as u16
-    }
-
-    fn bytes_used(&self, range: std::ops::Range<u16>) -> u16 {
-        // Check if the range is valid
-        if range.end > self.slot_count() {
-            panic!("Invalid range");
-        }
-        let mut sum_used = 0;
-        for i in range {
-            let slot = self.slot(i).unwrap();
-            sum_used += slot.key_size() as usize + slot.value_size() as usize;
-            sum_used += SLOT_SIZE;
-        }
-        sum_used as u16
-    }
-
-    fn bytes_needed(&self, key: &[u8], value: &[u8]) -> u16 {
-        (key.len() + value.len() + SLOT_SIZE) as u16
     }
 
     // Find the left-most key where f(key) = true.
