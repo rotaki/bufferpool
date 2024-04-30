@@ -2779,11 +2779,11 @@ mod tests {
         let btree = setup_inmem_btree_empty();
 
         // Write kvs to file
-        let kvs_file = "kvs.dat";
-        // serde cbor to write to file
-        let mut file = File::create(kvs_file).unwrap();
-        let kvs_str = serde_cbor::to_vec(&kvs).unwrap();
-        file.write_all(&kvs_str).unwrap();
+        // let kvs_file = "kvs.dat";
+        // // serde cbor to write to file
+        // let mut file = File::create(kvs_file).unwrap();
+        // let kvs_str = serde_cbor::to_vec(&kvs).unwrap();
+        // file.write_all(&kvs_str).unwrap();
 
         for (i, (key, val)) in kvs.iter().enumerate() {
             println!(

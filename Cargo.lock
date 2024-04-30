@@ -51,21 +51,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed570934406eb16438a4e976b1b4500774099c13b8cb96eec99f620f05090ddf"
 
 [[package]]
-name = "bp"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "criterion",
- "getrandom",
- "lazy_static",
- "rand",
- "serde",
- "serde_cbor",
- "tempfile",
- "wasm-bindgen",
-]
-
-[[package]]
 name = "bumpalo"
 version = "3.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -249,6 +234,21 @@ name = "fastrand"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "25cbce373ec4653f1a01a31e8a5e5ec0c622dc27ff9c4e6606eefef5cbbed4a5"
+
+[[package]]
+name = "foster_btree"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "criterion",
+ "getrandom",
+ "lazy_static",
+ "rand",
+ "serde",
+ "serde_cbor",
+ "tempfile",
+ "wasm-bindgen",
+]
 
 [[package]]
 name = "getrandom"

@@ -6,7 +6,7 @@ use std::{
     thread,
 };
 
-use bp::{
+use foster_btree::{
     buffer_pool::prelude::{ContainerKey, InMemPool, MemPool},
     foster_btree::{FosterBtree, FosterBtreePage},
     log, log_trace,

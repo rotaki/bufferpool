@@ -1,5 +1,5 @@
 [package]
-name = "bp"
+name = "foster_btree"
 version = "0.1.0"
 edition = "2021"
 
@@ -39,4 +39,4 @@ harness = false
 lto = true
 panic = "abort"
 codegen-units = 1
-# debug = true # for perf
+# debug = true # For perf

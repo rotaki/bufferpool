@@ -8,7 +8,7 @@ use std::{
     thread,
 };
 
-use bp::{
+use foster_btree::{
     buffer_pool::prelude::{ContainerKey, InMemPool, MemPool},
     foster_btree::{FosterBtree, FosterBtreePage},
     log, log_trace,
@@ -62,15 +62,15 @@ fn test_stress() {
         btree.insert(&key, val).unwrap();
     }
 
-    // for (key, val) in kvs.iter() {
-    //     println!(
-    //         "**************************** Getting key {} **************************",
-    //         key
-    //     );
-    //     let key = to_bytes(*key);
-    //     let current_val = btree.get_key(&key).unwrap();
-    //     assert_eq!(current_val, *val);
-    // }
+    for (key, val) in kvs.iter() {
+        println!(
+            "**************************** Getting key {} **************************",
+            key
+        );
+        let key = to_bytes(*key);
+        let current_val = btree.get_key(&key).unwrap();
+        assert_eq!(current_val, *val);
+    }
 }
 
 // skip default
@@ -123,10 +123,10 @@ fn replay_stress() {
 }
 
 fn main() {
-    // println!("Running stress test");
-    // for _ in 0..100 {
-    //     test_stress();
-    // }
-    // println!("SUCCESS");
-    replay_stress();
+    println!("Running stress test");
+    for _ in 0..100 {
+        test_stress();
+    }
+    println!("SUCCESS");
+    // replay_stress();
 }
