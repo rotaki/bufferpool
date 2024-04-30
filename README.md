@@ -12,6 +12,13 @@
 
 ## Foster B-Tree
 * [x] Add Foster B-tree Page
+  * [] Add remove operator
+  * [] Add upsert operator
+  * [] Add range scan operator
+    * [] Add consistency checker
+  * [] Add statistics for each structure modification
+  * [] Add prefix compression in pages
+  * [] Add page split into three pages
 
 ## Add Logging
 * [x] Add log buffer with append and flush capabilities

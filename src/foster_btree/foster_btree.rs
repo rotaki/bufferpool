@@ -348,11 +348,12 @@ fn balance(this: &mut Page, foster_child: &mut Page) {
             }
             // Remove the moved slots from this
             this.remove_range(moving_slot_ids[0], this.high_fence_slot_id());
-            this.insert(
+            let res = this.insert(
                 &foster_child.get_raw_key(0),
                 &foster_child.get_id().to_be_bytes(),
                 false,
             );
+            assert!(res);
         } else {
             // Move some slots from foster child to this.
             let mut diff = (foster_child_total - this_total) / 2;
@@ -396,7 +397,8 @@ fn balance(this: &mut Page, foster_child: &mut Page) {
             );
             let foster_key = foster_child.get_raw_key(1).to_vec();
             foster_child.set_low_fence(&foster_key);
-            this.insert(&foster_key, &foster_child.get_id().to_be_bytes(), false);
+            let res = this.insert(&foster_key, &foster_child.get_id().to_be_bytes(), false);
+            assert!(res);
         }
     }
 }
@@ -447,6 +449,9 @@ fn split_insert(this: &mut Page, foster_child: &mut Page, key: &[u8], value: &[u
                     break;
                 }
             }
+            if moving_kvs.is_empty() {
+                panic!("Page is full but cannot split because the slots are too large")
+            }
             moving_kvs.reverse();
             foster_child.init();
             foster_child.set_level(this.level());
@@ -455,6 +460,7 @@ fn split_insert(this: &mut Page, foster_child: &mut Page, key: &[u8], value: &[u
             foster_child.set_right_most(this.is_right_most());
             let res = foster_child.append_sorted(&moving_kvs);
             assert!(res);
+            foster_child.set_has_foster_child(this.has_foster_child());
             let res = foster_child.insert(key, value, false);
             assert!(res);
             this.set_has_foster_child(true);
@@ -467,113 +473,76 @@ fn split_insert(this: &mut Page, foster_child: &mut Page, key: &[u8], value: &[u
             return;
         }
     } else {
-        // [l, r1, r2, ..., rN, h] and we want to split the page into two and insert the key-value pair.
-        // We need to decide two things:
-        // 1. The foster key that separates the two pages.
-        // 2. Which page should we insert the key into.
-        //    If we insert x into the first page, the foster key must be greater than x.
-        //    If we insert x into the second page, the foster key must be less than or equal to x.
-        // We first temporarily separate the pages into two pages based on lower bound + 1 of the key
-        // and see if the key can be inserted into one of the pages. If not, we need 3 pages to insert the key.
-        let page_size = (this.page_size() - PAGE_HEADER_SIZE) as u16;
-        let bytes_needed = this.bytes_needed(key, value);
-        let size_before_slot_id = this.bytes_used(0..slot_id);
-        let size_after_slot_id = this.bytes_used(slot_id..this.slot_count());
-        // If we insert x into the first page: rk is the lower bound of the inserting key.
-        // This: [l, r1, r2, ..., rk, x, ..., (f)rn, h]
-        // Foster: [rn, rn+1, ..., h]
-        // If we insert x into the second page:
-        // This: [l, r1, r2, ..., rm-1, (f)rm h]
-        // Foster: [rm, rm+1, ..., rk, x, ..., h]
-
-        // We first check if one of the two above can work. Otherwise, we need to split the page into three.
-        // If we insert x into the first page: rk is the lower bound of the inserting key.
-        // This : [l, r1, r2, ..., rk, x,(f)rk+1, h]
-        // child: [l(rk+1), rk+1 rk+2, ..., h]
-        {
-            let foster_key = this.get_raw_key(slot_id).to_vec(); // rk+1
-            let foster_slot_size = this.bytes_needed(&foster_key, &PageId::default().to_be_bytes());
-            let high_fence_size =
-                this.bytes_needed(this.get_raw_key(this.high_fence_slot_id()), &[]);
-            let this_size = size_before_slot_id + bytes_needed + foster_slot_size + high_fence_size;
-
-            let lower_fence = this.bytes_needed(&foster_key, &[]);
-            let foster_child_size = lower_fence + size_after_slot_id;
-
-            if this_size <= page_size && foster_child_size <= page_size {
-                // We can insert the key into the first page.
-                foster_child.init();
-                foster_child.set_level(this.level());
-                foster_child.set_low_fence(&foster_key);
-                foster_child.set_high_fence(this.get_raw_key(this.high_fence_slot_id()));
-                foster_child.set_right_most(this.is_right_most());
-                foster_child.set_has_foster_child(this.has_foster_child());
-                let mut kvs = Vec::new();
-                for i in slot_id..=this.active_slot_count() {
-                    let key = this.get_raw_key(i);
-                    let val = this.get_val(i);
-                    kvs.push((key, val));
-                }
-                let res = foster_child.append_sorted(&kvs);
-                assert!(res);
-                this.remove_range(slot_id, this.high_fence_slot_id());
-                this.set_has_foster_child(true);
-                let res = this.insert(key, value, false); // Insert the key into the first page
-                assert!(res);
-                let res = this.insert(&foster_key, &foster_child.get_id().to_be_bytes(), false); // Insert the foster key
-                assert!(res);
-                return;
+        // The page is full and we need to split the page.
+        // First, we split the page into two pages with (almost) equal sizes.
+        let total_size = this.total_bytes_used();
+        let mut half_bytes = total_size / 2;
+        let mut moving_slot_ids = Vec::new();
+        let mut moving_kvs = Vec::new();
+        for i in (1..this.high_fence_slot_id()).rev() {
+            let key = this.get_raw_key(i);
+            let val = this.get_val(i);
+            let bytes_needed = this.bytes_needed(key, val);
+            if half_bytes >= bytes_needed {
+                half_bytes -= bytes_needed;
+                moving_slot_ids.push(i);
+                moving_kvs.push((key, val));
+            } else {
+                break;
             }
         }
-        // If we insert x into the second page:
-        // This: [l, r1, r2, ..., rk, (f)x h]
-        // Foster: [l(x), x, rk+1, rk+2, ..., h]
-        {
-            let foster_slot_size = this.bytes_needed(key, &PageId::default().to_be_bytes());
-            let high_fence_size =
-                this.bytes_needed(this.get_raw_key(this.high_fence_slot_id()), &[]);
-            let this_size = size_before_slot_id + foster_slot_size + high_fence_size;
-
-            let lower_fence = this.bytes_needed(key, &[]);
-            let foster_child_size = lower_fence + bytes_needed + size_after_slot_id;
-
-            if this_size <= page_size && foster_child_size <= page_size {
-                // We can insert the key into the second page.
-                foster_child.init();
-                foster_child.set_level(this.level());
-                foster_child.set_low_fence(key);
-                foster_child.set_high_fence(this.get_raw_key(this.high_fence_slot_id()));
-                foster_child.set_right_most(this.is_right_most());
-                foster_child.set_has_foster_child(this.has_foster_child());
-                let mut kvs = Vec::new();
-                kvs.push((key, value));
-                for i in slot_id..=this.active_slot_count() {
-                    let key = this.get_raw_key(i);
-                    let val = this.get_val(i);
-                    kvs.push((key, val));
-                }
-                let res = foster_child.append_sorted(&kvs);
-                assert!(res);
-                this.remove_range(slot_id, this.high_fence_slot_id());
-                this.set_has_foster_child(true);
-                let res = this.insert(key, &foster_child.get_id().to_be_bytes(), false); // Insert the foster key
-                assert!(res);
-                return;
-            }
+        if moving_kvs.is_empty() {
+            panic!("Page is full but cannot split because the slots are too large");
         }
-        // There are some tricky cases where insertion causes the page to split into three pages.
-        // E.g. Page has capacity of 6 and the current page looks like this:
-        // [[xxx],[zzz]]
-        // We want to insert [yyyy]
-        // None of [[xxx],[yyyy]] or [[zzz],[yyyy]] can work.
-        // We need to split the page into three pages.
-        // [[xxx]], [[yyyy]], [[zzz]]
 
-        // If we cannot insert the key into one of the pages, then we need to split the page into three.
-        // This: [l, r1, r2, ..., rk, (f)x h]
-        // Foster1: [l(x), x, (f)rk+1, h]
-        // Foster2: [l(rk+1), rk+1, rk+2, ..., h]
-        unimplemented!("Need to split the page into three")
+        // Reverse the moving slots
+        moving_kvs.reverse();
+        moving_slot_ids.reverse();
+
+        let foster_key = moving_kvs[0].0.to_vec();
+
+        foster_child.init();
+        foster_child.set_level(this.level());
+        foster_child.set_low_fence(&foster_key);
+        foster_child.set_high_fence(this.get_raw_key(this.high_fence_slot_id()));
+        foster_child.set_right_most(this.is_right_most());
+        let res = foster_child.append_sorted(&moving_kvs);
+        assert!(res);
+        foster_child.set_has_foster_child(this.has_foster_child());
+        // Remove the moved slots from this
+        this.remove_range(moving_slot_ids[0], this.high_fence_slot_id());
+        let res = this.insert(&foster_key, &foster_child.get_id().to_be_bytes(), false);
+        assert!(res);
+        this.set_has_foster_child(true);
+
+        // Now, we have two pages: this and foster_child.
+        // We need to decide which page to insert the key-value pair.
+        // If the key is less than the foster key, we insert the key into this.
+        // Otherwise, we insert the key into the foster child.
+        let res = if key < &foster_key {
+            this.insert(key, value, false)
+        } else {
+            foster_child.insert(key, value, false)
+        };
+
+        if res {
+            return;
+        } else {
+            // Need to split the page into three
+            // There are some tricky cases where insertion causes the page to split into three pages.
+            // E.g. Page has capacity of 6 and the current page looks like this:
+            // [[xxx],[zzz]]
+            // We want to insert [yyyy]
+            // None of [[xxx],[yyyy]] or [[zzz],[yyyy]] can work.
+            // We need to split the page into three pages.
+            // [[xxx]], [[yyyy]], [[zzz]]
+
+            // If we cannot insert the key into one of the pages, then we need to split the page into three.
+            // This: [l, r1, r2, ..., rk, (f)x h]
+            // Foster1: [l(x), x, (f)rk+1, h]
+            // Foster2: [l(rk+1), rk+1, rk+2, ..., h]
+            unimplemented!("Need to split the page into three")
+        }
     }
 }
 
@@ -1291,7 +1260,6 @@ impl<T: MemPool> FosterBtree<T> {
         }
     }
 
-    #[cfg(any(test, debug_assertions))]
     fn debug_traverse_to_leaf_for_read(&self, key: &[u8]) -> Result<FrameReadGuard, TreeStatus> {
         let mut current_page = self.read_page(self.root_key);
         let mut op_byte = OpByte::new();
@@ -1364,7 +1332,6 @@ impl<T: MemPool> FosterBtree<T> {
         }
     }
 
-    #[cfg(any(test, debug_assertions))]
     fn debug_traverse_to_leaf_for_write(&self, key: &[u8]) -> Result<FrameWriteGuard, TreeStatus> {
         let mut current_page = self.read_page(self.root_key);
         let mut op_byte = OpByte::new();
@@ -1446,8 +1413,7 @@ impl<T: MemPool> FosterBtree<T> {
         }
     }
 
-    #[cfg(any(test, debug_assertions))]
-    fn debug_insert(&self, key: &[u8], value: &[u8]) -> Result<(), TreeStatus> {
+    pub fn debug_insert(&self, key: &[u8], value: &[u8]) -> Result<(), TreeStatus> {
         let base = Duration::from_millis(1);
         let mut attmepts = 0;
         let mut leaf_page = {
@@ -1483,7 +1449,6 @@ impl<T: MemPool> FosterBtree<T> {
         }
     }
 
-    #[cfg(any(test, debug_assertions))]
     fn debug_get_key(&self, key: &[u8]) -> Result<Vec<u8>, TreeStatus> {
         let foster_page = self.debug_traverse_to_leaf_for_read(key)?;
         let slot_id = foster_page.lower_bound_slot_id(&BTreeKey::new(key));
@@ -2791,7 +2756,7 @@ mod tests {
                 i
             );
             let key = to_bytes(*i);
-            btree.insert(&key, &val).unwrap();
+            btree.debug_insert(&key, &val).unwrap();
         }
         for i in order.iter() {
             println!(
@@ -2813,35 +2778,33 @@ mod tests {
 
         let btree = setup_inmem_btree_empty();
 
-        /*
         // Write kvs to file
         let kvs_file = "kvs.dat";
         // serde cbor to write to file
         let mut file = File::create(kvs_file).unwrap();
         let kvs_str = serde_cbor::to_vec(&kvs).unwrap();
         file.write_all(&kvs_str).unwrap();
-        */
 
         for (i, (key, val)) in kvs.iter().enumerate() {
-            // println!(
-            //     "**************************** Inserting {} key={} **************************",
-            //     i, key
-            // );
+            println!(
+                "**************************** Inserting {} key={} **************************",
+                i, key
+            );
             let key = to_bytes(*key);
             btree.insert(&key, val).unwrap();
         }
 
         for (key, val) in kvs.iter() {
-            // println!(
-            //     "**************************** Getting key {} **************************",
-            //     key
-            // );
+            println!(
+                "**************************** Getting key {} **************************",
+                key
+            );
             let key = to_bytes(*key);
             let current_val = btree.get_key(&key).unwrap();
             assert_eq!(current_val, *val);
         }
 
-        // println!("SUCCESS");
+        println!("SUCCESS");
     }
 
     // skip default
@@ -2899,7 +2862,7 @@ mod tests {
     fn test_parallel_insertion() {
         // init_test_logger();
         let btree = Arc::new(setup_inmem_btree_empty());
-        let num_keys = 1000;
+        let num_keys = 5000;
         let val_min_size = 50;
         let val_max_size = 100;
         let kvs = Arc::new(RandomKVs::new(num_keys, val_min_size, val_max_size));

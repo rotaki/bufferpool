@@ -88,7 +88,7 @@ fn bench_random_insertion(c: &mut Criterion) {
     let kvs = Arc::new(kvs);
 
     let mut group = c.benchmark_group("Random Insertion");
-    group.sample_size(10);
+    // group.sample_size(10);
 
     group.bench_function("Foster BTree Insertion", |b| {
         b.iter(|| black_box(insert_into_foster_tree(&kvs)));
