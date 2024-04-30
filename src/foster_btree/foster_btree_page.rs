@@ -103,6 +103,10 @@ mod slot {
         pub fn set_value_size(&mut self, value_size: u16) {
             self.value_size = value_size;
         }
+
+        pub fn total_size(&self) -> u16 {
+            self.key_size + self.value_size + SLOT_SIZE as u16
+        }
     }
 }
 
@@ -216,6 +220,7 @@ pub trait FosterBtreePage {
     // Header operations
     fn total_free_space(&self) -> u16;
     fn total_bytes_used(&self) -> u16;
+    fn set_total_bytes_used(&mut self, total_bytes_used: u16);
     fn bytes_used(&self, range: std::ops::Range<u16>) -> u16;
     fn bytes_needed(&self, key: &[u8], value: &[u8]) -> u16;
     fn is_root(&self) -> bool;
@@ -269,6 +274,8 @@ pub trait FosterBtreePage {
     #[cfg(any(test, debug_assertions))]
     fn check_keys_are_sorted(&self);
     #[cfg(any(test, debug_assertions))]
+    fn check_total_bytes_used(&self);
+    #[cfg(any(test, debug_assertions))]
     fn check_fence_slots_exists(&self);
     #[cfg(any(test, debug_assertions))]
     fn check_rec_start_offset_match_slots(&self);
@@ -288,13 +295,13 @@ impl FosterBtreePage for Page {
     }
 
     fn total_bytes_used(&self) -> u16 {
-        let mut sum_used = PAGE_HEADER_SIZE;
-        for i in 0..self.slot_count() {
-            let slot = self.slot(i).unwrap();
-            sum_used += slot.key_size() as usize + slot.value_size() as usize;
-            sum_used += SLOT_SIZE;
-        }
-        sum_used as u16
+        u16::from_be_bytes([self[0], self[1]])
+    }
+
+    fn set_total_bytes_used(&mut self, total_bytes_used: u16) {
+        let bytes = total_bytes_used.to_be_bytes();
+        self[0] = bytes[0];
+        self[1] = bytes[1];
     }
 
     fn bytes_used(&self, range: std::ops::Range<u16>) -> u16 {
@@ -452,9 +459,16 @@ impl FosterBtreePage for Page {
     fn append_slot(&mut self, slot: &Slot) {
         // Increment the slot count and update the header
         let slot_id = self.slot_count();
+
         self.increment_slot_count();
-        // Update the slot (rec_start_offset is updated in the update_slot function)
-        self.update_slot(slot_id, &slot);
+
+        // Update the slot
+        let slot_offset = self.slot_offset(slot_id);
+        self[slot_offset..slot_offset + SLOT_SIZE].copy_from_slice(&slot.to_bytes());
+
+        // Update the header
+        let offset = self.rec_start_offset().min(slot.offset());
+        self.set_rec_start_offset(offset);
     }
 
     /// Update the slot at slot_id.
@@ -637,6 +651,7 @@ impl FosterBtreePage for Page {
         self.set_level(0);
         self.set_slot_count(0);
         self.set_rec_start_offset(self.len() as u16);
+        self.set_total_bytes_used(PAGE_HEADER_SIZE as u16);
 
         // Insert low and high fence
         self.insert_at(0, &[], &[]);
@@ -651,6 +666,7 @@ impl FosterBtreePage for Page {
         self.set_level(0);
         self.set_slot_count(0);
         self.set_rec_start_offset(self.len() as u16);
+        self.set_total_bytes_used(PAGE_HEADER_SIZE as u16);
 
         // Insert low and high fence
         self.insert_at(0, &[], &[]);
@@ -831,6 +847,7 @@ impl FosterBtreePage for Page {
             // Insert the slot
             let slot = Slot::new(offset, key.len() as u16, value.len() as u16);
             self.append_slot(&slot);
+            self.set_total_bytes_used(self.total_bytes_used() + slot.total_size());
             assert!(self.slot_count() == slot_id + 1);
         } else {
             // Insert the key-value pair
@@ -853,6 +870,7 @@ impl FosterBtreePage for Page {
             // Update the header
             self.set_rec_start_offset(offset);
             self.increment_slot_count();
+            self.set_total_bytes_used(self.total_bytes_used() + slot.total_size());
         }
         true
     }
@@ -877,6 +895,9 @@ impl FosterBtreePage for Page {
             slot.set_key_size(key.len() as u16);
             slot.set_value_size(value.len() as u16);
             self.update_slot(slot_id, &slot);
+            self.set_total_bytes_used(
+                self.total_bytes_used() - old_rec_size as u16 + new_rec_size as u16,
+            );
             return true;
         }
 
@@ -898,6 +919,9 @@ impl FosterBtreePage for Page {
         // Update the slot
         let new_slot = Slot::new(offset, key.len() as u16, value.len() as u16);
         self.update_slot(slot_id, &new_slot);
+        self.set_total_bytes_used(
+            self.total_bytes_used() - old_rec_size as u16 + new_rec_size as u16,
+        );
         true
     }
 
@@ -924,14 +948,22 @@ impl FosterBtreePage for Page {
         } else if start > end {
             panic!("Slot does not exist at the given slot_id");
         } else if start == end {
+            self.set_total_bytes_used(
+                self.total_bytes_used() - self.slot(slot_id).unwrap().total_size(),
+            );
             // No need to shift slots if start == end. Just decrement the slot_count of the page.
             self.decrement_slot_count();
         } else {
+            self.set_total_bytes_used(
+                self.total_bytes_used() - self.slot(slot_id).unwrap().total_size(),
+            );
+
             // Shift the slots to the left by 1
             let data = self[start..end].to_vec();
             let new_start = start - SLOT_SIZE as usize;
             let new_end = end - SLOT_SIZE as usize;
             self[new_start..new_end].copy_from_slice(&data);
+
             // Update the slot_count of the page
             self.decrement_slot_count();
         }
@@ -1058,6 +1090,7 @@ impl FosterBtreePage for Page {
 
         // Update the header
         self.set_rec_start_offset(offset);
+        self.set_total_bytes_used(self.total_bytes_used() + inserting_size as u16);
 
         true
     }
@@ -1090,12 +1123,17 @@ impl FosterBtreePage for Page {
         // [ [slot1][slot5][slot6] ]
         //
 
+        for i in from..to {
+            self.set_total_bytes_used(self.total_bytes_used() - self.slot(i).unwrap().total_size());
+        }
+
         let start = self.slot_offset(to);
         let end = self.slot_offset(self.slot_count());
         let data = self[start..end].to_vec();
         let new_start = start - (to - from) as usize * SLOT_SIZE;
         let new_end = end - (to - from) as usize * SLOT_SIZE;
         self[new_start..new_end].copy_from_slice(&data);
+
         // Update the slot_count of the page
         for _ in from..to {
             self.decrement_slot_count();
@@ -1106,6 +1144,7 @@ impl FosterBtreePage for Page {
     fn run_consistency_checks(&self, include_no_garbage_checks: bool) {
         self.check_keys_are_sorted();
         self.check_fence_slots_exists();
+        self.check_total_bytes_used();
         if include_no_garbage_checks {
             self.check_rec_start_offset_match_slots();
             self.check_ideal_space_usage();
@@ -1129,6 +1168,16 @@ impl FosterBtreePage for Page {
                 assert!(key1 < key2);
             }
         }
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    fn check_total_bytes_used(&self) {
+        let mut sum_used = PAGE_HEADER_SIZE;
+        for i in 0..self.slot_count() {
+            let slot = self.slot(i).unwrap();
+            sum_used += slot.total_size() as usize;
+        }
+        assert_eq!(sum_used, self.total_bytes_used() as usize);
     }
 
     #[cfg(any(test, debug_assertions))]
