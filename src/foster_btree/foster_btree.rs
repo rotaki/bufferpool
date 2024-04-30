@@ -114,10 +114,12 @@ pub const MIN_BYTES_USED: usize = (PAGE_SIZE - BASE_PAGE_HEADER_SIZE) / 5;
 // If the page has more than MAX_BYTES_USED, then we need to LOADBALANCE.
 pub const MAX_BYTES_USED: usize = (PAGE_SIZE - BASE_PAGE_HEADER_SIZE) * 4 / 5;
 
+#[inline]
 fn is_small(page: &Page) -> bool {
     (page.total_bytes_used() as usize) < MIN_BYTES_USED
 }
 
+#[inline]
 fn is_large(page: &Page) -> bool {
     (page.total_bytes_used() as usize) >= MAX_BYTES_USED
 }
@@ -224,19 +226,20 @@ fn should_adopt(this: &Page, child: &Page) -> bool {
     if !child.has_foster_child() {
         return false;
     }
-    if this.total_free_space()
-        < this.bytes_needed(
-            &child.get_foster_key(),
-            &child.get_foster_page_id().to_be_bytes(),
-        )
-    {
-        return false;
-    }
     // We want to do anti-adoption as less as possible.
     // Therefore, if child will need merge or load balance, we prioritize them over adoption.
     // If this is large, there is a high chance that the parent will need to split when adopting the foster child.
     // If child is small, there is a high chance that the parent will need to merge or load balance.
     if is_large(this) || is_small(child) {
+        return false;
+    }
+    if this.total_free_space()
+        < this.bytes_needed(
+            &child.get_foster_key(),
+            PageId::default().to_be_bytes().as_ref(),
+        )
+    {
+        // If the parent page does not have enough space to adopt the foster child, then we do not adopt.
         return false;
     }
     true
@@ -246,6 +249,10 @@ fn should_antiadopt(this: &Page, child: &Page) -> bool {
     debug_assert!(is_parent_and_child(this, child));
     debug_assert!(!is_foster_relationship(this, child));
     if child.has_foster_child() {
+        return false;
+    }
+    if !is_small(child) {
+        // If child is not small, there is no need to antiadopt because the child will not need to merge or load balance.
         return false;
     }
     let low_key = BTreeKey::new(&child.get_raw_key(child.low_fence_slot_id()));
@@ -258,11 +265,6 @@ fn should_antiadopt(this: &Page, child: &Page) -> bool {
         if slot_id + 1 >= this.high_fence_slot_id() {
             return false;
         }
-    }
-
-    if !is_small(child) {
-        // If child is not small, there is no need to antiadopt because the child will not need to merge or load balance.
-        return false;
     }
 
     true
@@ -290,8 +292,8 @@ fn should_root_descend(this: &Page, child: &Page) -> bool {
         return false;
     }
     // Same low fence and high fence
-    assert_eq!(this.get_low_fence(), child.get_low_fence());
-    assert_eq!(this.get_high_fence(), child.get_high_fence());
+    debug_assert_eq!(this.get_low_fence(), child.get_low_fence());
+    debug_assert_eq!(this.get_high_fence(), child.get_high_fence());
     true
 }
 
@@ -565,13 +567,10 @@ fn merge(this: &mut Page, foster_child: &mut Page) {
     }
     this.remove_at(this.foster_child_slot_id());
     let res = this.append_sorted(&kvs);
-    if res {
-        this.set_has_foster_child(foster_child.has_foster_child());
-        foster_child.remove_range(1, foster_child.high_fence_slot_id());
-        foster_child.set_has_foster_child(false);
-    } else {
-        panic!("Not enough space to merge the foster child");
-    }
+    assert!(res);
+    this.set_has_foster_child(foster_child.has_foster_child());
+    foster_child.remove_range(1, foster_child.high_fence_slot_id());
+    foster_child.set_has_foster_child(false);
 
     #[cfg(debug_assertions)]
     {
@@ -612,17 +611,12 @@ fn adopt(parent: &mut Page, child: &mut Page) {
     let foster_child_page_id = child.get_foster_page_id();
 
     // Try insert into parent page.
-    let inserted = parent.insert(&foster_key, &foster_child_page_id.to_be_bytes(), false);
-
-    if inserted {
-        // Remove the foster key from the child page.
-        child.remove_at(foster_child_slot_id);
-        child.set_has_foster_child(false);
-        child.set_high_fence(foster_key.as_ref());
-    } else {
-        // Need to split the parent page.
-        panic!("Need to split the parent page");
-    }
+    let res = parent.insert(&foster_key, &foster_child_page_id.to_be_bytes(), false);
+    assert!(res);
+    // Remove the foster key from the child page.
+    child.remove_at(foster_child_slot_id);
+    child.set_has_foster_child(false);
+    child.set_high_fence(foster_key.as_ref());
 }
 
 /// Anti-adopt.

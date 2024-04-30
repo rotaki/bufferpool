@@ -62,30 +62,26 @@ Inserting to a Foster BTree and BTreeMap with 100000 keys and values of size 50-
 
 
 ```
-     Running benches/random_insert.rs (target/release/deps/random_insert-e8a151c04c64f10c)
-Gnuplot not found, using plotters backend
-Benchmarking Random Insertion/Foster BTree Insertion: Collecting 10 samples in estimated 7.525
 Random Insertion/Foster BTree Insertion
-                        time:   [66.547 ms 66.878 ms 67.419 ms]
-                        change: [-0.8256% +0.8573% +4.1165%] (p = 0.34 > 0.05)
-                        No change in performance detected.
-Found 1 outliers among 10 measurements (10.00%)
-  1 (10.00%) high severe
-Benchmarking Random Insertion/Foster BTree Insertion Parallel: Collecting 10 samples in estima
+                        time:   [57.208 ms 57.569 ms 58.016 ms]
+                        change: [+0.1856% +1.5084% +2.6627%] (p = 0.02 < 0.05)
+                        Change within noise threshold.
+Found 11 outliers among 100 measurements (11.00%)
+  6 (6.00%) high mild
+  5 (5.00%) high severe
 Random Insertion/Foster BTree Insertion Parallel
-                        time:   [44.699 ms 44.897 ms 45.236 ms]
-                        change: [-29.710% -28.647% -27.603%] (p = 0.00 < 0.05)
+                        time:   [37.737 ms 38.064 ms 38.407 ms]
+                        change: [-6.7317% -5.6469% -4.5893%] (p = 0.00 < 0.05)
                         Performance has improved.
-Found 1 outliers among 10 measurements (10.00%)
-  1 (10.00%) low mild
-Benchmarking Random Insertion/BTreeMap Insertion: Collecting 10 samples in estimated 6.6681 s 
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
 Random Insertion/BTreeMap Insertion
-                        time:   [39.927 ms 40.194 ms 40.434 ms]
-                        change: [-2.2897% +0.8231% +5.8621%] (p = 0.65 > 0.05)
+                        time:   [39.303 ms 39.615 ms 39.963 ms]
+                        change: [-2.9857% -1.4908% -0.0292%] (p = 0.06 > 0.05)
                         No change in performance detected.
-Found 2 outliers among 10 measurements (20.00%)
-  1 (10.00%) low mild
-  1 (10.00%) high severe
+Found 17 outliers among 100 measurements (17.00%)
+  10 (10.00%) high mild
+  7 (7.00%) high severe
 ```
 
 
