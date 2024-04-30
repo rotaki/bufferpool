@@ -36,9 +36,33 @@ fn setup_inmem_btree_empty() -> FosterBtree<InMemPool> {
     btree
 }
 
+fn test_single_thread_insertion() {
+    let btree = setup_inmem_btree_empty();
+    let num_keys = 100000;
+    let val_min_size = 50;
+    let val_max_size = 100;
+
+    log_trace!("Generating {} keys into the tree", num_keys);
+    let kvs = RandomKVs::new(num_keys, val_min_size, val_max_size);
+    log_trace!("KVs generated");
+
+    for (k, v) in kvs.iter() {
+        let key = to_bytes(*k);
+        btree.insert(&key, v).unwrap();
+    }
+
+    /*
+    for (k, v) in kvs.iter() {
+        let key = to_bytes(*k);
+        let current_val = btree.get_key(&key).unwrap();
+        assert_eq!(current_val, *v);
+    }
+    */
+}
+
 fn test_parallel_insertion() {
     let btree = Arc::new(setup_inmem_btree_empty());
-    let num_keys = 10000;
+    let num_keys = 100000;
     let val_min_size = 50;
     let val_max_size = 100;
 
@@ -73,6 +97,7 @@ fn test_parallel_insertion() {
         },
     );
 
+    /*
     // Check if all keys have been inserted.
     for (key, val) in kvs.iter() {
         log_trace!("Checking key: {:?}", key);
@@ -80,9 +105,10 @@ fn test_parallel_insertion() {
         let current_val = btree.get_key(&key).unwrap();
         assert_eq!(current_val, *val);
     }
+    */
 }
 
 fn main() {
-    test_parallel_insertion();
-    println!("Parallel insertion tests passed!");
+    test_single_thread_insertion();
+    println!("Done");
 }

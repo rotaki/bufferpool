@@ -84,3 +84,13 @@ Found 5 outliers among 100 measurements (5.00%)
   3 (3.00%) high mild
   2 (2.00%) high severe 
 ```
+
+
+## Perf
+```
+cargo build --release
+perf record -e cycles -g --call-graph dwarf ./target/release/main 
+hotspot perf.data
+```
+
+if sudo is needed, set `echo -1 | sudo tee /proc/sys/kernel/perf_event_paranoid` and `echo 0 | sudo tee /proc/sys/kernel/kptr_restrict`
