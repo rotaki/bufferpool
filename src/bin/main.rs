@@ -13,8 +13,12 @@ use foster_btree::{
     random::RandomKVs,
 };
 
-fn to_bytes(key: usize) -> Vec<u8> {
-    key.to_be_bytes().to_vec()
+fn to_bytes(key: usize, key_size: usize) -> Vec<u8> {
+    // Pad the key with 0s to make it key_size bytes long.
+    let mut key_vec = vec![0u8; key_size];
+    let bytes = key.to_be_bytes().to_vec();
+    key_vec[..bytes.len()].copy_from_slice(&bytes);
+    key_vec
 }
 
 fn setup_inmem_btree_empty() -> FosterBtree<InMemPool> {
@@ -47,7 +51,7 @@ fn test_single_thread_insertion() {
     log_trace!("KVs generated");
 
     for (k, v) in kvs.iter() {
-        let key = to_bytes(*k);
+        let key = to_bytes(*k, 100);
         btree.insert(&key, v).unwrap();
     }
 
@@ -62,7 +66,7 @@ fn test_single_thread_insertion() {
 
 fn test_parallel_insertion() {
     let btree = Arc::new(setup_inmem_btree_empty());
-    let num_keys = 100000;
+    let num_keys = 500000;
     let val_min_size = 50;
     let val_max_size = 100;
 
@@ -89,13 +93,15 @@ fn test_parallel_insertion() {
                         }
                         let (key, val) = &kvs[counter];
                         log_trace!("Inserting key: {:?}", key);
-                        let key = to_bytes(*key);
+                        let key = to_bytes(*key, 100);
                         btree.insert(&key, val).unwrap();
                     }
                 });
             }
         },
     );
+
+    println!("stats: {}", btree.stats());
 
     /*
     // Check if all keys have been inserted.

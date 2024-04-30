@@ -19,6 +19,7 @@
   * [] Add statistics for each structure modification
   * [] Add prefix compression in pages
   * [] Add page split into three pages
+  * [] Reuse the removed page in merge
 
 ## Add Logging
 * [x] Add log buffer with append and flush capabilities
