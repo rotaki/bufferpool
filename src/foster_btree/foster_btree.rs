@@ -980,20 +980,18 @@ impl<T: MemPool> FosterBtree<T> {
                 this.get_id(),
                 child.get_id()
             );
-            let this = this.try_upgrade(false);
-            let child = child.try_upgrade(false);
-            let (mut this, mut child) = {
-                match (this, child) {
-                    (Ok(this), Ok(child)) => (this, child),
-                    (Ok(this), Err(child)) => {
-                        return (None, this.downgrade(), child);
+            let (mut this, mut child) = match this.try_upgrade(false) {
+                Ok(this) => {
+                    let child = child.try_upgrade(false);
+                    match child {
+                        Ok(child) => (this, child),
+                        Err(child) => {
+                            return (None, this.downgrade(), child);
+                        }
                     }
-                    (Err(this), Ok(child)) => {
-                        return (None, this, child.downgrade());
-                    }
-                    (Err(this), Err(child)) => {
-                        return (None, this, child);
-                    }
+                }
+                Err(this) => {
+                    return (None, this, child);
                 }
             };
             log_trace!(
