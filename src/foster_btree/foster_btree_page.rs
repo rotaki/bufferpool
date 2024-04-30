@@ -197,11 +197,11 @@ pub trait FosterBtreePage {
     fn slot(&self, slot_id: u16) -> Option<Slot>;
     fn append_slot(&mut self, slot: &Slot);
     fn update_slot(&mut self, slot_id: u16, slot: &Slot);
-    fn contiguous_free_space(&self) -> usize;
-    fn total_free_space(&self) -> usize;
-    fn total_bytes_used(&self) -> usize;
-    fn bytes_used(&self, range: std::ops::Range<u16>) -> usize;
-    fn bytes_needed(&self, key: &[u8], value: &[u8]) -> usize;
+    fn contiguous_free_space(&self) -> u16;
+    fn total_free_space(&self) -> u16;
+    fn total_bytes_used(&self) -> u16;
+    fn bytes_used(&self, range: std::ops::Range<u16>) -> u16;
+    fn bytes_needed(&self, key: &[u8], value: &[u8]) -> u16;
     fn shift_records(&mut self, shift_start_offset: u16, shift_size: u16);
     fn linear_search<F>(&self, f: F) -> u16
     where
@@ -436,27 +436,27 @@ impl FosterBtreePage for Page {
         self.set_rec_start_offset(offset);
     }
 
-    fn contiguous_free_space(&self) -> usize {
+    fn contiguous_free_space(&self) -> u16 {
         let next_slot_offset = self.slot_offset(self.slot_count());
         let rec_start_offset = self.rec_start_offset();
-        rec_start_offset as usize - next_slot_offset
+        rec_start_offset - next_slot_offset as u16
     }
 
-    fn total_free_space(&self) -> usize {
-        self.len() - self.total_bytes_used()
+    fn total_free_space(&self) -> u16 {
+        self.len() as u16 - self.total_bytes_used()
     }
 
-    fn total_bytes_used(&self) -> usize {
+    fn total_bytes_used(&self) -> u16 {
         let mut sum_used = PAGE_HEADER_SIZE;
         for i in 0..self.slot_count() {
             let slot = self.slot(i).unwrap();
             sum_used += slot.key_size() as usize + slot.value_size() as usize;
             sum_used += SLOT_SIZE;
         }
-        sum_used
+        sum_used as u16
     }
 
-    fn bytes_used(&self, range: std::ops::Range<u16>) -> usize {
+    fn bytes_used(&self, range: std::ops::Range<u16>) -> u16 {
         // Check if the range is valid
         if range.end > self.slot_count() {
             panic!("Invalid range");
@@ -467,11 +467,11 @@ impl FosterBtreePage for Page {
             sum_used += slot.key_size() as usize + slot.value_size() as usize;
             sum_used += SLOT_SIZE;
         }
-        sum_used
+        sum_used as u16
     }
 
-    fn bytes_needed(&self, key: &[u8], value: &[u8]) -> usize {
-        key.len() + value.len() + SLOT_SIZE
+    fn bytes_needed(&self, key: &[u8], value: &[u8]) -> u16 {
+        (key.len() + value.len() + SLOT_SIZE) as u16
     }
 
     // [ [rec4 ][rec3 ][rec2 ][rec1 ] ]
@@ -864,8 +864,8 @@ impl FosterBtreePage for Page {
     /// This function **DOES NOT** check the sorted order of the keys.
     fn insert_at(&mut self, slot_id: u16, key: &[u8], value: &[u8]) -> bool {
         let rec_size = key.len() + value.len();
-        if SLOT_SIZE + rec_size > self.contiguous_free_space() {
-            if SLOT_SIZE + rec_size > self.total_free_space() {
+        if SLOT_SIZE + rec_size > self.contiguous_free_space() as usize {
+            if SLOT_SIZE + rec_size > self.total_free_space() as usize {
                 return false;
             } else {
                 self.compact_space();
@@ -938,8 +938,8 @@ impl FosterBtreePage for Page {
             return true;
         }
 
-        if new_rec_size > self.contiguous_free_space() {
-            if new_rec_size > self.total_free_space() {
+        if new_rec_size > self.contiguous_free_space() as usize {
+            if new_rec_size > self.total_free_space() as usize {
                 return false;
             } else {
                 // Run compact_space and try again
@@ -1083,8 +1083,8 @@ impl FosterBtreePage for Page {
             .map(|(k, v)| k.len() + v.len())
             .sum::<usize>()
             + recs_ref.len() * SLOT_SIZE;
-        if inserting_size > self.contiguous_free_space() {
-            if inserting_size > self.total_free_space() {
+        if inserting_size > self.contiguous_free_space() as usize {
+            if inserting_size > self.total_free_space() as usize {
                 return false;
             } else {
                 self.compact_space();

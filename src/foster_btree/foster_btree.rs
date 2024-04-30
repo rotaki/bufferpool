@@ -115,11 +115,11 @@ pub const MIN_BYTES_USED: usize = (PAGE_SIZE - BASE_PAGE_HEADER_SIZE) / 5;
 pub const MAX_BYTES_USED: usize = (PAGE_SIZE - BASE_PAGE_HEADER_SIZE) * 4 / 5;
 
 fn is_small(page: &Page) -> bool {
-    page.total_bytes_used() < MIN_BYTES_USED
+    (page.total_bytes_used() as usize) < MIN_BYTES_USED
 }
 
 fn is_large(page: &Page) -> bool {
-    page.total_bytes_used() >= MAX_BYTES_USED
+    (page.total_bytes_used() as usize) >= MAX_BYTES_USED
 }
 
 /// Check if the parent page is the parent of the child page.
@@ -463,7 +463,7 @@ fn split_insert(this: &mut Page, foster_child: &mut Page, key: &[u8], value: &[u
         //    If we insert x into the second page, the foster key must be less than or equal to x.
         // We first temporarily separate the pages into two pages based on lower bound + 1 of the key
         // and see if the key can be inserted into one of the pages. If not, we need 3 pages to insert the key.
-        let page_size = this.page_size() - PAGE_HEADER_SIZE;
+        let page_size = (this.page_size() - PAGE_HEADER_SIZE) as u16;
         let bytes_needed = this.bytes_needed(key, value);
         let size_before_slot_id = this.bytes_used(0..slot_id);
         let size_after_slot_id = this.bytes_used(slot_id..this.slot_count());
@@ -2258,6 +2258,8 @@ mod tests {
         this_size: usize,
         foster_size: usize,
     ) -> (TempDir, BufferPoolRef, PageKey, PageKey) {
+        let this_size = this_size as u16;
+        let foster_size = foster_size as u16;
         // Create a foster relationship between two pages.
         let (db_id, c_id) = (0, 0);
         let c_key = ContainerKey::new(db_id, c_id);
@@ -2284,7 +2286,7 @@ mod tests {
             // Insert a slot into this page so that the total size of the page is this_size
             let current_size = this.total_bytes_used();
             let val_size = this_size - current_size - this.bytes_needed(&k0, &[]);
-            let val = vec![2_u8; val_size];
+            let val = vec![2_u8; val_size as usize];
             this.insert(&k0, &val, false);
         }
         assert_eq!(this.total_bytes_used(), this_size);
@@ -2298,7 +2300,7 @@ mod tests {
             // Insert a slot into foster page so that the total size of the page is foster_size
             let current_size = foster.total_bytes_used();
             let val_size = foster_size - current_size - this.bytes_needed(&k1, &[]);
-            let val = vec![2_u8; val_size];
+            let val = vec![2_u8; val_size as usize];
             foster.insert(&k1, &val, false);
         }
 
@@ -2418,6 +2420,8 @@ mod tests {
     }
 
     fn build_two_children_tree(child0_size: usize) -> (TempDir, BufferPoolRef, PageKey, PageKey) {
+        let child0_size = child0_size as u16;
+
         // Create a parent with two children.
         let (db_id, c_id) = (0, 0);
         let c_key = ContainerKey::new(db_id, c_id);
@@ -2451,7 +2455,7 @@ mod tests {
             // Insert a slot into child0 page so that the total size of the page is child0_size
             let current_size = child0.total_bytes_used();
             let val_size = child0_size - current_size - child0.bytes_needed(&k0, &[]);
-            let val = vec![2_u8; val_size];
+            let val = vec![2_u8; val_size as usize];
             child0.insert(&k0, &val, false);
         }
 
@@ -2478,6 +2482,8 @@ mod tests {
     fn build_single_child_with_foster_child_tree(
         child0_size: usize,
     ) -> (TempDir, BufferPoolRef, PageKey, PageKey) {
+        let child0_size = child0_size as u16;
+
         // Create a parent with a child and a foster child.
         let (db_id, c_id) = (0, 0);
         let c_key = ContainerKey::new(db_id, c_id);
@@ -2511,7 +2517,7 @@ mod tests {
             // Insert a slot into child0 page so that the total size of the page is child0_size
             let current_size = child0.total_bytes_used();
             let val_size = child0_size - current_size - child0.bytes_needed(&k0, &[]);
-            let val = vec![2_u8; val_size];
+            let val = vec![2_u8; val_size as usize];
             child0.insert(&k0, &val, false);
         }
 
@@ -2536,6 +2542,8 @@ mod tests {
     }
 
     fn build_single_child_tree(child0_size: usize) -> (TempDir, BufferPoolRef, PageKey, PageKey) {
+        let child0_size = child0_size as u16;
+
         // Create a parent with a child.
         let (db_id, c_id) = (0, 0);
         let c_key = ContainerKey::new(db_id, c_id);
@@ -2568,7 +2576,7 @@ mod tests {
             // Insert a slot into child0 page so that the total size of the page is child0_size
             let current_size = child0.total_bytes_used();
             let val_size = child0_size - current_size - child0.bytes_needed(&k0, &[]);
-            let val = vec![2_u8; val_size];
+            let val = vec![2_u8; val_size as usize];
             child0.insert(&k0, &val, false);
         }
 
