@@ -76,7 +76,7 @@ fn test_parallel_insertion() {
     thread::scope(
         // issue three threads to insert keys into the tree
         |s| {
-            for i in 0..10 {
+            for _ in 0..10 {
                 let btree = btree.clone();
                 let kvs = kvs.clone();
                 let counter = counter.clone();
@@ -109,6 +109,7 @@ fn test_parallel_insertion() {
 }
 
 fn main() {
-    test_single_thread_insertion();
+    // test_single_thread_insertion();
+    test_parallel_insertion();
     println!("Done");
 }

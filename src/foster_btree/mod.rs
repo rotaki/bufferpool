@@ -1,5 +1,7 @@
 mod foster_btree;
 mod foster_btree_page;
+mod foster_btree_visualizer_wasm;
 
-pub use foster_btree::{FosterBtree, FosterBtreeVisualizer};
+pub use foster_btree::FosterBtree;
 pub use foster_btree_page::FosterBtreePage;
+pub use foster_btree_visualizer_wasm::FosterBtreeVisualizer;
