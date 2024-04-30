@@ -202,7 +202,6 @@ pub trait FosterBtreePage {
     fn total_bytes_used(&self) -> u16;
     fn bytes_used(&self, range: std::ops::Range<u16>) -> u16;
     fn bytes_needed(&self, key: &[u8], value: &[u8]) -> u16;
-    fn shift_records(&mut self, shift_start_offset: u16, shift_size: u16);
     fn linear_search<F>(&self, f: F) -> u16
     where
         F: Fn(BTreeKey) -> bool;
@@ -472,63 +471,6 @@ impl FosterBtreePage for Page {
 
     fn bytes_needed(&self, key: &[u8], value: &[u8]) -> u16 {
         (key.len() + value.len() + SLOT_SIZE) as u16
-    }
-
-    // [ [rec4 ][rec3 ][rec2 ][rec1 ] ]
-    //   ^             ^     ^
-    //   |             |     |
-    //   rec_start_offset
-    //                 |     |
-    //                 shift_start_offset
-    //                       |
-    //                  <----> shift_size
-    //    <------------> recs to be shifted
-    //
-    // Delete slot2. Shift [rec4 ][rec3 ] to the right by rec2.size
-    //
-    // [        [rec4 ][rec3 ][rec1 ] ]
-    //
-    // The left offset of rec4 is `rec_start_offset`.
-    // The left offset of rec2 is `shift_start_offset`.
-    // The size of rec2 is `shift_size`.
-    fn shift_records(&mut self, shift_start_offset: u16, shift_size: u16) {
-        // Chunks of records to be shifted is in the range of [start..end)
-        // The new range is [new_start..new_end)
-        log_trace!(
-            "Shifting records. Start offset: {}, size: {}",
-            shift_start_offset,
-            shift_size
-        );
-        let start = self.rec_start_offset() as usize;
-        let end = shift_start_offset as usize;
-        // No need to shift if start >= end OR shift_size == 0
-        if start >= end || shift_size == 0 {
-            return;
-        }
-        let data = self[start..end].to_vec();
-
-        let new_start = start + shift_size as usize;
-        let new_end = end + shift_size as usize;
-        self[new_start..new_end].copy_from_slice(&data);
-
-        // For each slot shifted, update the slot.
-        // Shifting includes the ghost slots.
-        for slot_id in 0..self.slot_count() {
-            if let Some(mut slot) = self.slot(slot_id) {
-                let current_offset = slot.offset();
-                if current_offset < shift_start_offset as u16 {
-                    // Update slot.
-                    let new_offset = current_offset + shift_size;
-                    slot.set_offset(new_offset);
-                    self.update_slot(slot_id, &slot);
-                }
-            } else {
-                panic!("Slot should be available");
-            }
-        }
-
-        // Update the rec_start_offset of the page
-        self.set_rec_start_offset(new_start as u16);
     }
 
     // Find the left-most key where f(key) = true.
