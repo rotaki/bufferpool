@@ -52,7 +52,7 @@ impl FosterBtreeVisualizer {
     }
 
     pub fn search(&self, key: usize) -> String {
-        match self.bt.get_key(&key.to_be_bytes()) {
+        match self.bt.get(&key.to_be_bytes()) {
             Ok(val) => {
                 format!("Found key: {}, payload_size: {}", key, val.len())
             }

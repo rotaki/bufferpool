@@ -1007,7 +1007,7 @@ impl<T: MemPool> FosterBtree<T> {
         result
     }
 
-    pub fn stats(&self) -> String {
+    pub fn op_stats(&self) -> String {
         #[cfg(any(feature = "stat"))]
         {
             let stats = GLOBAL_STAT.lock().unwrap();
@@ -1062,11 +1062,22 @@ impl<T: MemPool> FosterBtree<T> {
         page
     }
 
-    fn insert_into_page(&self, this: &mut Page, key: &[u8], value: &[u8]) {
-        if !this.insert(key, value, false) {
+    fn insert_at_slot_or_split(&self, this: &mut Page, slot: u16, key: &[u8], value: &[u8]) {
+        if !this.insert_at(slot, key, value) {
             #[cfg(any(feature = "stat"))]
             inc_local_stat_trigger(OpType::SPLIT);
             // Split the page
+            let mut foster_child = self.allocate_page();
+            split_insert(this, &mut foster_child, key, value);
+        }
+    }
+
+    fn update_at_slot_or_split(&self, this: &mut Page, slot: u16, key: &[u8], value: &[u8]) {
+        if !this.update_at(slot, key, value) {
+            #[cfg(any(feature = "stat"))]
+            inc_local_stat_trigger(OpType::SPLIT);
+            // Remove the slot and split insert
+            this.remove_at(slot);
             let mut foster_child = self.allocate_page();
             split_insert(this, &mut foster_child, key, value);
         }
@@ -1244,7 +1255,7 @@ impl<T: MemPool> FosterBtree<T> {
         }
     }
 
-    fn traverse_to_leaf_for_write(&self, key: &[u8]) -> Result<FrameWriteGuard, TreeStatus> {
+    fn try_traverse_to_leaf_for_write(&self, key: &[u8]) -> Result<FrameWriteGuard, TreeStatus> {
         let leaf_page = self.traverse_to_leaf_for_read(key)?;
         match leaf_page.try_upgrade(true) {
             Ok(upgraded) => Ok(upgraded),
@@ -1252,7 +1263,34 @@ impl<T: MemPool> FosterBtree<T> {
         }
     }
 
-    pub fn get_key(&self, key: &[u8]) -> Result<Vec<u8>, TreeStatus> {
+    fn traverse_to_leaf_for_write(&self, key: &[u8]) -> Result<FrameWriteGuard, TreeStatus> {
+        let base = Duration::from_millis(1);
+        let mut attempts = 0;
+        let leaf_page = {
+            loop {
+                match self.try_traverse_to_leaf_for_write(key) {
+                    Ok(leaf_page) => {
+                        break leaf_page;
+                    }
+                    Err(TreeStatus::WriteLockFailed) => {
+                        attempts += 1;
+                        log_trace!(
+                            "Failed to acquire write lock (#attempt {}). Sleeping for {:?}",
+                            attmepts,
+                            base * attmepts
+                        );
+                        std::thread::sleep(base * attempts);
+                    }
+                    Err(e) => {
+                        return Err(e);
+                    }
+                }
+            }
+        };
+        Ok(leaf_page)
+    }
+
+    pub fn get(&self, key: &[u8]) -> Result<Vec<u8>, TreeStatus> {
         let foster_page = self.traverse_to_leaf_for_read(key)?;
         let slot_id = foster_page.lower_bound_slot_id(&BTreeKey::new(key));
         if foster_page.get_btree_key(slot_id) == BTreeKey::new(key) {
@@ -1269,142 +1307,81 @@ impl<T: MemPool> FosterBtree<T> {
     }
 
     pub fn insert(&self, key: &[u8], value: &[u8]) -> Result<(), TreeStatus> {
-        let base = Duration::from_millis(1);
-        let mut attmepts = 0;
-        let mut leaf_page = {
-            loop {
-                match self.traverse_to_leaf_for_write(key) {
-                    Ok(leaf_page) => {
-                        break leaf_page;
-                    }
-                    Err(TreeStatus::WriteLockFailed) => {
-                        attmepts += 1;
-                        log_trace!(
-                            "Failed to acquire write lock (#attempt {}). Sleeping for {:?}",
-                            attmepts,
-                            base * attmepts
-                        );
-                        std::thread::sleep(base * attmepts);
-                    }
-                    Err(e) => {
-                        return Err(e);
-                    }
-                }
-            }
-        };
+        let mut leaf_page = self.traverse_to_leaf_for_write(key)?;
         log_trace!("Acquired write lock for page {}", leaf_page.get_id());
-
         let slot_id = leaf_page.lower_bound_slot_id(&BTreeKey::new(key));
         if slot_id == 0 {
-            // Lower fence so insert is ok
-            self.insert_into_page(&mut leaf_page, key, value);
+            // Lower fence so insert is ok. We insert the key-value at the next position of the lower fence.
+            self.insert_at_slot_or_split(&mut leaf_page, slot_id + 1, key, value);
             Ok(())
         } else {
             if leaf_page.get_raw_key(slot_id) == key {
                 // Exact match
                 Err(TreeStatus::Duplicate)
             } else {
-                self.insert_into_page(&mut leaf_page, key, value);
+                self.insert_at_slot_or_split(&mut leaf_page, slot_id + 1, key, value);
                 Ok(())
             }
         }
     }
 
-    /*
-    pub fn insert_key(&self, key: &[u8], value: &[u8]) -> Result<(), TreeStatus> {
-        let mut foster_page = self.traverse_to_leaf_for_write(key)?; // Hold X latch on the page
-        let rec = foster_page.lower_bound_rec(key).ok_or(TreeStatus::NotInPageRange)?;
-        if rec.key == key {
-            // Exact match
-            if !rec.is_ghost {
-                return Err(TreeStatus::Duplicate)
-            } else {
-                // Replace ghost record
-                foster_page.replace_ghost(key, value);
-            }
+    pub fn update(&self, key: &[u8], value: &[u8]) -> Result<(), TreeStatus> {
+        let mut leaf_page = self.traverse_to_leaf_for_write(key)?;
+        log_trace!("Acquired write lock for page {}", leaf_page.get_id());
+        let slot_id = leaf_page.lower_bound_slot_id(&BTreeKey::new(key));
+        if slot_id == 0 {
+            // We cannot update the lower fence
+            Err(TreeStatus::NotFound)
         } else {
-            foster_page = {
-                // System transaction
-                // * Tries to insert the key-value pair into the page
-                // * If the page is full, then split the page and insert the key-value pair
-                // * If the page is split, then the parent page is also split
-                let inserted = foster_page.insert(key, value, true);
-                if !inserted {
-                    // Split the page
-                    let (new_page, new_key) = foster_page.split();
-                    // Insert the new key into the parent page
-                    foster_page.insert_into_parent(new_key, new_page)
-                }
-                foster_page
-            };
-            {
-                foster_page.replace_ghost(key, value);
+            if leaf_page.get_raw_key(slot_id) == key {
+                // Exact match
+                self.update_at_slot_or_split(&mut leaf_page, slot_id, key, value);
+                Ok(())
+            } else {
+                // Non-existent key
+                Err(TreeStatus::NotFound)
+            }
+        }
+    }
+
+    pub fn upsert(&self, key: &[u8], value: &[u8]) -> Result<(), TreeStatus> {
+        let mut leaf_page = self.traverse_to_leaf_for_write(key)?;
+        log_trace!("Acquired write lock for page {}", leaf_page.get_id());
+        let slot_id = leaf_page.lower_bound_slot_id(&BTreeKey::new(key));
+        if slot_id == 0 {
+            // Lower fence so insert is ok. We insert the key-value at the next position of the lower fence.
+            self.insert_at_slot_or_split(&mut leaf_page, slot_id + 1, key, value);
+        } else {
+            if leaf_page.get_raw_key(slot_id) == key {
+                // Exact match
+                self.update_at_slot_or_split(&mut leaf_page, slot_id, key, value);
+            } else {
+                // Non-existent key
+                self.insert_at_slot_or_split(&mut leaf_page, slot_id + 1, key, value);
             }
         }
         Ok(())
     }
 
-    // Logical deletion of a key
-    pub fn delete_key(&self, key: &[u8]) -> Result<(), TreeStatus> {
-        let mut leaf = self.traverse_to_leaf_for_write(key)?; // Hold X latch on the page
-        let mut foster_page = FosterBtreePage::new(&mut *leaf);
-        let rec = foster_page.lower_bound_rec(key).ok_or(TreeStatus::NotInPageRange)?;
-        if rec.key == key {
-            // Exact match
-            if rec.is_ghost {
+    /// Physical deletion of a key
+    pub fn delete(&self, key: &[u8]) -> Result<(), TreeStatus> {
+        let mut leaf_page = self.traverse_to_leaf_for_write(key)?;
+        log_trace!("Acquired write lock for page {}", leaf_page.get_id());
+        let slot_id = leaf_page.lower_bound_slot_id(&BTreeKey::new(key));
+        if slot_id == 0 {
+            // Lower fence cannot be deleted
+            Err(TreeStatus::NotFound)
+        } else {
+            if leaf_page.get_raw_key(slot_id) == key {
+                // Exact match
+                leaf_page.remove_at(slot_id);
+                Ok(())
+            } else {
+                // Non-existent key
                 Err(TreeStatus::NotFound)
-            } else {
-                // Logical deletion
-                foster_page.mark_ghost(key);
-                Ok(())
             }
-        } else {
-            // Non-existent key
-            Err(TreeStatus::NotFound)
         }
     }
-
-    pub fn update_key(&self, key: &[u8], value: &[u8]) -> Result<(), TreeStatus> {
-        let mut leaf = self.traverse_to_leaf_for_write(key)?; // Hold X latch on the page
-        let mut foster_page = FosterBtreePage::new(&mut *leaf);
-        let rec = foster_page.lower_bound_rec(key).ok_or(TreeStatus::NotInPageRange)?;
-        if rec.key == key {
-            // Exact match
-            if rec.is_ghost {
-                Err(TreeStatus::NotFound)
-            } else {
-                // Update the value
-                foster_page.update(key, value);
-                Ok(())
-            }
-        } else {
-            // Non-existent key
-            Err(TreeStatus::NotFound)
-        }
-    }
-
-    pub fn physical_delete_key(&self, key: &[u8]) -> Result<(), TreeStatus> {
-        let mut leaf = self.traverse_to_leaf_for_write(key)?; // Hold X latch on the page
-        let mut foster_page = FosterBtreePage::new(&mut *leaf);
-        let rec = foster_page.lower_bound_rec(key).ok_or(TreeStatus::NotInPageRange)?;
-        if rec.key == key {
-            // Exact match
-            if rec.is_ghost {
-                // Check lock conflicts and if there is no physical conflict, then delete the key
-                {
-                    // System transaction
-                    foster_page.remove(key);
-                }
-                Ok(())
-            } else {
-                Err(TreeStatus::NotReadyForPhysicalDelete)
-            }
-        } else {
-            // Non-existent key
-            Err(TreeStatus::NotFound)
-        }
-    }
-    */
 }
 
 #[cfg(test)]
@@ -2502,7 +2479,7 @@ mod tests {
                 i
             );
             let key = to_bytes(i);
-            let current_val = btree.get_key(&key).unwrap();
+            let current_val = btree.get(&key).unwrap();
             assert_eq!(current_val, val);
         }
         drop(temp_dir);
@@ -2548,7 +2525,7 @@ mod tests {
                 i
             );
             let key = to_bytes(*i);
-            let current_val = btree.get_key(&key).unwrap();
+            let current_val = btree.get(&key).unwrap();
             assert_eq!(current_val, val);
         }
     }
@@ -2584,7 +2561,7 @@ mod tests {
                 key
             );
             let key = to_bytes(*key);
-            let current_val = btree.get_key(&key).unwrap();
+            let current_val = btree.get(&key).unwrap();
             assert_eq!(current_val, *val);
         }
 
@@ -2683,7 +2660,7 @@ mod tests {
         // Check if all keys have been inserted.
         for (key, val) in kvs.iter() {
             let key = to_bytes(*key);
-            let current_val = btree.get_key(&key).unwrap();
+            let current_val = btree.get(&key).unwrap();
             assert_eq!(current_val, *val);
         }
     }

@@ -68,7 +68,7 @@ fn test_stress() {
             key
         );
         let key = to_bytes(*key);
-        let current_val = btree.get_key(&key).unwrap();
+        let current_val = btree.get(&key).unwrap();
         assert_eq!(current_val, *val);
     }
 }

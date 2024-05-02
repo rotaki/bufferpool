@@ -81,7 +81,7 @@ fn run_insertion_bench(num_threads: usize) {
         },
     );
 
-    println!("stats: \n{}", btree.stats());
+    println!("stats: \n{}", btree.op_stats());
 
     // // Check if all keys have been inserted.
     // for (key, val) in kvs.iter() {

@@ -17,7 +17,7 @@
   * [] Add range scan operator
     * [] Add consistency checker
   * [x] Add statistics for each structure modification
-    * [] Revise the split decision
+    * [x] Revise the split decision
   * [] Add prefix compression in pages
   * [] Add page split into three pages
   * [] Reuse the removed page in merge
@@ -66,17 +66,20 @@ Inserting to a Foster BTree and BTreeMap with 100000 keys and values of size 50-
 
 ```
 Random Insertion/Foster BTree Insertion
-                        time:   [38.132 ms 38.312 ms 38.540 ms]
-Found 13 outliers among 100 measurements (13.00%)
-  4 (4.00%) high mild
-  9 (9.00%) high severe
-Random Insertion/Foster BTree Insertion Parallel
-                        time:   [21.047 ms 21.334 ms 21.627 ms]
-Random Insertion/BTreeMap Insertion
-                        time:   [38.120 ms 38.430 ms 38.825 ms]
-Found 5 outliers among 100 measurements (5.00%)
+                        time:   [34.515 ms 34.734 ms 34.995 ms]
+Found 11 outliers among 100 measurements (11.00%)
   3 (3.00%) high mild
-  2 (2.00%) high severe
+  8 (8.00%) high severe
+Benchmarking Random Insertion/Foster BTree Insertion Parallel: Collecting 100 samples in estimated 6.3729 s (300 it
+Random Insertion/Foster BTree Insertion Parallel
+                        time:   [20.879 ms 21.186 ms 21.503 ms]
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high mild
+Random Insertion/BTreeMap Insertion
+                        time:   [38.618 ms 38.916 ms 39.268 ms]
+Found 8 outliers among 100 measurements (8.00%)
+  3 (3.00%) high mild
+  5 (5.00%) high severe
 ```
 
 

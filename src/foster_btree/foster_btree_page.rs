@@ -756,7 +756,9 @@ impl FosterBtreePage for Page {
         );
         // Binary search returns the left-most slot_id where the key is greater than the given key.
         let slot_id = self.binary_search(|slot_key| *key < slot_key);
-        assert!(self.low_fence_slot_id() + 1 <= slot_id && slot_id <= self.high_fence_slot_id());
+        debug_assert!(
+            self.low_fence_slot_id() + 1 <= slot_id && slot_id <= self.high_fence_slot_id()
+        );
         // The right-most slot_id where the key is less than or equal to the given key.
         slot_id - 1
     }
@@ -773,7 +775,9 @@ impl FosterBtreePage for Page {
         );
         // Binary search returns the left-most slot_id where the key is greater than the given key.
         let slot_id = self.binary_search(|slot_key| *key < slot_key);
-        assert!(self.low_fence_slot_id() + 1 <= slot_id && slot_id <= self.high_fence_slot_id());
+        debug_assert!(
+            self.low_fence_slot_id() + 1 <= slot_id && slot_id <= self.high_fence_slot_id()
+        );
         // The right-most slot_id where the key is less than or equal to the given key.
         let slot_id = slot_id - 1;
         if slot_id != self.low_fence_slot_id() && self.get_btree_key(slot_id) == *key {
@@ -842,7 +846,7 @@ impl FosterBtreePage for Page {
             let slot = Slot::new(offset, key.len() as u16, value.len() as u16);
             self.append_slot(&slot);
             self.set_total_bytes_used(self.total_bytes_used() + slot.total_size());
-            assert!(self.slot_count() == slot_id + 1);
+            debug_assert!(self.slot_count() == slot_id + 1);
         } else {
             // Insert the key-value pair
             let current_offset = self.rec_start_offset();
@@ -876,6 +880,7 @@ impl FosterBtreePage for Page {
     /// 2. The new record can be inserted into the contiguous free space.
     /// 3. The new record cannot be inserted into the contiguous free space. In this case, compact the space and try again.
     ///
+    /// If the new record cannot be inserted into the page, return false without removing the old record.
     /// This function **DOES NOT** check the sorted order of the keys.
     fn update_at(&mut self, slot_id: u16, key: &[u8], value: &[u8]) -> bool {
         assert!(slot_id < self.slot_count());
@@ -1034,14 +1039,14 @@ impl FosterBtreePage for Page {
             let last_key = self.get_btree_key(self.high_fence_slot_id() - 1);
             let high_fence = self.get_high_fence();
             if self.low_fence_slot_id() == self.high_fence_slot_id() - 1 {
-                assert!(last_key <= BTreeKey::Normal(recs_ref[0].0));
+                debug_assert!(last_key <= BTreeKey::Normal(recs_ref[0].0));
             } else {
-                assert!(last_key < BTreeKey::Normal(recs_ref[0].0));
+                debug_assert!(last_key < BTreeKey::Normal(recs_ref[0].0));
             }
             assert!(BTreeKey::Normal(recs_ref[recs_ref.len() - 1].0) < high_fence);
             // Check sortedness of the input recs
             for i in 1..recs_ref.len() {
-                assert!(recs_ref[i - 1].0 < recs_ref[i].0);
+                debug_assert!(recs_ref[i - 1].0 < recs_ref[i].0);
             }
         }
 
