@@ -65,20 +65,17 @@ Inserting to a Foster BTree and BTreeMap with 100000 keys and values of size 50-
 
 ```
 Random Insertion/Foster BTree Insertion
-                        time:   [56.712 ms 57.017 ms 57.380 ms]
-Found 16 outliers among 100 measurements (16.00%)
-  5 (5.00%) high mild
-  11 (11.00%) high severe
+                        time:   [38.132 ms 38.312 ms 38.540 ms]
+Found 13 outliers among 100 measurements (13.00%)
+  4 (4.00%) high mild
+  9 (9.00%) high severe
 Random Insertion/Foster BTree Insertion Parallel
-                        time:   [39.096 ms 39.438 ms 39.803 ms]
-Found 3 outliers among 100 measurements (3.00%)
-  2 (2.00%) high mild
-  1 (1.00%) high severe
+                        time:   [21.047 ms 21.334 ms 21.627 ms]
 Random Insertion/BTreeMap Insertion
-                        time:   [39.172 ms 39.496 ms 39.867 ms]
-Found 12 outliers among 100 measurements (12.00%)
-  6 (6.00%) high mild
-  6 (6.00%) high severe
+                        time:   [38.120 ms 38.430 ms 38.825 ms]
+Found 5 outliers among 100 measurements (5.00%)
+  3 (3.00%) high mild
+  2 (2.00%) high severe
 ```
 
 
