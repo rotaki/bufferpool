@@ -1,5 +1,5 @@
 // Import the init function and the module class
-import init, { FosterBtreeVisualizer } from './pkg/bp.js';
+import init, { FosterBtreeVisualizer } from './pkg/foster_btree.js';
 
 // First, ensure the module is initialized before using it
 init().then(() => {

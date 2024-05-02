@@ -100,7 +100,7 @@ fn replay_stress() {
         bug_occurred_at, k
     );
     let key = to_bytes(*k);
-    btree.debug_insert(&key, &v).unwrap();
+    btree.insert(&key, &v).unwrap();
 
     /*
     for (i, (key, val)) in kvs.iter().enumerate() {

@@ -60,47 +60,61 @@ enum OpType {
     DESCENDROOT,
 }
 
+const SPLIT_FLAG: u8 = 0b1000_0000;
+const MERGE_FLAG: u8 = 0b0100_0000;
+const LOADBALANCE_FLAG: u8 = 0b0010_0000;
+const ADOPT_FLAG: u8 = 0b0001_0000;
+const ANTIADOPT_FLAG: u8 = 0b0000_1000;
+const ASCENDROOT_FLAG: u8 = 0b0000_0100;
+const DESCENDROOT_FLAG: u8 = 0b0000_0010;
+
 struct OpByte(pub u8);
 
 impl OpByte {
     pub fn new() -> Self {
         OpByte(0)
     }
+    pub fn is_split_done(&self) -> bool {
+        self.0 & SPLIT_FLAG != 0
+    }
+    pub fn split_done(&mut self) {
+        self.0 |= SPLIT_FLAG;
+    }
     pub fn is_merge_done(&self) -> bool {
-        self.0 & 0b0000_0001 != 0
+        self.0 & MERGE_FLAG != 0
     }
     pub fn merge_done(&mut self) {
-        self.0 |= 0b0000_0001;
+        self.0 |= MERGE_FLAG;
     }
     pub fn is_load_balance_done(&self) -> bool {
-        self.0 & 0b0000_0010 != 0
+        self.0 & LOADBALANCE_FLAG != 0
     }
     pub fn load_balance_done(&mut self) {
-        self.0 |= 0b0000_0010;
+        self.0 |= LOADBALANCE_FLAG;
     }
     pub fn is_adopt_done(&self) -> bool {
-        self.0 & 0b0000_0100 != 0
+        self.0 & ADOPT_FLAG != 0
     }
     pub fn adopt_done(&mut self) {
-        self.0 |= 0b0000_0100;
+        self.0 |= ADOPT_FLAG;
     }
     pub fn is_antiadopt_done(&self) -> bool {
-        self.0 & 0b0000_1000 != 0
+        self.0 & ANTIADOPT_FLAG != 0
     }
     pub fn antiadopt_done(&mut self) {
-        self.0 |= 0b0000_1000;
+        self.0 |= ANTIADOPT_FLAG;
     }
     pub fn is_ascend_root_done(&self) -> bool {
-        self.0 & 0b0001_0000 != 0
+        self.0 & ASCENDROOT_FLAG != 0
     }
     pub fn ascend_root_done(&mut self) {
-        self.0 |= 0b0001_0000;
+        self.0 |= ASCENDROOT_FLAG;
     }
     pub fn is_descend_root_done(&self) -> bool {
-        self.0 & 0b0010_0000 != 0
+        self.0 & DESCENDROOT_FLAG != 0
     }
     pub fn descend_root_done(&mut self) {
-        self.0 |= 0b0010_0000;
+        self.0 |= DESCENDROOT_FLAG;
     }
     pub fn reset(&mut self) {
         self.0 = 0;
@@ -207,7 +221,15 @@ fn is_foster_relationship(parent: &Page, child: &Page) -> bool {
         && parent.get_foster_page_id() == child.get_id()
 }
 
-fn should_modify_structure_for_foster_relationship(
+fn should_split_this(this: &Page, op_byte: &mut OpByte) -> bool {
+    if !op_byte.is_split_done() && should_split(this) {
+        op_byte.split_done();
+        return true;
+    }
+    false
+}
+
+fn should_modify_foster_relationship(
     this: &Page,
     child: &Page,
     op_byte: &mut OpByte,
@@ -229,7 +251,7 @@ fn should_modify_structure_for_foster_relationship(
     None
 }
 
-fn should_modify_structure_for_parent_child_relationship(
+fn should_modify_parent_child_relationship(
     this: &Page,
     child: &Page,
     op_byte: &mut OpByte,
@@ -249,6 +271,13 @@ fn should_modify_structure_for_parent_child_relationship(
         return Some(OpType::DESCENDROOT);
     }
     None
+}
+
+fn should_split(this: &Page) -> bool {
+    if is_large(this) {
+        return true;
+    }
+    false
 }
 
 /// There are 3 * 3 = 9 possible size
@@ -363,6 +392,58 @@ fn should_root_descend(this: &Page, child: &Page) -> bool {
     true
 }
 
+/// Split this page into two pages.
+/// The foster child will be the right page of this page after the split.
+/// Returns the foster key
+fn split(this: &mut Page, foster_child: &mut Page) -> Vec<u8> {
+    #[cfg(any(feature = "stat"))]
+    inc_local_stat(OpType::SPLIT);
+
+    // The page is full and we need to split the page.
+    // First, we split the page into two pages with (almost) equal sizes.
+    let total_size = this.total_bytes_used();
+    let mut half_bytes = total_size / 2;
+    let mut moving_slot_ids = Vec::new();
+    let mut moving_kvs = Vec::new();
+    for i in (1..this.high_fence_slot_id()).rev() {
+        let key = this.get_raw_key(i);
+        let val = this.get_val(i);
+        let bytes_needed = this.bytes_needed(key, val);
+        if half_bytes >= bytes_needed {
+            half_bytes -= bytes_needed;
+            moving_slot_ids.push(i);
+            moving_kvs.push((key, val));
+        } else {
+            break;
+        }
+    }
+    if moving_kvs.is_empty() {
+        panic!("Page is full but cannot split because the slots are too large");
+    }
+
+    // Reverse the moving slots
+    moving_kvs.reverse();
+    moving_slot_ids.reverse();
+
+    let foster_key = moving_kvs[0].0.to_vec();
+
+    foster_child.init();
+    foster_child.set_level(this.level());
+    foster_child.set_low_fence(&foster_key);
+    foster_child.set_high_fence(this.get_raw_key(this.high_fence_slot_id()));
+    foster_child.set_right_most(this.is_right_most());
+    let res = foster_child.append_sorted(&moving_kvs);
+    assert!(res);
+    foster_child.set_has_foster_child(this.has_foster_child());
+    // Remove the moved slots from this
+    this.remove_range(moving_slot_ids[0], this.high_fence_slot_id());
+    let res = this.insert(&foster_key, &foster_child.get_id().to_be_bytes(), false);
+    assert!(res);
+    this.set_has_foster_child(true);
+
+    foster_key
+}
+
 /// Splitting the page and insert the key-value pair in the appropriate page.
 ///
 /// We want to insert the key-value pair into the page.
@@ -372,140 +453,35 @@ fn should_root_descend(this: &Page, child: &Page) -> bool {
 /// 1. Key must be in the range of the page.
 /// 2. The foster child is a unused page. It will be initialized in this function.
 fn split_insert(this: &mut Page, foster_child: &mut Page, key: &[u8], value: &[u8]) {
-    #[cfg(any(feature = "stat"))]
-    inc_local_stat(OpType::SPLIT);
+    let foster_key = split(this, foster_child);
 
-    let slot_id = this.lower_bound_slot_id(&BTreeKey::new(key)) + 1;
-    if slot_id == this.high_fence_slot_id() {
-        if this.has_foster_child() {
-            panic!("Not at the right page to insert the key-value pair. Go to the foster child.");
-        }
-        // If this has space to insert the foster key, then we don't need to split the page.
-        if this.total_free_space() >= this.bytes_needed(key, &foster_child.get_id().to_be_bytes()) {
-            // We need new page to insert the key-value pair. No movement of slots is required.
-            foster_child.init();
-            foster_child.set_level(this.level());
-            foster_child.set_low_fence(key);
-            foster_child.set_high_fence(this.get_raw_key(this.high_fence_slot_id()));
-            foster_child.set_right_most(this.is_right_most());
-            let res = foster_child.insert(key, value, false);
-            assert!(res);
-            // Insert the foster key into this page.
-            this.set_has_foster_child(true);
-            let res = this.insert(key, &foster_child.get_id().to_be_bytes(), false);
-            assert!(res);
-            return;
-        } else {
-            // We need to move some slots to the foster child from the parent page.
-            let mut moving_kvs = Vec::new();
-            for i in (1..this.high_fence_slot_id()).rev() {
-                let key = this.get_raw_key(i).to_owned();
-                let val = this.get_val(i).to_owned();
-                moving_kvs.push((key, val));
-                this.remove_at(i);
-                if this.total_free_space()
-                    >= this.bytes_needed(
-                        &moving_kvs.last().unwrap().0,
-                        &foster_child.get_id().to_be_bytes(),
-                    )
-                {
-                    break;
-                }
-            }
-            if moving_kvs.is_empty() {
-                panic!("Page is full but cannot split because the slots are too large")
-            }
-            moving_kvs.reverse();
-            foster_child.init();
-            foster_child.set_level(this.level());
-            foster_child.set_low_fence(&moving_kvs[0].0);
-            foster_child.set_high_fence(this.get_raw_key(this.high_fence_slot_id()));
-            foster_child.set_right_most(this.is_right_most());
-            let res = foster_child.append_sorted(&moving_kvs);
-            assert!(res);
-            foster_child.set_has_foster_child(this.has_foster_child());
-            let res = foster_child.insert(key, value, false);
-            assert!(res);
-            this.set_has_foster_child(true);
-            let res = this.insert(
-                &moving_kvs[0].0,
-                &foster_child.get_id().to_be_bytes(),
-                false,
-            );
-            assert!(res);
-            return;
-        }
+    // Now, we have two pages: this and foster_child.
+    // We need to decide which page to insert the key-value pair.
+    // If the key is less than the foster key, we insert the key into this.
+    // Otherwise, we insert the key into the foster child.
+    let res = if key < &foster_key {
+        this.insert(key, value, false)
     } else {
-        // The page is full and we need to split the page.
-        // First, we split the page into two pages with (almost) equal sizes.
-        let total_size = this.total_bytes_used();
-        let mut half_bytes = total_size / 2;
-        let mut moving_slot_ids = Vec::new();
-        let mut moving_kvs = Vec::new();
-        for i in (1..this.high_fence_slot_id()).rev() {
-            let key = this.get_raw_key(i);
-            let val = this.get_val(i);
-            let bytes_needed = this.bytes_needed(key, val);
-            if half_bytes >= bytes_needed {
-                half_bytes -= bytes_needed;
-                moving_slot_ids.push(i);
-                moving_kvs.push((key, val));
-            } else {
-                break;
-            }
-        }
-        if moving_kvs.is_empty() {
-            panic!("Page is full but cannot split because the slots are too large");
-        }
+        foster_child.insert(key, value, false)
+    };
 
-        // Reverse the moving slots
-        moving_kvs.reverse();
-        moving_slot_ids.reverse();
+    if res {
+        return;
+    } else {
+        // Need to split the page into three
+        // There are some tricky cases where insertion causes the page to split into three pages.
+        // E.g. Page has capacity of 6 and the current page looks like this:
+        // [[xxx],[zzz]]
+        // We want to insert [yyyy]
+        // None of [[xxx],[yyyy]] or [[zzz],[yyyy]] can work.
+        // We need to split the page into three pages.
+        // [[xxx]], [[yyyy]], [[zzz]]
 
-        let foster_key = moving_kvs[0].0.to_vec();
-
-        foster_child.init();
-        foster_child.set_level(this.level());
-        foster_child.set_low_fence(&foster_key);
-        foster_child.set_high_fence(this.get_raw_key(this.high_fence_slot_id()));
-        foster_child.set_right_most(this.is_right_most());
-        let res = foster_child.append_sorted(&moving_kvs);
-        assert!(res);
-        foster_child.set_has_foster_child(this.has_foster_child());
-        // Remove the moved slots from this
-        this.remove_range(moving_slot_ids[0], this.high_fence_slot_id());
-        let res = this.insert(&foster_key, &foster_child.get_id().to_be_bytes(), false);
-        assert!(res);
-        this.set_has_foster_child(true);
-
-        // Now, we have two pages: this and foster_child.
-        // We need to decide which page to insert the key-value pair.
-        // If the key is less than the foster key, we insert the key into this.
-        // Otherwise, we insert the key into the foster child.
-        let res = if key < &foster_key {
-            this.insert(key, value, false)
-        } else {
-            foster_child.insert(key, value, false)
-        };
-
-        if res {
-            return;
-        } else {
-            // Need to split the page into three
-            // There are some tricky cases where insertion causes the page to split into three pages.
-            // E.g. Page has capacity of 6 and the current page looks like this:
-            // [[xxx],[zzz]]
-            // We want to insert [yyyy]
-            // None of [[xxx],[yyyy]] or [[zzz],[yyyy]] can work.
-            // We need to split the page into three pages.
-            // [[xxx]], [[yyyy]], [[zzz]]
-
-            // If we cannot insert the key into one of the pages, then we need to split the page into three.
-            // This: [l, r1, r2, ..., rk, (f)x h]
-            // Foster1: [l(x), x, (f)rk+1, h]
-            // Foster2: [l(rk+1), rk+1, rk+2, ..., h]
-            unimplemented!("Need to split the page into three")
-        }
+        // If we cannot insert the key into one of the pages, then we need to split the page into three.
+        // This: [l, r1, r2, ..., rk, (f)x h]
+        // Foster1: [l(x), x, (f)rk+1, h]
+        // Foster2: [l(rk+1), rk+1, rk+2, ..., h]
+        unimplemented!("Need to split the page into three")
     }
 }
 /// Merge the foster child page into this page.
@@ -1051,7 +1027,7 @@ impl<T: MemPool> FosterBtree<T> {
         page
     }
 
-    fn insert_inner(&self, this: &mut Page, key: &[u8], value: &[u8]) {
+    fn insert_into_page(&self, this: &mut Page, key: &[u8], value: &[u8]) {
         if !this.insert(key, value, false) {
             // Split the page
             let mut foster_child = self.allocate_page();
@@ -1066,10 +1042,22 @@ impl<T: MemPool> FosterBtree<T> {
         child: FrameReadGuard<'a>,
         op_byte: &mut OpByte,
     ) -> (Option<OpType>, FrameReadGuard<'a>, FrameReadGuard<'a>) {
+        if should_split_this(&this, op_byte) {
+            log_trace!("Should split this page: {}", this.get_id());
+            let mut this = match this.try_upgrade(true) {
+                Ok(this) => this,
+                Err(this) => {
+                    return (None, this, child);
+                }
+            };
+            let mut foster_child = self.allocate_page();
+            split(&mut this, &mut foster_child);
+            return (Some(OpType::SPLIT), this.downgrade(), child);
+        }
         let op = if is_foster_relationship {
-            should_modify_structure_for_foster_relationship(&this, &child, op_byte)
+            should_modify_foster_relationship(&this, &child, op_byte)
         } else {
-            should_modify_structure_for_parent_child_relationship(&this, &child, op_byte)
+            should_modify_parent_child_relationship(&this, &child, op_byte)
         };
         if let Some(op) = op {
             log_trace!(
@@ -1165,7 +1153,7 @@ impl<T: MemPool> FosterBtree<T> {
                             current_page = this_page;
                             continue;
                         }
-                        None | Some(OpType::ASCENDROOT) => {
+                        None | Some(OpType::SPLIT) | Some(OpType::ASCENDROOT) => {
                             // Start from the child
                             op_byte.reset();
                             current_page = foster_page;
@@ -1201,103 +1189,25 @@ impl<T: MemPool> FosterBtree<T> {
                 | Some(OpType::LOADBALANCE)
                 | Some(OpType::DESCENDROOT)
                 | Some(OpType::ADOPT) => {
+                    // Continue from the current page
                     current_page = this_page;
                     continue;
                 }
-                None | Some(OpType::ASCENDROOT) | Some(OpType::ANTIADOPT) => {
+                None | Some(OpType::SPLIT) | Some(OpType::ASCENDROOT) | Some(OpType::ANTIADOPT) => {
                     // Start from the child
                     op_byte.reset();
                     current_page = next_page;
                     continue;
-                }
-                _ => {
-                    panic!("Unexpected operation");
                 }
             }
         }
     }
 
     fn traverse_to_leaf_for_write(&self, key: &[u8]) -> Result<FrameWriteGuard, TreeStatus> {
-        let mut current_page = self.read_page(self.root_key);
-        let mut op_byte = OpByte::new();
-        loop {
-            let this_page = current_page;
-            log_trace!("Traversal for write, page: {}", this_page.get_id());
-            if this_page.is_leaf() {
-                if this_page.has_foster_child() && this_page.get_foster_key() <= key {
-                    // Check whether the foster child should be traversed.
-                    let foster_page_key = PageKey::new(self.c_key, this_page.get_foster_page_id());
-                    let foster_page = self.read_page(foster_page_key);
-                    // Now we have two locks. We need to release the lock of the current page.
-                    let (op, this_page, foster_page) = self.modify_structure_if_needed_for_read(
-                        true,
-                        this_page,
-                        foster_page,
-                        &mut op_byte,
-                    );
-                    match op {
-                        Some(OpType::MERGE) | Some(OpType::LOADBALANCE) => {
-                            current_page = this_page;
-                            continue;
-                        }
-                        None | Some(OpType::ASCENDROOT) => {
-                            // Start from the child
-                            op_byte.reset();
-                            current_page = foster_page;
-                            continue;
-                        }
-                        _ => {
-                            panic!("Unexpected operation");
-                        }
-                    }
-                } else {
-                    match this_page.try_upgrade(true) {
-                        Ok(upgraded) => {
-                            return Ok(upgraded);
-                        }
-                        Err(_) => {
-                            // If upgrade fails, it means that the page is read by another transaction.
-                            // Release everything and retry.
-                            return Err(TreeStatus::WriteLockFailed);
-                        }
-                    }
-                }
-            }
-            let (is_foster_relation_ship, page_key) = {
-                let slot_id = this_page.lower_bound_slot_id(&BTreeKey::new(key));
-                let is_foster_relationship =
-                    this_page.has_foster_child() && slot_id == this_page.foster_child_slot_id();
-                let page_id_bytes = this_page.get_val(slot_id);
-                let page_id = PageId::from_be_bytes(page_id_bytes.try_into().unwrap());
-                (is_foster_relationship, PageKey::new(self.c_key, page_id))
-            };
-
-            let next_page = self.read_page(page_key);
-            // Now we have two locks. We need to release the lock of the current page.
-            let (op, this_page, next_page) = self.modify_structure_if_needed_for_read(
-                is_foster_relation_ship,
-                this_page,
-                next_page,
-                &mut op_byte,
-            );
-            match op {
-                Some(OpType::MERGE)
-                | Some(OpType::LOADBALANCE)
-                | Some(OpType::DESCENDROOT)
-                | Some(OpType::ADOPT) => {
-                    current_page = this_page;
-                    continue;
-                }
-                None | Some(OpType::ASCENDROOT) | Some(OpType::ANTIADOPT) => {
-                    // Start from the child
-                    op_byte.reset();
-                    current_page = next_page;
-                    continue;
-                }
-                _ => {
-                    panic!("Unexpected operation");
-                }
-            }
+        let leaf_page = self.traverse_to_leaf_for_read(key)?;
+        match leaf_page.try_upgrade(true) {
+            Ok(upgraded) => Ok(upgraded),
+            Err(_) => Err(TreeStatus::WriteLockFailed),
         }
     }
 
@@ -1346,227 +1256,16 @@ impl<T: MemPool> FosterBtree<T> {
         let slot_id = leaf_page.lower_bound_slot_id(&BTreeKey::new(key));
         if slot_id == 0 {
             // Lower fence so insert is ok
-            self.insert_inner(&mut leaf_page, key, value);
+            self.insert_into_page(&mut leaf_page, key, value);
             Ok(())
         } else {
             if leaf_page.get_raw_key(slot_id) == key {
                 // Exact match
                 Err(TreeStatus::Duplicate)
             } else {
-                self.insert_inner(&mut leaf_page, key, value);
+                self.insert_into_page(&mut leaf_page, key, value);
                 Ok(())
             }
-        }
-    }
-
-    fn debug_traverse_to_leaf_for_read(&self, key: &[u8]) -> Result<FrameReadGuard, TreeStatus> {
-        let mut current_page = self.read_page(self.root_key);
-        let mut op_byte = OpByte::new();
-        loop {
-            let this_page = current_page;
-            print_page(&this_page);
-            if this_page.is_leaf() {
-                if this_page.has_foster_child() && this_page.get_foster_key() <= key {
-                    // Check whether the foster child should be traversed.
-                    let foster_page_key = PageKey::new(self.c_key, this_page.get_foster_page_id());
-                    let foster_page = self.read_page(foster_page_key);
-                    // Now we have two locks. We need to release the lock of the current page.
-                    let (op, this_page, foster_page) = self.modify_structure_if_needed_for_read(
-                        true,
-                        this_page,
-                        foster_page,
-                        &mut op_byte,
-                    );
-                    match op {
-                        Some(OpType::MERGE) | Some(OpType::LOADBALANCE) => {
-                            current_page = this_page;
-                            continue;
-                        }
-                        None | Some(OpType::ASCENDROOT) => {
-                            // Start from the child
-                            op_byte.reset();
-                            current_page = foster_page;
-                            continue;
-                        }
-                        _ => {
-                            panic!("Unexpected operation");
-                        }
-                    }
-                } else {
-                    return Ok(this_page);
-                }
-            }
-            let (is_foster_relationship, page_key) = {
-                let slot_id = this_page.lower_bound_slot_id(&BTreeKey::new(key));
-                let is_foster_relationship =
-                    this_page.has_foster_child() && slot_id == this_page.foster_child_slot_id();
-                let page_id_bytes = this_page.get_val(slot_id);
-                let page_id = PageId::from_be_bytes(page_id_bytes.try_into().unwrap());
-                (is_foster_relationship, PageKey::new(self.c_key, page_id))
-            };
-
-            let next_page = self.read_page(page_key);
-            // Now we have two locks. We need to release the lock of the current page.
-            let (op, this_page, next_page) = self.modify_structure_if_needed_for_read(
-                is_foster_relationship,
-                this_page,
-                next_page,
-                &mut op_byte,
-            );
-            match op {
-                Some(OpType::MERGE)
-                | Some(OpType::LOADBALANCE)
-                | Some(OpType::DESCENDROOT)
-                | Some(OpType::ADOPT) => {
-                    current_page = this_page;
-                    continue;
-                }
-                None | Some(OpType::ASCENDROOT) | Some(OpType::ANTIADOPT) => {
-                    // Start from the child
-                    op_byte.reset();
-                    current_page = next_page;
-                    continue;
-                }
-                _ => {
-                    panic!("Unexpected operation");
-                }
-            }
-        }
-    }
-
-    fn debug_traverse_to_leaf_for_write(&self, key: &[u8]) -> Result<FrameWriteGuard, TreeStatus> {
-        let mut current_page = self.read_page(self.root_key);
-        let mut op_byte = OpByte::new();
-        loop {
-            let this_page = current_page;
-            print_page(&this_page);
-            if this_page.is_leaf() {
-                if this_page.has_foster_child() && this_page.get_foster_key() <= key {
-                    // Check whether the foster child should be traversed.
-                    let foster_page_key = PageKey::new(self.c_key, this_page.get_foster_page_id());
-                    let foster_page = self.read_page(foster_page_key);
-                    // Now we have two locks. We need to release the lock of the current page.
-                    let (op, this_page, foster_page) = self.modify_structure_if_needed_for_read(
-                        true,
-                        this_page,
-                        foster_page,
-                        &mut op_byte,
-                    );
-                    match op {
-                        Some(OpType::MERGE) | Some(OpType::LOADBALANCE) => {
-                            current_page = this_page;
-                            continue;
-                        }
-                        None | Some(OpType::ASCENDROOT) => {
-                            // Start from the child
-                            op_byte.reset();
-                            current_page = foster_page;
-                            continue;
-                        }
-                        _ => {
-                            panic!("Unexpected operation");
-                        }
-                    }
-                } else {
-                    match this_page.try_upgrade(true) {
-                        Ok(upgraded) => {
-                            return Ok(upgraded);
-                        }
-                        Err(_) => {
-                            // If upgrade fails, it means that the page is read by another transaction.
-                            // Release everything and retry.
-                            return Err(TreeStatus::WriteLockFailed);
-                        }
-                    }
-                }
-            }
-            let (is_foster_relationship, page_key) = {
-                let slot_id = this_page.lower_bound_slot_id(&BTreeKey::new(key));
-                let is_foster_relationship =
-                    this_page.has_foster_child() && slot_id == this_page.foster_child_slot_id();
-                let page_id_bytes = this_page.get_val(slot_id);
-                let page_id = PageId::from_be_bytes(page_id_bytes.try_into().unwrap());
-                (is_foster_relationship, PageKey::new(self.c_key, page_id))
-            };
-
-            let next_page = self.read_page(page_key);
-            // Now we have two locks. We need to release the lock of the current page.
-            let (op, this_page, next_page) = self.modify_structure_if_needed_for_read(
-                is_foster_relationship,
-                this_page,
-                next_page,
-                &mut op_byte,
-            );
-            match op {
-                Some(OpType::MERGE)
-                | Some(OpType::LOADBALANCE)
-                | Some(OpType::DESCENDROOT)
-                | Some(OpType::ADOPT) => {
-                    current_page = this_page;
-                    continue;
-                }
-                None | Some(OpType::ASCENDROOT) | Some(OpType::ANTIADOPT) => {
-                    // Start from the child
-                    op_byte.reset();
-                    current_page = next_page;
-                    continue;
-                }
-                _ => {
-                    panic!("Unexpected operation");
-                }
-            }
-        }
-    }
-
-    pub fn debug_insert(&self, key: &[u8], value: &[u8]) -> Result<(), TreeStatus> {
-        let base = Duration::from_millis(1);
-        let mut attmepts = 0;
-        let mut leaf_page = {
-            loop {
-                match self.debug_traverse_to_leaf_for_write(key) {
-                    Ok(leaf_page) => {
-                        break leaf_page;
-                    }
-                    Err(TreeStatus::WriteLockFailed) => {
-                        attmepts += 1;
-                        std::thread::sleep(base * attmepts);
-                    }
-                    Err(e) => {
-                        return Err(e);
-                    }
-                }
-            }
-        };
-
-        let slot_id = leaf_page.lower_bound_slot_id(&BTreeKey::new(key));
-        if slot_id == 0 {
-            // Lower fence so insert is ok
-            self.insert_inner(&mut leaf_page, key, value);
-            Ok(())
-        } else {
-            if leaf_page.get_raw_key(slot_id) == key {
-                // Exact match
-                Err(TreeStatus::Duplicate)
-            } else {
-                self.insert_inner(&mut leaf_page, key, value);
-                Ok(())
-            }
-        }
-    }
-
-    fn debug_get_key(&self, key: &[u8]) -> Result<Vec<u8>, TreeStatus> {
-        let foster_page = self.debug_traverse_to_leaf_for_read(key)?;
-        let slot_id = foster_page.lower_bound_slot_id(&BTreeKey::new(key));
-        if foster_page.get_btree_key(slot_id) == BTreeKey::new(key) {
-            // Exact match
-            if foster_page.is_ghost_slot(slot_id) {
-                Err(TreeStatus::NotFound)
-            } else {
-                Ok(foster_page.get_val(slot_id).to_vec())
-            }
-        } else {
-            // Non-existent key
-            Err(TreeStatus::NotFound)
         }
     }
 
@@ -2800,7 +2499,7 @@ mod tests {
                 i
             );
             let key = to_bytes(*i);
-            btree.debug_insert(&key, &val).unwrap();
+            btree.insert(&key, &val).unwrap();
         }
         for i in order.iter() {
             println!(
@@ -2880,7 +2579,7 @@ mod tests {
             bug_occurred_at, k
         );
         let key = to_bytes(*k);
-        btree.debug_insert(&key, &v).unwrap();
+        btree.insert(&key, &v).unwrap();
 
         /*
         for (i, (key, val)) in kvs.iter().enumerate() {

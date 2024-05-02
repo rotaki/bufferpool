@@ -16,7 +16,8 @@
   * [] Add upsert operator
   * [] Add range scan operator
     * [] Add consistency checker
-  * [] Add statistics for each structure modification
+  * [x] Add statistics for each structure modification
+    * [] Revise the split decision
   * [] Add prefix compression in pages
   * [] Add page split into three pages
   * [] Reuse the removed page in merge

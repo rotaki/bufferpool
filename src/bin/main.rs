@@ -40,31 +40,11 @@ fn setup_inmem_btree_empty() -> FosterBtree<InMemPool> {
     btree
 }
 
-fn test_single_thread_insertion() {
-    let btree = setup_inmem_btree_empty();
-    let num_keys = 100000;
-    let val_min_size = 50;
-    let val_max_size = 100;
-
-    log_trace!("Generating {} keys into the tree", num_keys);
-    let kvs = RandomKVs::new(num_keys, val_min_size, val_max_size);
-    log_trace!("KVs generated");
-
-    for (k, v) in kvs.iter() {
-        let key = to_bytes(*k, 100);
-        btree.insert(&key, v).unwrap();
-    }
-
-    /*
-    for (k, v) in kvs.iter() {
-        let key = to_bytes(*k);
-        let current_val = btree.get_key(&key).unwrap();
-        assert_eq!(current_val, *v);
-    }
-    */
-}
-
-fn test_parallel_insertion() {
+fn run_insertion_bench(num_threads: usize) {
+    assert!(
+        num_threads > 0,
+        "Number of threads should be greater than 0"
+    );
     let btree = Arc::new(setup_inmem_btree_empty());
     let num_keys = 500000;
     let val_min_size = 50;
@@ -80,7 +60,7 @@ fn test_parallel_insertion() {
     thread::scope(
         // issue three threads to insert keys into the tree
         |s| {
-            for _ in 0..10 {
+            for _ in 0..num_threads {
                 let btree = btree.clone();
                 let kvs = kvs.clone();
                 let counter = counter.clone();
@@ -103,19 +83,19 @@ fn test_parallel_insertion() {
 
     println!("stats: {}", btree.stats());
 
-    /*
-    // Check if all keys have been inserted.
-    for (key, val) in kvs.iter() {
-        log_trace!("Checking key: {:?}", key);
-        let key = to_bytes(*key);
-        let current_val = btree.get_key(&key).unwrap();
-        assert_eq!(current_val, *val);
-    }
-    */
+    // // Check if all keys have been inserted.
+    // for (key, val) in kvs.iter() {
+    //     log_trace!("Checking key: {:?}", key);
+    //     let key = to_bytes(*key, 100);
+    //     let current_val = btree.get_key(&key).unwrap();
+    //     assert_eq!(current_val, *val);
+    // }
 }
 
+// main function
+// get number of threads from command line
 fn main() {
-    // test_single_thread_insertion();
-    test_parallel_insertion();
-    println!("Done");
+    let args: Vec<String> = std::env::args().collect();
+    let num_threads = args[1].parse::<usize>().unwrap();
+    run_insertion_bench(num_threads);
 }
