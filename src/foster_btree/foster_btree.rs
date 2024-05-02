@@ -122,40 +122,69 @@ impl OpByte {
 }
 
 struct OpStat {
-    stats: UnsafeCell<[usize; 7]>,
+    sm_trigger: UnsafeCell<[usize; 7]>, // Number of times the structure modification is triggered
+    sm_success: UnsafeCell<[usize; 7]>, // Number of times the structure modification is successful
 }
 
 impl OpStat {
     pub fn new() -> Self {
         OpStat {
-            stats: UnsafeCell::new([0; 7]),
+            sm_trigger: UnsafeCell::new([0; 7]),
+            sm_success: UnsafeCell::new([0; 7]),
         }
-    }
-    pub fn inc(&self, op_type: OpType) {
-        let guard = unsafe { &mut *self.stats.get() };
-        guard[op_type as usize] += 1;
     }
 
-    pub fn merge(&self, other: &OpStat) {
-        let guard = unsafe { &mut *self.stats.get() };
-        let other_guard = unsafe { &*other.stats.get() };
-        for i in 0..6 {
-            guard[i] += other_guard[i];
-        }
+    pub fn inc_trigger(&self, op_type: OpType) {
+        (unsafe { &mut *self.sm_trigger.get() })[op_type as usize] += 1;
+    }
+
+    pub fn inc_success(&self, op_type: OpType) {
+        (unsafe { &mut *self.sm_success.get() })[op_type as usize] += 1;
     }
 
     pub fn to_string(&self) -> String {
-        let guard = unsafe { &*self.stats.get() };
-        format!(
-            "SPLIT: {}, MERGE: {}, LOADBALANCE: {}, ADOPT: {}, ANTIADOPT: {}, ASCENDROOT: {}, DESCENDROOT: {}",
-            guard[OpType::SPLIT as usize],
-            guard[OpType::MERGE as usize],
-            guard[OpType::LOADBALANCE as usize],
-            guard[OpType::ADOPT as usize],
-            guard[OpType::ANTIADOPT as usize],
-            guard[OpType::ASCENDROOT as usize],
-            guard[OpType::DESCENDROOT as usize],
-        )
+        let mut result = String::new();
+        let sm_trigger = unsafe { &*self.sm_trigger.get() };
+        let sm_success = unsafe { &*self.sm_success.get() };
+        let mut sep = "";
+        for i in 0..7 {
+            result.push_str(sep);
+            let op_type = match i {
+                0 => "SPLIT",
+                1 => "MERGE",
+                2 => "LOADBALANCE",
+                3 => "ADOPT",
+                4 => "ANTIADOPT",
+                5 => "ASCENDROOT",
+                6 => "DESCENDROOT",
+                _ => unreachable!(),
+            };
+            let success = sm_success[i];
+            let trigger = sm_trigger[i];
+            let rate = if trigger == 0 {
+                "N/A".to_owned()
+            } else {
+                format!("{:.2}%", (success as f64) / (trigger as f64) * 100.0)
+            };
+            result.push_str(&format!(
+                "{:12}: {:6} / {:6} ({:6})",
+                op_type, success, trigger, rate
+            ));
+            sep = "\n";
+        }
+
+        result
+    }
+
+    pub fn merge(&self, other: &OpStat) {
+        let sm_trigger = unsafe { &mut *self.sm_trigger.get() };
+        let sm_success = unsafe { &mut *self.sm_success.get() };
+        let other_sm_trigger = unsafe { &*other.sm_trigger.get() };
+        let other_sm_success = unsafe { &*other.sm_success.get() };
+        for i in 0..7 {
+            sm_trigger[i] += other_sm_trigger[i];
+            sm_success[i] += other_sm_success[i];
+        }
     }
 }
 
@@ -179,9 +208,15 @@ thread_local! {
     };
 }
 
-fn inc_local_stat(op_type: OpType) {
+fn inc_local_stat_trigger(op_type: OpType) {
     LOCAL_STAT.with(|stat| {
-        stat.stat.inc(op_type);
+        stat.stat.inc_trigger(op_type);
+    });
+}
+
+fn inc_local_stat_success(op_type: OpType) {
+    LOCAL_STAT.with(|stat| {
+        stat.stat.inc_success(op_type);
     });
 }
 
@@ -397,7 +432,7 @@ fn should_root_descend(this: &Page, child: &Page) -> bool {
 /// Returns the foster key
 fn split(this: &mut Page, foster_child: &mut Page) -> Vec<u8> {
     #[cfg(any(feature = "stat"))]
-    inc_local_stat(OpType::SPLIT);
+    inc_local_stat_success(OpType::SPLIT);
 
     // The page is full and we need to split the page.
     // First, we split the page into two pages with (almost) equal sizes.
@@ -493,7 +528,7 @@ fn split_insert(this: &mut Page, foster_child: &mut Page, key: &[u8], value: &[u
 //   this [k0, k2)
 fn merge(this: &mut Page, foster_child: &mut Page) {
     #[cfg(any(feature = "stat"))]
-    inc_local_stat(OpType::MERGE);
+    inc_local_stat_success(OpType::MERGE);
 
     debug_assert!(is_parent_and_child(this, foster_child));
     debug_assert!(is_foster_relationship(this, foster_child));
@@ -527,7 +562,7 @@ fn merge(this: &mut Page, foster_child: &mut Page) {
 /// 4. Balancing does not move the low fence and high fence.
 fn balance(this: &mut Page, foster_child: &mut Page) {
     #[cfg(any(feature = "stat"))]
-    inc_local_stat(OpType::LOADBALANCE);
+    inc_local_stat_success(OpType::LOADBALANCE);
 
     debug_assert!(is_parent_and_child(this, foster_child));
     debug_assert!(is_foster_relationship(this, foster_child));
@@ -653,7 +688,7 @@ fn balance(this: &mut Page, foster_child: &mut Page) {
 ///   child0 [k0, k1)    child1 [k1, k2)
 fn adopt(parent: &mut Page, child: &mut Page) {
     #[cfg(any(feature = "stat"))]
-    inc_local_stat(OpType::ADOPT);
+    inc_local_stat_success(OpType::ADOPT);
 
     debug_assert!(is_parent_and_child(parent, child));
     debug_assert!(!is_foster_relationship(parent, child));
@@ -689,7 +724,7 @@ fn adopt(parent: &mut Page, child: &mut Page) {
 /// child1 [k0, k2) --> foster_child [k1, k2)
 fn anti_adopt(parent: &mut Page, child1: &mut Page) {
     #[cfg(any(feature = "stat"))]
-    inc_local_stat(OpType::ANTIADOPT);
+    inc_local_stat_success(OpType::ANTIADOPT);
 
     debug_assert!(is_parent_and_child(parent, child1));
     debug_assert!(!is_foster_relationship(parent, child1));
@@ -730,7 +765,7 @@ fn anti_adopt(parent: &mut Page, child1: &mut Page) {
 /// root [-inf, +inf)
 fn descend_root(root: &mut Page, child: &mut Page) {
     #[cfg(any(feature = "stat"))]
-    inc_local_stat(OpType::DESCENDROOT);
+    inc_local_stat_success(OpType::DESCENDROOT);
 
     assert!(root.is_root());
     // If the root contains only the page id of the child,
@@ -772,7 +807,7 @@ fn descend_root(root: &mut Page, child: &mut Page) {
 /// child [-inf, k0)    foster_child [k0, +inf)
 fn ascend_root(root: &mut Page, child: &mut Page) {
     #[cfg(any(feature = "stat"))]
-    inc_local_stat(OpType::ASCENDROOT);
+    inc_local_stat_success(OpType::ASCENDROOT);
 
     assert!(root.is_root());
     assert!(root.has_foster_child());
@@ -1029,6 +1064,8 @@ impl<T: MemPool> FosterBtree<T> {
 
     fn insert_into_page(&self, this: &mut Page, key: &[u8], value: &[u8]) {
         if !this.insert(key, value, false) {
+            #[cfg(any(feature = "stat"))]
+            inc_local_stat_trigger(OpType::SPLIT);
             // Split the page
             let mut foster_child = self.allocate_page();
             split_insert(this, &mut foster_child, key, value);
@@ -1044,6 +1081,8 @@ impl<T: MemPool> FosterBtree<T> {
     ) -> (Option<OpType>, FrameReadGuard<'a>, FrameReadGuard<'a>) {
         if should_split_this(&this, op_byte) {
             log_trace!("Should split this page: {}", this.get_id());
+            #[cfg(any(feature = "stat"))]
+            inc_local_stat_trigger(OpType::SPLIT);
             let mut this = match this.try_upgrade(true) {
                 Ok(this) => this,
                 Err(this) => {
@@ -1066,6 +1105,8 @@ impl<T: MemPool> FosterBtree<T> {
                 this.get_id(),
                 child.get_id()
             );
+            #[cfg(any(feature = "stat"))]
+            inc_local_stat_trigger(op.clone());
             let (mut this, mut child) = match this.try_upgrade(false) {
                 Ok(this) => {
                     let child = child.try_upgrade(false);

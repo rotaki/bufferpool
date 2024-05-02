@@ -21,6 +21,7 @@
   * [] Add prefix compression in pages
   * [] Add page split into three pages
   * [] Reuse the removed page in merge
+  * [] Optimistic lock coupling
 
 ## Add Logging
 * [x] Add log buffer with append and flush capabilities
