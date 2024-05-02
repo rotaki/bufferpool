@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use rand::distributions::uniform::SampleUniform;
 use rand::distributions::Alphanumeric;
 use rand::{
@@ -62,7 +64,7 @@ pub fn gen_random_permutation<T>(mut vec: Vec<T>) -> Vec<T> {
 }
 
 use serde::{Deserialize, Serialize};
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct RandomKVs {
     kvs: Vec<(usize, Vec<u8>)>,
 }
@@ -84,6 +86,25 @@ impl RandomKVs {
 
     pub fn len(&self) -> usize {
         self.kvs.len()
+    }
+
+    pub fn partition(&self, num_partitions: usize) -> VecDeque<Self> {
+        let mut partitions = VecDeque::new();
+        let partition_size = self.len() / num_partitions;
+        let mut start = 0;
+        for i in 0..num_partitions {
+            let end = if i == num_partitions - 1 {
+                self.len()
+            } else {
+                start + partition_size
+            };
+            let partition = RandomKVs {
+                kvs: self.kvs[start..end].to_vec(),
+            };
+            partitions.push_back(partition);
+            start = end;
+        }
+        partitions
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&usize, &Vec<u8>)> {

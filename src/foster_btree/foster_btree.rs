@@ -124,6 +124,7 @@ impl OpByte {
 struct OpStat {
     sm_trigger: UnsafeCell<[usize; 7]>, // Number of times the structure modification is triggered
     sm_success: UnsafeCell<[usize; 7]>, // Number of times the structure modification is successful
+    additional_traversals: UnsafeCell<[usize; 11]>, // Number of additional insert operation is tried. #Additional Trials -> Count
 }
 
 impl OpStat {
@@ -131,6 +132,7 @@ impl OpStat {
         OpStat {
             sm_trigger: UnsafeCell::new([0; 7]),
             sm_success: UnsafeCell::new([0; 7]),
+            additional_traversals: UnsafeCell::new([0; 11]),
         }
     }
 
@@ -146,6 +148,7 @@ impl OpStat {
         let mut result = String::new();
         let sm_trigger = unsafe { &*self.sm_trigger.get() };
         let sm_success = unsafe { &*self.sm_success.get() };
+        result.push_str("Structure Modification Statistics\n");
         let mut sep = "";
         for i in 0..7 {
             result.push_str(sep);
@@ -172,7 +175,21 @@ impl OpStat {
             ));
             sep = "\n";
         }
-
+        result.push_str("\n\n");
+        let mut sep = "";
+        result.push_str("Additional Traversal For Exclusive Page Latch\n");
+        let mut cumulative_count = 0;
+        for i in 0..11 {
+            result.push_str(sep);
+            let count = unsafe { &*self.additional_traversals.get() }[i];
+            cumulative_count += count;
+            if i == 10 {
+                result.push_str(&format!("{:2}+: {:6} ({:6})", i, count, cumulative_count));
+            } else {
+                result.push_str(&format!("{:3}: {:6} ({:6})", i, count, cumulative_count));
+            }
+            sep = "\n";
+        }
         result
     }
 
@@ -184,6 +201,11 @@ impl OpStat {
         for i in 0..7 {
             sm_trigger[i] += other_sm_trigger[i];
             sm_success[i] += other_sm_success[i];
+        }
+        let additional_traversals = unsafe { &mut *self.additional_traversals.get() };
+        let other_additional_traversals = unsafe { &*other.additional_traversals.get() };
+        for i in 0..11 {
+            additional_traversals[i] += other_additional_traversals[i];
         }
     }
 }
@@ -217,6 +239,17 @@ fn inc_local_stat_trigger(op_type: OpType) {
 fn inc_local_stat_success(op_type: OpType) {
     LOCAL_STAT.with(|stat| {
         stat.stat.inc_success(op_type);
+    });
+}
+
+fn inc_local_additional_traversals(attempts: u32) {
+    LOCAL_STAT.with(|stat| {
+        let additional_traversals = unsafe { &mut *stat.stat.additional_traversals.get() };
+        if attempts >= 10 {
+            additional_traversals[10] += 1;
+        } else {
+            additional_traversals[attempts as usize] += 1;
+        }
     });
 }
 
@@ -1270,6 +1303,8 @@ impl<T: MemPool> FosterBtree<T> {
             loop {
                 match self.try_traverse_to_leaf_for_write(key) {
                     Ok(leaf_page) => {
+                        #[cfg(any(feature = "stat"))]
+                        inc_local_additional_traversals(attempts);
                         break leaf_page;
                     }
                     Err(TreeStatus::WriteLockFailed) => {

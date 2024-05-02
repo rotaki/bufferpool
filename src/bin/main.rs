@@ -51,51 +51,49 @@ fn run_insertion_bench(num_threads: usize) {
     let val_max_size = 100;
 
     log_trace!("Generating {} keys into the tree", num_keys);
-    let kvs = Arc::new(RandomKVs::new(num_keys, val_min_size, val_max_size));
-    log_trace!("KVs generated");
+    let original_kvs = RandomKVs::new(num_keys, val_min_size, val_max_size);
+    let mut kvs = original_kvs.partition(num_threads);
 
-    // Use 3 threads to insert keys into the tree.
-    // Increment the counter for each key inserted and if the counter is equal to the number of keys, then all keys have been inserted.
-    let counter = Arc::new(AtomicUsize::new(0));
-    thread::scope(
-        // issue three threads to insert keys into the tree
-        |s| {
-            for _ in 0..num_threads {
-                let btree = btree.clone();
-                let kvs = kvs.clone();
-                let counter = counter.clone();
-                s.spawn(move || {
-                    log_trace!("Thread {:?} started", thread::current().id());
-                    loop {
-                        let counter = counter.fetch_add(1, Ordering::AcqRel);
-                        if counter >= num_keys {
-                            break;
-                        }
-                        let (key, val) = &kvs[counter];
-                        log_trace!("Inserting key: {:?}", key);
-                        let key = to_bytes(*key, 100);
-                        btree.insert(&key, val).unwrap();
-                    }
-                });
+    // Check the total #kvs is same as num_keys
+    #[cfg(debug_assertions)]
+    {
+        assert_eq!(kvs.len(), num_threads);
+        let total_kvs: usize = kvs.iter().map(|kvs| kvs.len()).sum();
+        assert_eq!(total_kvs, num_keys);
+    }
+
+    let mut handles = vec![];
+    while let Some(kvs) = kvs.pop_front() {
+        let btree = Arc::clone(&btree);
+        let handle = thread::spawn(move || {
+            for (key, val) in kvs.iter() {
+                let key = to_bytes(*key, 100);
+                btree.insert(&key, val).unwrap();
             }
-        },
-    );
+        });
+        handles.push(handle);
+    }
+    for handle in handles {
+        handle.join().unwrap();
+    }
 
     println!("stats: \n{}", btree.op_stats());
 
-    // // Check if all keys have been inserted.
-    // for (key, val) in kvs.iter() {
-    //     log_trace!("Checking key: {:?}", key);
-    //     let key = to_bytes(*key, 100);
-    //     let current_val = btree.get_key(&key).unwrap();
-    //     assert_eq!(current_val, *val);
-    // }
+    // Check if all keys have been inserted.
+    #[cfg(debug_assertions)]
+    for (key, val) in original_kvs.iter() {
+        log_trace!("Checking key: {:?}", key);
+        let key = to_bytes(*key, 100);
+        let current_val = btree.get(&key).unwrap();
+        assert_eq!(current_val, *val);
+    }
 }
 
 // main function
 // get number of threads from command line
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    assert_eq!(args.len(), 2, "Usage: ./main <num_threads>");
     let num_threads = args[1].parse::<usize>().unwrap();
     run_insertion_bench(num_threads);
 }

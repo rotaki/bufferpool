@@ -1,6 +1,6 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -37,7 +37,7 @@ fn setup_inmem_btree_empty() -> FosterBtree<InMemPool> {
     btree
 }
 
-fn insert_into_foster_tree(kvs: &Arc<RandomKVs>) {
+fn insert_into_foster_tree(kvs: &RandomKVs) {
     let tree = setup_inmem_btree_empty();
     for (k, v) in kvs.iter() {
         let key = to_bytes(*k);
@@ -45,33 +45,24 @@ fn insert_into_foster_tree(kvs: &Arc<RandomKVs>) {
     }
 }
 
-fn insert_into_foster_tree_parallel(kvs: &Arc<RandomKVs>) {
+fn insert_into_foster_tree_parallel(_num_threads: usize, kvs: &VecDeque<RandomKVs>) {
     let btree = Arc::new(setup_inmem_btree_empty());
-    // Use 3 threads to insert keys into the tree.
-    // Increment the counter for each key inserted and if the counter is equal to the number of keys, then all keys have been inserted.
-    let counter = Arc::new(AtomicUsize::new(0));
-    thread::scope(
-        // issue three threads to insert keys into the tree
-        |s| {
-            for i in 0..10 {
-                let btree = btree.clone();
-                let kvs = kvs.clone();
-                let counter = counter.clone();
-                s.spawn(move || loop {
-                    let counter = counter.fetch_add(1, Ordering::AcqRel);
-                    if counter >= kvs.len() {
-                        break;
-                    }
-                    let (key, val) = &kvs[counter];
-                    let key = to_bytes(*key);
-                    btree.insert(&key, val).unwrap();
-                });
-            }
-        },
-    );
+
+    // Scopeed threads
+    thread::scope(|s| {
+        for partition in kvs.iter() {
+            let btree = Arc::clone(&btree);
+            s.spawn(move || {
+                for (k, v) in partition.iter() {
+                    let key = to_bytes(*k);
+                    btree.insert(&key, v).unwrap();
+                }
+            });
+        }
+    })
 }
 
-fn insert_into_btree(kvs: &Arc<RandomKVs>) {
+fn insert_into_btree(kvs: &RandomKVs) {
     let mut tree = BTreeMap::new();
     for (k, v) in kvs.iter() {
         let key = to_bytes(*k);
@@ -83,9 +74,10 @@ fn bench_random_insertion(c: &mut Criterion) {
     let num_keys = 100000;
     let val_min_size = 50;
     let val_max_size = 100;
+    let num_threads = 10;
 
     let kvs = RandomKVs::new(num_keys, val_min_size, val_max_size);
-    let kvs = Arc::new(kvs);
+    let partitioned_kvs = kvs.partition(num_threads);
 
     let mut group = c.benchmark_group("Random Insertion");
     // group.sample_size(10);
@@ -95,7 +87,12 @@ fn bench_random_insertion(c: &mut Criterion) {
     });
 
     group.bench_function("Foster BTree Insertion Parallel", |b| {
-        b.iter(|| black_box(insert_into_foster_tree_parallel(&kvs)));
+        b.iter(|| {
+            black_box(insert_into_foster_tree_parallel(
+                num_threads,
+                &partitioned_kvs,
+            ))
+        });
     });
 
     group.bench_function("BTreeMap Insertion", |b| {
