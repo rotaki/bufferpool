@@ -6,9 +6,12 @@ init().then(() => {
     // Module is initialized, now you can create an instance of FosterBtreeVisualizer
     const fosterTree = new FosterBtreeVisualizer();
 
-    // Set up event listeners for insert and search actions
+    // Set up event listeners for insert and get actions
     setupInsert(fosterTree);
-    setupSearch(fosterTree);
+    setupUpdate(fosterTree);
+    setupDelete(fosterTree);
+    setupUpsert(fosterTree);
+    setupGet(fosterTree);
     setupClearLogs();
 }).catch(error => {
     console.error('Error initializing the WebAssembly module:', error);
@@ -25,12 +28,44 @@ function setupInsert(fosterTree) {
     });
 }
 
-function setupSearch(fosterTree) {
-    const searchButton = document.getElementById('searchButton');
-    searchButton.addEventListener('click', () => {
-        const key = document.getElementById('searchKey').value;
-        const result = fosterTree.search(key);
-        const message = `Search operation performed on key: ${key}, result: ${result}`;
+function setupUpdate(fosterTree) {
+    const updateButton = document.getElementById('updateButton');
+    updateButton.addEventListener('click', () => {
+        const key = document.getElementById('updateKey').value;
+        const payloadSize = document.getElementById('newPayloadSize').value;
+        const result = fosterTree.update(key, payloadSize);
+        const message = `Update operation performed on key: ${key} with payload size: ${payloadSize}, result: ${result}`;
+        logOperation(fosterTree, message);
+    });
+}
+
+function setupDelete(fosterTree) {
+    const deleteButton = document.getElementById('deleteButton');
+    deleteButton.addEventListener('click', () => {
+        const key = document.getElementById('deleteKey').value;
+        const result = fosterTree.delete(key);
+        const message = `Delete operation performed on key: ${key}, result: ${result}`;
+        logOperation(fosterTree, message);
+    });
+}
+
+function setupUpsert(fosterTree) {
+    const upsertButton = document.getElementById('upsertButton');
+    upsertButton.addEventListener('click', () => {
+        const key = document.getElementById('upsertKey').value;
+        const payloadSize = document.getElementById('upsertPayloadSize').value;
+        const result = fosterTree.upsert(key, payloadSize);
+        const message = `Upsert operation performed on key: ${key} with payload size: ${payloadSize}, result: ${result}`;
+        logOperation(fosterTree, message);
+    });
+}
+
+function setupGet(fosterTree) {
+    const getButton = document.getElementById('getButton');
+    getButton.addEventListener('click', () => {
+        const key = document.getElementById('getKey').value;
+        const result = fosterTree.get(key);
+        const message = `get operation performed on key: ${key}, result: ${result}`;
         logOperation(fosterTree, message);
     });
 }

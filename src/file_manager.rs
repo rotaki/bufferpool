@@ -5,7 +5,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum FMStatus {
     OpenError,
     SeekError,

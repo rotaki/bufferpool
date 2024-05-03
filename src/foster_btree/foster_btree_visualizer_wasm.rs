@@ -47,11 +47,46 @@ impl FosterBtreeVisualizer {
         }
     }
 
-    pub fn delete(&mut self, key: usize) -> String {
-        unimplemented!("delete")
+    pub fn update(&mut self, key: usize, payload_size: usize) -> String {
+        if payload_size > MAX_BYTES_USED {
+            return "Payload size is too large".to_string();
+        }
+        match self.bt.update(&key.to_be_bytes(), &vec![1; payload_size]) {
+            Ok(_) => {
+                format!("Updated key: {}", key)
+            }
+            Err(e) => {
+                format!("Error: {:?}", e)
+            }
+        }
     }
 
-    pub fn search(&self, key: usize) -> String {
+    pub fn delete(&mut self, key: usize) -> String {
+        match self.bt.delete(&key.to_be_bytes()) {
+            Ok(_) => {
+                format!("Deleted key: {}", key)
+            }
+            Err(e) => {
+                format!("Error: {:?}", e)
+            }
+        }
+    }
+
+    pub fn upsert(&mut self, key: usize, payload_size: usize) -> String {
+        if payload_size > MAX_BYTES_USED {
+            return "Payload size is too large".to_string();
+        }
+        match self.bt.upsert(&key.to_be_bytes(), &vec![1; payload_size]) {
+            Ok(_) => {
+                format!("Upserted key: {}", key)
+            }
+            Err(e) => {
+                format!("Error: {:?}", e)
+            }
+        }
+    }
+
+    pub fn get(&self, key: usize) -> String {
         match self.bt.get(&key.to_be_bytes()) {
             Ok(val) => {
                 format!("Found key: {}, payload_size: {}", key, val.len())

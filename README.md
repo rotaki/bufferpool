@@ -6,22 +6,25 @@
 * [x] Write the evicted page to disk if dirty
 * [x] Add logger for debugging
 * [x] Add cache replacement implementations
-    * [x] Add more eviction algo
+    * [x] Add more eviction algo (SIEVE)
 * [x] Add write-ahead log, page lsn
 * [] Add pointer swizzling
 
 ## Foster B-Tree
 * [x] Add Foster B-tree Page
-  * [] Add remove operator
-  * [] Add upsert operator
-  * [] Add range scan operator
-    * [] Add consistency checker
+  * [x] Add insert operator
+  * [x] Add get operator
+  * [x] Add delete operator
+  * [x] Add upsert operator
   * [x] Add statistics for each structure modification
     * [x] Revise the split decision
+  * [] Add range scan operator
+    * [] Add consistency checker
+  * [] Optimistic lock coupling
+  * [] Add ghost record support
+  * [] Reuse the removed page in merge
   * [] Add prefix compression in pages
   * [] Add page split into three pages
-  * [] Reuse the removed page in merge
-  * [] Optimistic lock coupling
   * [] Test with bp (limited memory pool with disk offloading)
 
 ## Add Logging

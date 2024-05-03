@@ -11,7 +11,10 @@
     <style>
         /* Add CSS to increase button size */
         #insertButton,
-        #searchButton,
+        #updateButton,
+        #deleteButton,
+        #upsertButton,
+        #getButton,
         #clearLogsButton {
             font-size: 16px; /* Adjust font size */
             padding: 10px 20px; /* Adjust padding */
@@ -32,8 +35,22 @@
         <button id="insertButton">Insert</button>
     </div>
     <div>
-        <input type="number" id="searchKey" placeholder="Key to search">
-        <button id="searchButton">Search</button>
+        <input type="number" id="updateKey" placeholder="Key to update">
+        <input type="number" id="newPayloadSize" placeholder="New Payload Size">
+        <button id="updateButton">Update</button>
+    </div>
+    <div>
+        <input type="number" id="deleteKey" placeholder="Key to delete">
+        <button id="deleteButton">Delete</button>
+    </div>
+    <div>
+        <input type="number" id="upsertKey" placeholder="Key to upsert">
+        <input type="number" id="upsertPayloadSize" placeholder="Payload Size">
+        <button id="upsertButton">Upsert</button>
+    </div>
+    <div>
+        <input type="number" id="getKey" placeholder="Key to get">
+        <button id="getButton">Get</button>
     </div>
     <div>
         <button id="clearLogsButton">Clear Old Logs</button>

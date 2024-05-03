@@ -41,7 +41,7 @@ impl std::fmt::Display for PageKey {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum MemPoolStatus {
     FileManagerNotFound,
     FileManagerError(FMStatus),

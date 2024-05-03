@@ -19,6 +19,7 @@ use crate::{
 
 use super::foster_btree_page::{BTreeKey, FosterBtreePage};
 
+#[derive(PartialEq)]
 pub enum TreeStatus {
     Ok,
     NotFound,
@@ -1395,16 +1396,16 @@ impl<T: MemPool> FosterBtree<T> {
     pub fn get(&self, key: &[u8]) -> Result<Vec<u8>, TreeStatus> {
         let foster_page = self.traverse_to_leaf_for_read(key)?;
         let slot_id = foster_page.lower_bound_slot_id(&BTreeKey::new(key));
-        if foster_page.get_btree_key(slot_id) == BTreeKey::new(key) {
-            // Exact match
-            if foster_page.is_ghost_slot(slot_id) {
-                Err(TreeStatus::NotFound)
-            } else {
-                Ok(foster_page.get_val(slot_id).to_vec())
-            }
-        } else {
-            // Non-existent key
+        if slot_id == 0 {
+            // Lower fence. Non-existent key
             Err(TreeStatus::NotFound)
+        } else {
+            if foster_page.get_raw_key(slot_id) == key {
+                Ok(foster_page.get_val(slot_id).to_vec())
+            } else {
+                // Non-existent key
+                Err(TreeStatus::NotFound)
+            }
         }
     }
 
@@ -1505,7 +1506,7 @@ mod tests {
         foster_btree::foster_btree::{
             adopt, anti_adopt, ascend_root, balance, descend_root, is_large, is_small, merge,
             print_page, should_adopt, should_antiadopt, should_load_balance, should_merge,
-            should_root_ascend, should_root_descend, MIN_BYTES_USED,
+            should_root_ascend, should_root_descend, TreeStatus, MIN_BYTES_USED,
         },
         log, log_trace,
         page::Page,
@@ -2633,7 +2634,153 @@ mod tests {
     }
 
     #[test]
-    fn test_stress() {
+    fn test_random_updates() {
+        let btree = setup_inmem_btree_empty();
+        // Insert 1024 bytes
+        let val = vec![3_u8; 1024];
+        let order = [6, 3, 8, 1, 5, 7, 2, 4, 9, 0];
+        for i in order.iter() {
+            println!(
+                "**************************** Inserting key {} **************************",
+                i
+            );
+            let key = to_bytes(*i);
+            btree.insert(&key, &val).unwrap();
+        }
+        let new_val = vec![4_u8; 128];
+        for i in order.iter() {
+            println!(
+                "**************************** Updating key {} **************************",
+                i
+            );
+            let key = to_bytes(*i);
+            btree.update(&key, &new_val).unwrap();
+        }
+        for i in order.iter() {
+            println!(
+                "**************************** Getting key {} **************************",
+                i
+            );
+            let key = to_bytes(*i);
+            let current_val = btree.get(&key).unwrap();
+            assert_eq!(current_val, new_val);
+        }
+        let new_val = vec![5_u8; 512];
+        for i in order.iter() {
+            println!(
+                "**************************** Updating key {} **************************",
+                i
+            );
+            let key = to_bytes(*i);
+            btree.update(&key, &new_val).unwrap();
+        }
+        for i in order.iter() {
+            println!(
+                "**************************** Getting key {} **************************",
+                i
+            );
+            let key = to_bytes(*i);
+            let current_val = btree.get(&key).unwrap();
+            assert_eq!(current_val, new_val);
+        }
+    }
+
+    #[test]
+    fn test_random_deletion() {
+        let btree = setup_inmem_btree_empty();
+        // Insert 1024 bytes
+        let val = vec![3_u8; 1024];
+        let order = [6, 3, 8, 1, 5, 7, 2, 4, 9, 0];
+        for i in order.iter() {
+            println!(
+                "**************************** Inserting key {} **************************",
+                i
+            );
+            let key = to_bytes(*i);
+            btree.insert(&key, &val).unwrap();
+        }
+        for i in order.iter() {
+            println!(
+                "**************************** Deleting key {} **************************",
+                i
+            );
+            let key = to_bytes(*i);
+            btree.delete(&key).unwrap();
+        }
+        for i in order.iter() {
+            println!(
+                "**************************** Getting key {} **************************",
+                i
+            );
+            let key = to_bytes(*i);
+            let current_val = btree.get(&key);
+            assert_eq!(current_val, Err(TreeStatus::NotFound))
+        }
+    }
+
+    #[test]
+    fn test_random_upserts() {
+        let btree = setup_inmem_btree_empty();
+        // Insert 1024 bytes
+        let val = vec![3_u8; 1024];
+        let order = [6, 3, 8, 1, 5, 7, 2, 4, 9, 0];
+        for i in order.iter() {
+            println!(
+                "**************************** Upserting key {} **************************",
+                i
+            );
+            let key = to_bytes(*i);
+            btree.upsert(&key, &val).unwrap();
+        }
+        for i in order.iter() {
+            println!(
+                "**************************** Getting key {} **************************",
+                i
+            );
+            let key = to_bytes(*i);
+            let current_val = btree.get(&key).unwrap();
+            assert_eq!(current_val, val);
+        }
+        let new_val = vec![4_u8; 128];
+        for i in order.iter() {
+            println!(
+                "**************************** Upserting key {} **************************",
+                i
+            );
+            let key = to_bytes(*i);
+            btree.upsert(&key, &new_val).unwrap();
+        }
+        for i in order.iter() {
+            println!(
+                "**************************** Getting key {} **************************",
+                i
+            );
+            let key = to_bytes(*i);
+            let current_val = btree.get(&key).unwrap();
+            assert_eq!(current_val, new_val);
+        }
+        let new_val = vec![5_u8; 512];
+        for i in order.iter() {
+            println!(
+                "**************************** Upserting key {} **************************",
+                i
+            );
+            let key = to_bytes(*i);
+            btree.upsert(&key, &new_val).unwrap();
+        }
+        for i in order.iter() {
+            println!(
+                "**************************** Getting key {} **************************",
+                i
+            );
+            let key = to_bytes(*i);
+            let current_val = btree.get(&key).unwrap();
+            assert_eq!(current_val, new_val);
+        }
+    }
+
+    #[test]
+    fn test_insertion_stress() {
         let num_keys = 5000;
         let val_min_size = 50;
         let val_max_size = 100;
