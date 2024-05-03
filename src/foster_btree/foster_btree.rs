@@ -124,7 +124,8 @@ impl OpByte {
 struct OpStat {
     sm_trigger: UnsafeCell<[usize; 7]>, // Number of times the structure modification is triggered
     sm_success: UnsafeCell<[usize; 7]>, // Number of times the structure modification is successful
-    additional_traversals: UnsafeCell<[usize; 11]>, // Number of additional insert operation is tried. #Additional Trials -> Count
+    additional_traversals: UnsafeCell<[usize; 11]>, // Number of additional traversals for exclusive page latch
+    shared_page_latch_failures: UnsafeCell<[usize; 2]>, // Number of times the read page fails [0] failure, [1] total
 }
 
 impl OpStat {
@@ -133,6 +134,7 @@ impl OpStat {
             sm_trigger: UnsafeCell::new([0; 7]),
             sm_success: UnsafeCell::new([0; 7]),
             additional_traversals: UnsafeCell::new([0; 11]),
+            shared_page_latch_failures: UnsafeCell::new([0; 2]),
         }
     }
 
@@ -190,6 +192,23 @@ impl OpStat {
             }
             sep = "\n";
         }
+        result.push_str("\n\n");
+        let shared_page_latch_failures = unsafe { &*self.shared_page_latch_failures.get() };
+        result.push_str("Shared Page Latch Failure\n");
+        result.push_str(&format!(
+            "Failure: {:6} / {:6} ({:6})",
+            shared_page_latch_failures[0],
+            shared_page_latch_failures[1],
+            if shared_page_latch_failures[1] == 0 {
+                "N/A".to_owned()
+            } else {
+                format!(
+                    "{:.2}%",
+                    (shared_page_latch_failures[0] as f64) / (shared_page_latch_failures[1] as f64) * 100.0
+                )
+            }
+        ));
+
         result
     }
 
@@ -206,6 +225,11 @@ impl OpStat {
         let other_additional_traversals = unsafe { &*other.additional_traversals.get() };
         for i in 0..11 {
             additional_traversals[i] += other_additional_traversals[i];
+        }
+        let shared_page_latch_failures = unsafe { &mut *self.shared_page_latch_failures.get() };
+        let other_shared_page_latch_failures = unsafe { &*other.shared_page_latch_failures.get() };
+        for i in 0..2 {
+            shared_page_latch_failures[i] += other_shared_page_latch_failures[i];
         }
     }
 }
@@ -250,6 +274,20 @@ fn inc_local_additional_traversals(attempts: u32) {
         } else {
             additional_traversals[attempts as usize] += 1;
         }
+    });
+}
+
+fn inc_shared_page_latch_failures() {
+    LOCAL_STAT.with(|stat| {
+        let shared_page_latch_failures = unsafe { &mut *stat.stat.shared_page_latch_failures.get() };
+        shared_page_latch_failures[0] += 1;
+    });
+}
+
+fn inc_shared_page_latch_count() {
+    LOCAL_STAT.with(|stat| {
+        let shared_page_latch_failures = unsafe { &mut *stat.stat.shared_page_latch_failures.get() };
+        shared_page_latch_failures[1] += 1;
     });
 }
 
@@ -1081,10 +1119,14 @@ impl<T: MemPool> FosterBtree<T> {
 
     fn read_page(&self, page_key: PageKey) -> FrameReadGuard {
         let page = loop {
+            #[cfg(any(feature = "stat"))]
+            inc_shared_page_latch_count();
             let page = self.mem_pool.get_page_for_read(page_key);
             match page {
                 Ok(page) => break page,
                 Err(MemPoolStatus::FrameReadLatchGrantFailed) => {
+                    #[cfg(any(feature = "stat"))]
+                    inc_shared_page_latch_failures();
                     std::hint::spin_loop();
                 }
                 _ => {
@@ -1116,6 +1158,7 @@ impl<T: MemPool> FosterBtree<T> {
         }
     }
 
+    #[inline]
     fn modify_structure_if_needed_for_read<'a>(
         &self,
         is_foster_relationship: bool,

@@ -89,11 +89,29 @@ fn run_insertion_bench(num_threads: usize) {
     }
 }
 
+fn run_insertion_bench_single_thread() {
+    let btree = Arc::new(setup_inmem_btree_empty());
+    let num_keys = 500000;
+    let val_min_size = 50;
+    let val_max_size = 100;
+
+    let kvs = RandomKVs::new(num_keys, val_min_size, val_max_size);
+    for (key, val) in kvs.iter() {
+        let key = to_bytes(*key, 100);
+        btree.insert(&key, val).unwrap();
+    }
+
+    println!("stats: \n{}", btree.op_stats());
+}
+
 // main function
 // get number of threads from command line
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    assert_eq!(args.len(), 2, "Usage: ./main <num_threads>");
-    let num_threads = args[1].parse::<usize>().unwrap();
-    run_insertion_bench(num_threads);
+    // let args: Vec<String> = std::env::args().collect();
+    // assert_eq!(args.len(), 2, "Usage: ./main <num_threads>");
+    // let num_threads = args[1].parse::<usize>().unwrap();
+    // run_insertion_bench(num_threads);
+    // run_insertion_bench_single_thread();
+    run_insertion_bench(2)
 }
+
