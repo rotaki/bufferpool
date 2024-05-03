@@ -22,6 +22,7 @@
   * [] Add page split into three pages
   * [] Reuse the removed page in merge
   * [] Optimistic lock coupling
+  * [] Test with bp (limited memory pool with disk offloading)
 
 ## Add Logging
 * [x] Add log buffer with append and flush capabilities

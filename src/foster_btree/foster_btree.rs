@@ -204,7 +204,8 @@ impl OpStat {
             } else {
                 format!(
                     "{:.2}%",
-                    (shared_page_latch_failures[0] as f64) / (shared_page_latch_failures[1] as f64) * 100.0
+                    (shared_page_latch_failures[0] as f64) / (shared_page_latch_failures[1] as f64)
+                        * 100.0
                 )
             }
         ));
@@ -230,6 +231,23 @@ impl OpStat {
         let other_shared_page_latch_failures = unsafe { &*other.shared_page_latch_failures.get() };
         for i in 0..2 {
             shared_page_latch_failures[i] += other_shared_page_latch_failures[i];
+        }
+    }
+
+    pub fn clear(&self) {
+        let sm_trigger = unsafe { &mut *self.sm_trigger.get() };
+        let sm_success = unsafe { &mut *self.sm_success.get() };
+        let additional_traversals = unsafe { &mut *self.additional_traversals.get() };
+        let shared_page_latch_failures = unsafe { &mut *self.shared_page_latch_failures.get() };
+        for i in 0..7 {
+            sm_trigger[i] = 0;
+            sm_success[i] = 0;
+        }
+        for i in 0..11 {
+            additional_traversals[i] = 0;
+        }
+        for i in 0..2 {
+            shared_page_latch_failures[i] = 0;
         }
     }
 }
@@ -279,14 +297,16 @@ fn inc_local_additional_traversals(attempts: u32) {
 
 fn inc_shared_page_latch_failures() {
     LOCAL_STAT.with(|stat| {
-        let shared_page_latch_failures = unsafe { &mut *stat.stat.shared_page_latch_failures.get() };
+        let shared_page_latch_failures =
+            unsafe { &mut *stat.stat.shared_page_latch_failures.get() };
         shared_page_latch_failures[0] += 1;
     });
 }
 
 fn inc_shared_page_latch_count() {
     LOCAL_STAT.with(|stat| {
-        let shared_page_latch_failures = unsafe { &mut *stat.stat.shared_page_latch_failures.get() };
+        let shared_page_latch_failures =
+            unsafe { &mut *stat.stat.shared_page_latch_failures.get() };
         shared_page_latch_failures[1] += 1;
     });
 }
@@ -1079,9 +1099,13 @@ impl<T: MemPool> FosterBtree<T> {
     }
 
     pub fn op_stats(&self) -> String {
-        #[cfg(any(feature = "stat"))]
+        #[cfg(feature = "stat")]
         {
             let stats = GLOBAL_STAT.lock().unwrap();
+            LOCAL_STAT.with(|local_stat| {
+                stats.merge(&local_stat.stat);
+                local_stat.stat.clear();
+            });
             stats.to_string()
         }
         #[cfg(not(feature = "stat"))]
