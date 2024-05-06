@@ -1225,51 +1225,38 @@ impl<T: MemPool> FosterBtree<T> {
         }
     }
 
-    fn traverse_to_leaf_for_read(
-        &self,
-        key: &[u8],
-        structure_modification: bool,
-        page_fn: &mut dyn FnMut(&FrameReadGuard),
-    ) -> Result<FrameReadGuard, TreeStatus> {
+    fn traverse_to_leaf_for_read(&self, key: &[u8]) -> Result<FrameReadGuard, TreeStatus> {
         let mut current_page = self.read_page(self.root_key);
         let mut op_byte = OpByte::new();
         loop {
             let this_page = current_page;
-            page_fn(&this_page);
             log_trace!("Traversal for read, page: {}", this_page.get_id());
             if this_page.is_leaf() {
                 if this_page.has_foster_child() && this_page.get_foster_key() <= key {
                     // Check whether the foster child should be traversed.
                     let foster_page_key = PageKey::new(self.c_key, this_page.get_foster_page_id());
                     let foster_page = self.read_page(foster_page_key);
-                    if structure_modification {
-                        // Now we have two locks. We need to release the lock of the current page.
-                        let (op, this_page, foster_page) = self
-                            .modify_structure_if_needed_for_read(
-                                true,
-                                this_page,
-                                foster_page,
-                                &mut op_byte,
-                            );
-                        match op {
-                            Some(OpType::MERGE) | Some(OpType::LOADBALANCE) => {
-                                current_page = this_page;
-                                continue;
-                            }
-                            None | Some(OpType::SPLIT) | Some(OpType::ASCENDROOT) => {
-                                // Start from the child
-                                op_byte.reset();
-                                current_page = foster_page;
-                                continue;
-                            }
-                            _ => {
-                                panic!("Unexpected operation");
-                            }
+                    // Now we have two locks. We need to release the lock of the current page.
+                    let (op, this_page, foster_page) = self.modify_structure_if_needed_for_read(
+                        true,
+                        this_page,
+                        foster_page,
+                        &mut op_byte,
+                    );
+                    match op {
+                        Some(OpType::MERGE) | Some(OpType::LOADBALANCE) => {
+                            current_page = this_page;
+                            continue;
                         }
-                    } else {
-                        op_byte.reset();
-                        current_page = foster_page;
-                        continue;
+                        None | Some(OpType::SPLIT) | Some(OpType::ASCENDROOT) => {
+                            // Start from the child
+                            op_byte.reset();
+                            current_page = foster_page;
+                            continue;
+                        }
+                        _ => {
+                            panic!("Unexpected operation");
+                        }
                     }
                 } else {
                     return Ok(this_page);
@@ -1285,43 +1272,34 @@ impl<T: MemPool> FosterBtree<T> {
             };
 
             let next_page = self.read_page(page_key);
-            if structure_modification {
-                // Now we have two locks. We need to release the lock of the current page.
-                let (op, this_page, next_page) = self.modify_structure_if_needed_for_read(
-                    is_foster_relationship,
-                    this_page,
-                    next_page,
-                    &mut op_byte,
-                );
-                match op {
-                    Some(OpType::MERGE)
-                    | Some(OpType::LOADBALANCE)
-                    | Some(OpType::DESCENDROOT)
-                    | Some(OpType::ADOPT) => {
-                        // Continue from the current page
-                        current_page = this_page;
-                        continue;
-                    }
-                    None
-                    | Some(OpType::SPLIT)
-                    | Some(OpType::ASCENDROOT)
-                    | Some(OpType::ANTIADOPT) => {
-                        // Start from the child
-                        op_byte.reset();
-                        current_page = next_page;
-                        continue;
-                    }
+            // Now we have two locks. We need to release the lock of the current page.
+            let (op, this_page, next_page) = self.modify_structure_if_needed_for_read(
+                is_foster_relationship,
+                this_page,
+                next_page,
+                &mut op_byte,
+            );
+            match op {
+                Some(OpType::MERGE)
+                | Some(OpType::LOADBALANCE)
+                | Some(OpType::DESCENDROOT)
+                | Some(OpType::ADOPT) => {
+                    // Continue from the current page
+                    current_page = this_page;
+                    continue;
                 }
-            } else {
-                op_byte.reset();
-                current_page = next_page;
-                continue;
+                None | Some(OpType::SPLIT) | Some(OpType::ASCENDROOT) | Some(OpType::ANTIADOPT) => {
+                    // Start from the child
+                    op_byte.reset();
+                    current_page = next_page;
+                    continue;
+                }
             }
         }
     }
 
     fn try_traverse_to_leaf_for_write(&self, key: &[u8]) -> Result<FrameWriteGuard, TreeStatus> {
-        let leaf_page = self.traverse_to_leaf_for_read(key, true, &mut |_| {})?;
+        let leaf_page = self.traverse_to_leaf_for_read(key)?;
         match leaf_page.try_upgrade(true) {
             Ok(upgraded) => Ok(upgraded),
             Err(_) => Err(TreeStatus::WriteLockFailed),
@@ -1358,7 +1336,7 @@ impl<T: MemPool> FosterBtree<T> {
     }
 
     pub fn get(&self, key: &[u8]) -> Result<Vec<u8>, TreeStatus> {
-        let foster_page = self.traverse_to_leaf_for_read(key, true, &mut |_| {})?;
+        let foster_page = self.traverse_to_leaf_for_read(key)?;
         let slot_id = foster_page.lower_bound_slot_id(&BTreeKey::new(key));
         if slot_id == 0 {
             // Lower fence. Non-existent key
@@ -1491,14 +1469,7 @@ impl<T: MemPool> FosterBTreePageTraversal<T> {
     where
         V: PageVisitor,
     {
-        self.visit_subtree(visitor, self.root_key);
-    }
-
-    pub fn visit_subtree<V>(&self, visitor: &mut V, page_key: PageKey)
-    where
-        V: PageVisitor,
-    {
-        let mut stack = vec![(page_key, false)]; // (page_key, pre_visited)
+        let mut stack = vec![(self.root_key, false)]; // (page_key, pre_visited)
         while let Some((next_key, pre_visited)) = stack.last_mut() {
             let page = self.mem_pool.get_page_for_read(*next_key).unwrap();
             if *pre_visited {

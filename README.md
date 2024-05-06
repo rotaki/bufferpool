@@ -18,9 +18,9 @@
   * [x] Add upsert operator
   * [x] Add statistics for each structure modification
     * [x] Revise the split decision
+  * [x] Add thread-unsafe page traversal operator
+    * [x] Add consistency checker
   * [] Add memory usage profiler
-  * [] Add thread-unsafe range scan operator
-    * [] Add consistency checker
   * [] Test with bp (limited memory pool with disk offloading)
   * [] Reuse the removed page in merge
   * [] Add thread-safe range scan operator with page versioning (optimistic lock coupling)
