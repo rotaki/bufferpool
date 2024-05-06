@@ -275,18 +275,21 @@ thread_local! {
     };
 }
 
+#[cfg(any(feature = "stat"))]
 fn inc_local_stat_trigger(op_type: OpType) {
     LOCAL_STAT.with(|stat| {
         stat.stat.inc_trigger(op_type);
     });
 }
 
+#[cfg(any(feature = "stat"))]
 fn inc_local_stat_success(op_type: OpType) {
     LOCAL_STAT.with(|stat| {
         stat.stat.inc_success(op_type);
     });
 }
 
+#[cfg(any(feature = "stat"))]
 fn inc_local_additional_traversals(attempts: u32) {
     LOCAL_STAT.with(|stat| {
         let additional_traversals = unsafe { &mut *stat.stat.additional_traversals.get() };
@@ -298,6 +301,7 @@ fn inc_local_additional_traversals(attempts: u32) {
     });
 }
 
+#[cfg(any(feature = "stat"))]
 fn inc_shared_page_latch_failures() {
     LOCAL_STAT.with(|stat| {
         let shared_page_latch_failures =
@@ -306,6 +310,7 @@ fn inc_shared_page_latch_failures() {
     });
 }
 
+#[cfg(any(feature = "stat"))]
 fn inc_shared_page_latch_count() {
     LOCAL_STAT.with(|stat| {
         let shared_page_latch_failures =
@@ -1096,8 +1101,8 @@ impl<T: MemPool> FosterBtree<T> {
                     inc_shared_page_latch_failures();
                     std::hint::spin_loop();
                 }
-                _ => {
-                    panic!("Unexpected error");
+                Err(e) => {
+                    panic!("Unexpected error: {:?}", e);
                 }
             }
         };
@@ -1659,61 +1664,83 @@ mod tests {
         },
         log, log_trace,
         page::Page,
-        random::{gen_random_byte_vec, gen_random_permutation, RandomKVs},
+        random::RandomKVs,
     };
 
     use super::{
-        create_new, BufferPool, BufferPoolRef, ContainerKey, FosterBtree, FosterBtreePage,
-        InMemPool, PageKey, MAX_BYTES_USED,
+        create_new, BufferPool, ContainerKey, FosterBtree, FosterBtreePage, InMemPool, MemPool,
+        PageKey, MAX_BYTES_USED,
     };
-
-    fn get_buffer_pool(db_id: u16) -> (TempDir, BufferPoolRef) {
-        let temp_dir = TempDir::new().unwrap();
-        // create a directory for the database
-        std::fs::create_dir(temp_dir.path().join(db_id.to_string())).unwrap();
-        let num_frames = 10;
-        let ep = CacheEvictionPolicy::new(num_frames);
-        let bp = BufferPoolRef::new(BufferPool::new(temp_dir.path(), num_frames, ep).unwrap());
-        (temp_dir, bp)
-    }
-
-    fn get_btree(db_id: u16) -> (TempDir, FosterBtree<BufferPool>) {
-        let (temp_dir, bp) = get_buffer_pool(db_id);
-        let c_key = ContainerKey::new(db_id, 0);
-        let txn_id = 0;
-        let btree = create_new(txn_id, c_key, bp.clone());
-        (temp_dir, btree)
-    }
 
     fn to_bytes(num: usize) -> Vec<u8> {
         num.to_be_bytes().to_vec()
     }
 
-    fn get_kvs(range: std::ops::Range<usize>) -> Vec<(Vec<u8>, Vec<u8>)> {
-        range.map(|i| (to_bytes(i), to_bytes(i))).collect()
+    use crate::buffer_pool::prelude::{FrameReadGuard, FrameWriteGuard, MemPoolStatus};
+
+    pub struct BufferPoolForTest {
+        pub temp_dir: TempDir,
+        pub bp: BufferPool,
     }
 
-    #[test]
-    fn test_page_setup() {
-        let (db_id, c_id) = (0, 0);
-        let c_key = ContainerKey::new(db_id, c_id);
-        let (temp_dir, bp) = get_buffer_pool(db_id);
-        {
-            let p_key = bp.create_new_page_for_write(c_key).unwrap().key().unwrap();
-            let mut p = bp.get_page_for_write(p_key).unwrap();
-            p.init();
-            let low_fence = to_bytes(0);
-            let high_fence = to_bytes(20);
-            p.set_low_fence(&low_fence);
-            p.set_high_fence(&high_fence);
-            assert_eq!(p.get_low_fence().as_ref(), low_fence);
-            assert_eq!(p.get_high_fence().as_ref(), high_fence);
-            print_page(&p);
+    impl BufferPoolForTest {
+        pub fn new(num_frames: usize) -> Self {
+            let temp_dir = TempDir::new().unwrap();
+            std::fs::create_dir(temp_dir.path().join("0")).unwrap();
+            let ep = CacheEvictionPolicy::new(num_frames);
+            let bp = BufferPool::new(temp_dir.path(), num_frames, ep).unwrap();
+            Self { temp_dir, bp }
         }
-        drop(temp_dir);
     }
 
-    fn test_page_merge_detail(
+    impl MemPool for BufferPoolForTest {
+        fn create_new_page_for_write(
+            &self,
+            c_key: ContainerKey,
+        ) -> Result<FrameWriteGuard, MemPoolStatus> {
+            self.bp.create_new_page_for_write(c_key)
+        }
+
+        fn get_page_for_read(&self, key: PageKey) -> Result<FrameReadGuard, MemPoolStatus> {
+            self.bp.get_page_for_read(key)
+        }
+
+        fn get_page_for_write(&self, key: PageKey) -> Result<FrameWriteGuard, MemPoolStatus> {
+            self.bp.get_page_for_write(key)
+        }
+
+        fn reset(&self) {
+            self.bp.reset();
+        }
+    }
+
+    fn get_bp(num_frames: usize) -> Arc<BufferPoolForTest> {
+        Arc::new(BufferPoolForTest::new(num_frames))
+    }
+
+    fn get_in_mem_pool() -> Arc<InMemPool> {
+        Arc::new(InMemPool::new())
+    }
+
+    use rstest::rstest;
+
+    #[rstest]
+    #[case::bp(get_bp(10))]
+    #[case::in_mem(get_in_mem_pool())]
+    fn test_page_setup<T: MemPool>(#[case] mp: Arc<T>) {
+        let c_key = ContainerKey::new(0, 0);
+        let mut p = mp.create_new_page_for_write(c_key).unwrap();
+        p.init();
+        let low_fence = to_bytes(0);
+        let high_fence = to_bytes(20);
+        p.set_low_fence(&low_fence);
+        p.set_high_fence(&high_fence);
+        assert_eq!(p.get_low_fence().as_ref(), low_fence);
+        assert_eq!(p.get_high_fence().as_ref(), high_fence);
+    }
+
+    fn test_page_merge_detail<T: MemPool>(
+        bp: Arc<T>,
         k0: usize,
         k1: usize,
         k2: usize,
@@ -1735,7 +1762,6 @@ mod tests {
         }
         let (db_id, c_id) = (0, 0);
         let c_key = ContainerKey::new(db_id, c_id);
-        let (temp_dir, bp) = get_buffer_pool(db_id);
         let mut p0 = bp.create_new_page_for_write(c_key).unwrap();
         let mut p1 = bp.create_new_page_for_write(c_key).unwrap();
 
@@ -1786,22 +1812,20 @@ mod tests {
         assert!(!p0.has_foster_child());
 
         assert!(p1.empty());
-
-        // print_page(&p0);
-        // print_page(&p1);
-
-        drop(temp_dir);
     }
 
-    #[test]
-    fn test_page_merge() {
-        test_page_merge_detail(10, 20, 30, vec![], vec![]);
-        test_page_merge_detail(10, 20, 30, vec![10, 15], vec![20, 25, 29]);
-        test_page_merge_detail(10, 20, 30, vec![], vec![20, 25]);
-        test_page_merge_detail(10, 20, 30, vec![10, 15], vec![]);
+    #[rstest]
+    #[case::bp(get_bp(100))]
+    #[case::in_mem(get_in_mem_pool())]
+    fn test_page_merge<T: MemPool>(#[case] bp: Arc<T>) {
+        test_page_merge_detail(bp.clone(), 10, 20, 30, vec![], vec![]);
+        test_page_merge_detail(bp.clone(), 10, 20, 30, vec![10, 15], vec![20, 25, 29]);
+        test_page_merge_detail(bp.clone(), 10, 20, 30, vec![], vec![20, 25]);
+        test_page_merge_detail(bp, 10, 20, 30, vec![10, 15], vec![]);
     }
 
-    fn test_page_balance_detail(
+    fn test_page_balance_detail<T: MemPool>(
+        bp: Arc<T>,
         k0: usize,
         k1: usize,
         k2: usize,
@@ -1823,7 +1847,6 @@ mod tests {
         }
         let (db_id, c_id) = (0, 0);
         let c_key = ContainerKey::new(db_id, c_id);
-        let (temp_dir, bp) = get_buffer_pool(db_id);
         let mut p0 = bp.create_new_page_for_write(c_key).unwrap();
         let mut p1 = bp.create_new_page_for_write(c_key).unwrap();
 
@@ -1881,23 +1904,27 @@ mod tests {
 
         let new_diff = p0.total_bytes_used().abs_diff(p1.total_bytes_used());
         assert!(new_diff <= prev_diff);
-
-        // print_page(&p0);
-        // print_page(&p1);
-        // println!("Prev diff: {}, New diff: {}", prev_diff, new_diff);
-
-        drop(temp_dir);
     }
 
-    #[test]
-    fn test_page_balance() {
-        test_page_balance_detail(10, 20, 30, vec![], vec![]);
-        test_page_balance_detail(10, 20, 30, vec![10, 15], vec![]);
-        test_page_balance_detail(10, 20, 30, vec![], vec![20, 25, 29]);
-        test_page_balance_detail(10, 20, 30, vec![10, 11, 12, 13, 14, 15], vec![20, 21]);
+    #[rstest]
+    #[case::bp(get_bp(100))]
+    #[case::in_mem(get_in_mem_pool())]
+    fn test_page_balance<T: MemPool>(#[case] bp: Arc<T>) {
+        test_page_balance_detail(bp.clone(), 10, 20, 30, vec![], vec![]);
+        test_page_balance_detail(bp.clone(), 10, 20, 30, vec![10, 15], vec![]);
+        test_page_balance_detail(bp.clone(), 10, 20, 30, vec![], vec![20, 25, 29]);
+        test_page_balance_detail(
+            bp.clone(),
+            10,
+            20,
+            30,
+            vec![10, 11, 12, 13, 14, 15],
+            vec![20, 21],
+        );
     }
 
-    fn test_page_adopt_detail(
+    fn test_page_adopt_detail<T: MemPool>(
+        bp: Arc<T>,
         k0: usize,
         k1: usize,
         k2: usize,
@@ -1919,7 +1946,6 @@ mod tests {
         }
         let (db_id, c_id) = (0, 0);
         let c_key = ContainerKey::new(db_id, c_id);
-        let (temp_dir, bp) = get_buffer_pool(db_id);
         let mut parent = bp.create_new_page_for_write(c_key).unwrap();
         let mut child0 = bp.create_new_page_for_write(c_key).unwrap();
         let mut child1 = bp.create_new_page_for_write(c_key).unwrap();
@@ -1987,19 +2013,20 @@ mod tests {
             let val = child1.get_val((i + 1) as u16);
             assert_eq!(val, to_bytes(right[i]));
         }
-
-        drop(temp_dir);
     }
 
-    #[test]
-    fn test_page_adopt() {
-        test_page_adopt_detail(10, 20, 30, vec![], vec![]);
-        test_page_adopt_detail(10, 20, 30, vec![10, 15], vec![20, 25, 29]);
-        test_page_adopt_detail(10, 20, 30, vec![], vec![20, 25]);
-        test_page_adopt_detail(10, 20, 30, vec![10, 15], vec![]);
+    #[rstest]
+    #[case::bp(get_bp(100))]
+    #[case::in_mem(get_in_mem_pool())]
+    fn test_page_adopt<T: MemPool>(#[case] bp: Arc<T>) {
+        test_page_adopt_detail(bp.clone(), 10, 20, 30, vec![], vec![]);
+        test_page_adopt_detail(bp.clone(), 10, 20, 30, vec![10, 15], vec![20, 25, 29]);
+        test_page_adopt_detail(bp.clone(), 10, 20, 30, vec![], vec![20, 25]);
+        test_page_adopt_detail(bp.clone(), 10, 20, 30, vec![10, 15], vec![]);
     }
 
-    fn test_page_anti_adopt_detail(
+    fn test_page_anti_adopt_detail<T: MemPool>(
+        bp: Arc<T>,
         k0: usize,
         k1: usize,
         k2: usize,
@@ -2021,7 +2048,6 @@ mod tests {
         }
         let (db_id, c_id) = (0, 0);
         let c_key = ContainerKey::new(db_id, c_id);
-        let (temp_dir, bp) = get_buffer_pool(db_id);
         let mut parent = bp.create_new_page_for_write(c_key).unwrap();
         let mut child0 = bp.create_new_page_for_write(c_key).unwrap();
         let mut child1 = bp.create_new_page_for_write(c_key).unwrap();
@@ -2057,10 +2083,6 @@ mod tests {
         assert_eq!(child0.active_slot_count() as usize, left.len());
         assert_eq!(child1.active_slot_count() as usize, right.len());
 
-        // print_page(&parent);
-        // print_page(&child0);
-        // print_page(&child1);
-
         // Anti-adopt
         anti_adopt(&mut parent, &mut child0);
 
@@ -2095,27 +2117,24 @@ mod tests {
             let val = child1.get_val((i + 1) as u16);
             assert_eq!(val, to_bytes(right[i]));
         }
-
-        // print_page(&parent);
-        // print_page(&child0);
-        // print_page(&child1);
-
-        drop(temp_dir);
     }
 
-    #[test]
-    fn test_page_anti_adopt() {
-        test_page_anti_adopt_detail(10, 20, 30, vec![], vec![]);
-        test_page_anti_adopt_detail(10, 20, 30, vec![10, 15], vec![20, 25, 29]);
-        test_page_anti_adopt_detail(10, 20, 30, vec![], vec![20, 25]);
-        test_page_anti_adopt_detail(10, 20, 30, vec![10, 15], vec![]);
+    #[rstest]
+    #[case::bp(get_bp(100))]
+    #[case::in_mem(get_in_mem_pool())]
+    fn test_page_anti_adopt<T: MemPool>(#[case] bp: Arc<T>) {
+        test_page_anti_adopt_detail(bp.clone(), 10, 20, 30, vec![], vec![]);
+        test_page_anti_adopt_detail(bp.clone(), 10, 20, 30, vec![10, 15], vec![20, 25, 29]);
+        test_page_anti_adopt_detail(bp.clone(), 10, 20, 30, vec![], vec![20, 25]);
+        test_page_anti_adopt_detail(bp.clone(), 10, 20, 30, vec![10, 15], vec![]);
     }
 
-    #[test]
-    fn test_root_page_ascend() {
+    #[rstest]
+    #[case::bp(get_bp(100))]
+    #[case::in_mem(get_in_mem_pool())]
+    fn test_root_page_ascend<T: MemPool>(#[case] bp: Arc<T>) {
         let (db_id, c_id) = (0, 0);
         let c_key = ContainerKey::new(db_id, c_id);
-        let (temp_dir, bp) = get_buffer_pool(db_id);
         let mut root = bp.create_new_page_for_write(c_key).unwrap();
         let mut foster_child = bp.create_new_page_for_write(c_key).unwrap();
         let mut child = bp.create_new_page_for_write(c_key).unwrap();
@@ -2157,10 +2176,6 @@ mod tests {
         foster_child.run_consistency_checks(true);
         child.run_consistency_checks(true);
 
-        print_page(&root);
-        print_page(&foster_child);
-        print_page(&child);
-
         ascend_root(&mut root, &mut child);
 
         // Run consistency checks
@@ -2193,19 +2208,14 @@ mod tests {
             assert_eq!(key, to_bytes(i as usize + 10));
             assert_eq!(val, to_bytes(i as usize + 10));
         }
-
-        print_page(&root);
-        print_page(&child);
-        print_page(&foster_child);
-
-        drop(temp_dir);
     }
 
-    #[test]
-    fn test_root_page_descend() {
+    #[rstest]
+    #[case::bp(get_bp(100))]
+    #[case::in_mem(get_in_mem_pool())]
+    fn test_root_page_descend<T: MemPool>(#[case] bp: Arc<T>) {
         let (db_id, c_id) = (0, 0);
         let c_key = ContainerKey::new(db_id, c_id);
-        let (temp_dir, bp) = get_buffer_pool(db_id);
         let mut root = bp.create_new_page_for_write(c_key).unwrap();
         let mut child = bp.create_new_page_for_write(c_key).unwrap();
 
@@ -2253,27 +2263,22 @@ mod tests {
             assert_eq!(key, to_bytes(i as usize));
             assert_eq!(val, to_bytes(i as usize));
         }
-
-        print_page(&root);
-        print_page(&child);
-
-        drop(temp_dir);
     }
 
     // Foster relationship between two pages.
     // Returns (temp_dir, bp, this_page_id, foster_page_id)
     // If is_root is true, then this_page is a root page.
-    fn build_foster_relationship(
+    fn build_foster_relationship<T: MemPool>(
+        bp: Arc<T>,
         is_root: bool,
         this_size: usize,
         foster_size: usize,
-    ) -> (TempDir, BufferPoolRef, PageKey, PageKey) {
+    ) -> (PageKey, PageKey) {
         let this_size = this_size as u16;
         let foster_size = foster_size as u16;
         // Create a foster relationship between two pages.
         let (db_id, c_id) = (0, 0);
         let c_key = ContainerKey::new(db_id, c_id);
-        let (temp_dir, bp) = get_buffer_pool(db_id);
         let mut this = bp.create_new_page_for_write(c_key).unwrap();
         let mut foster = bp.create_new_page_for_write(c_key).unwrap();
 
@@ -2321,10 +2326,7 @@ mod tests {
         let this_id = PageKey::new(c_key, this.get_id());
         let foster_id = PageKey::new(c_key, foster.get_id());
 
-        drop(this);
-        drop(foster);
-
-        (temp_dir, bp, this_id, foster_id)
+        (this_id, foster_id)
     }
 
     // In a foster relationship, MERGE, BALANCE, ROOT_ASCEND is allowed.
@@ -2337,14 +2339,16 @@ mod tests {
     // SL, LS: Load balance
     // NN, LN, NL, LL: Do nothing
     // Root ascend is allowed only when the foster page is the root page.
-    #[test]
-    fn test_foster_relationship_structure_modification_criteria() {
+    #[rstest]
+    #[case::bp(get_bp(100))]
+    #[case::in_mem(get_in_mem_pool())]
+    fn test_foster_relationship_structure_modification_criteria<T: MemPool>(#[case] bp: Arc<T>) {
         {
             // Should merge, root_ascend
             // Should not balance
             {
-                let (temp_dir, bp, this_id, foster_id) =
-                    build_foster_relationship(true, MIN_BYTES_USED - 1, MIN_BYTES_USED);
+                let (this_id, foster_id) =
+                    build_foster_relationship(bp.clone(), true, MIN_BYTES_USED - 1, MIN_BYTES_USED);
                 let this = bp.get_page_for_write(this_id).unwrap();
                 let foster = bp.get_page_for_write(foster_id).unwrap();
                 assert!(is_small(&this));
@@ -2354,8 +2358,8 @@ mod tests {
                 assert!(!should_load_balance(&this, &foster));
             }
             {
-                let (temp_dir, bp, this_id, foster_id) =
-                    build_foster_relationship(true, MIN_BYTES_USED, MIN_BYTES_USED - 1);
+                let (this_id, foster_id) =
+                    build_foster_relationship(bp.clone(), true, MIN_BYTES_USED, MIN_BYTES_USED - 1);
                 let this = bp.get_page_for_write(this_id).unwrap();
                 let foster = bp.get_page_for_write(foster_id).unwrap();
                 assert!(!is_large(&this));
@@ -2365,8 +2369,12 @@ mod tests {
                 assert!(!should_load_balance(&this, &foster));
             }
             {
-                let (temp_dir, bp, this_id, foster_id) =
-                    build_foster_relationship(true, MIN_BYTES_USED - 1, MIN_BYTES_USED - 1);
+                let (this_id, foster_id) = build_foster_relationship(
+                    bp.clone(),
+                    true,
+                    MIN_BYTES_USED - 1,
+                    MIN_BYTES_USED - 1,
+                );
                 let this = bp.get_page_for_write(this_id).unwrap();
                 let foster = bp.get_page_for_write(foster_id).unwrap();
                 assert!(is_small(&this));
@@ -2380,8 +2388,12 @@ mod tests {
             // Should load balance
             // Should not merge, root_ascend
             {
-                let (temp_dir, bp, this_id, foster_id) =
-                    build_foster_relationship(false, MIN_BYTES_USED - 1, MAX_BYTES_USED);
+                let (this_id, foster_id) = build_foster_relationship(
+                    bp.clone(),
+                    false,
+                    MIN_BYTES_USED - 1,
+                    MAX_BYTES_USED,
+                );
                 let this = bp.get_page_for_write(this_id).unwrap();
                 let foster = bp.get_page_for_write(foster_id).unwrap();
                 assert!(is_small(&this));
@@ -2391,8 +2403,12 @@ mod tests {
                 assert!(should_load_balance(&this, &foster));
             }
             {
-                let (temp_dir, bp, this_id, foster_id) =
-                    build_foster_relationship(false, MAX_BYTES_USED, MIN_BYTES_USED - 1);
+                let (this_id, foster_id) = build_foster_relationship(
+                    bp.clone(),
+                    false,
+                    MAX_BYTES_USED,
+                    MIN_BYTES_USED - 1,
+                );
                 let this = bp.get_page_for_write(this_id).unwrap();
                 let foster = bp.get_page_for_write(foster_id).unwrap();
                 assert!(is_large(&this));
@@ -2405,8 +2421,8 @@ mod tests {
         {
             // Should not merge, balance, root_ascend
             {
-                let (temp_dir, bp, this_id, foster_id) =
-                    build_foster_relationship(false, MAX_BYTES_USED, MAX_BYTES_USED);
+                let (this_id, foster_id) =
+                    build_foster_relationship(bp.clone(), false, MAX_BYTES_USED, MAX_BYTES_USED);
                 let this = bp.get_page_for_write(this_id).unwrap();
                 let foster = bp.get_page_for_write(foster_id).unwrap();
                 assert!(is_large(&this));
@@ -2416,8 +2432,8 @@ mod tests {
                 assert!(!should_load_balance(&this, &foster));
             }
             {
-                let (temp_dir, bp, this_id, foster_id) =
-                    build_foster_relationship(false, MIN_BYTES_USED, MIN_BYTES_USED);
+                let (this_id, foster_id) =
+                    build_foster_relationship(bp.clone(), false, MIN_BYTES_USED, MIN_BYTES_USED);
                 let this = bp.get_page_for_write(this_id).unwrap();
                 let foster = bp.get_page_for_write(foster_id).unwrap();
                 assert!(!is_small(&this));
@@ -2429,13 +2445,12 @@ mod tests {
         }
     }
 
-    fn build_two_children_tree(child0_size: usize) -> (TempDir, BufferPoolRef, PageKey, PageKey) {
+    fn build_two_children_tree<T: MemPool>(bp: Arc<T>, child0_size: usize) -> (PageKey, PageKey) {
         let child0_size = child0_size as u16;
 
         // Create a parent with two children.
         let (db_id, c_id) = (0, 0);
         let c_key = ContainerKey::new(db_id, c_id);
-        let (temp_dir, bp) = get_buffer_pool(db_id);
         let mut parent = bp.create_new_page_for_write(c_key).unwrap();
         let mut child0 = bp.create_new_page_for_write(c_key).unwrap();
         let mut child1 = bp.create_new_page_for_write(c_key).unwrap();
@@ -2482,22 +2497,18 @@ mod tests {
         let parent_id = PageKey::new(c_key, parent.get_id());
         let child0_id = PageKey::new(c_key, child0.get_id());
 
-        drop(parent);
-        drop(child0);
-        drop(child1);
-
-        (temp_dir, bp, parent_id, child0_id)
+        (parent_id, child0_id)
     }
 
-    fn build_single_child_with_foster_child_tree(
+    fn build_single_child_with_foster_child_tree<T: MemPool>(
+        bp: Arc<T>,
         child0_size: usize,
-    ) -> (TempDir, BufferPoolRef, PageKey, PageKey) {
+    ) -> (PageKey, PageKey) {
         let child0_size = child0_size as u16;
 
         // Create a parent with a child and a foster child.
         let (db_id, c_id) = (0, 0);
         let c_key = ContainerKey::new(db_id, c_id);
-        let (temp_dir, bp) = get_buffer_pool(db_id);
         let mut parent = bp.create_new_page_for_write(c_key).unwrap();
         let mut child0 = bp.create_new_page_for_write(c_key).unwrap();
         let mut child1 = bp.create_new_page_for_write(c_key).unwrap();
@@ -2544,20 +2555,15 @@ mod tests {
         let parent_id = PageKey::new(c_key, parent.get_id());
         let child0_id = PageKey::new(c_key, child0.get_id());
 
-        drop(parent);
-        drop(child0);
-        drop(child1);
-
-        (temp_dir, bp, parent_id, child0_id)
+        (parent_id, child0_id)
     }
 
-    fn build_single_child_tree(child0_size: usize) -> (TempDir, BufferPoolRef, PageKey, PageKey) {
+    fn build_single_child_tree<T: MemPool>(bp: Arc<T>, child0_size: usize) -> (PageKey, PageKey) {
         let child0_size = child0_size as u16;
 
         // Create a parent with a child.
         let (db_id, c_id) = (0, 0);
         let c_key = ContainerKey::new(db_id, c_id);
-        let (temp_dir, bp) = get_buffer_pool(db_id);
         let mut parent = bp.create_new_page_for_write(c_key).unwrap();
         let mut child0 = bp.create_new_page_for_write(c_key).unwrap();
 
@@ -2594,16 +2600,10 @@ mod tests {
         parent.run_consistency_checks(true);
         child0.run_consistency_checks(true);
 
-        print_page(&parent);
-        print_page(&child0);
-
         let parent_id = PageKey::new(c_key, parent.get_id());
         let child0_id = PageKey::new(c_key, child0.get_id());
 
-        drop(parent);
-        drop(child0);
-
-        (temp_dir, bp, parent_id, child0_id)
+        (parent_id, child0_id)
     }
 
     // In a parent-child relationship, ADOPT, ANTI_ADOPT, ROOT_DESCEND is allowed.
@@ -2615,8 +2615,12 @@ mod tests {
     // SS, NS, LS: AntiAdopt if parent has more than 1 child.
     // SN, SL, NN, NL: Adopt if child has foster child.
     // LN, LL: Nothing
-    #[test]
-    fn test_parent_child_relationship_structure_modification_criteria() {
+    #[rstest]
+    #[case::bp(get_bp(100))]
+    #[case::in_mem(get_in_mem_pool())]
+    fn test_parent_child_relationship_structure_modification_criteria<T: MemPool>(
+        #[case] bp: Arc<T>,
+    ) {
         {
             // Parent [k0, k2)
             //  +-------------------+
@@ -2626,8 +2630,8 @@ mod tests {
             {
                 // Should anti_adopt
                 // Should not adopt, root descend
-                let (temp_dir, bp, parent_id, child0_id) =
-                    build_two_children_tree(MIN_BYTES_USED - 1);
+                let (parent_id, child0_id) =
+                    build_two_children_tree(bp.clone(), MIN_BYTES_USED - 1);
                 let parent = bp.get_page_for_write(parent_id).unwrap();
                 let child0 = bp.get_page_for_write(child0_id).unwrap();
                 assert!(is_small(&child0));
@@ -2637,7 +2641,7 @@ mod tests {
             }
             {
                 // Should not adopt, anti_adopt, root_descend
-                let (temp_dir, bp, parent_id, child0_id) = build_two_children_tree(MIN_BYTES_USED);
+                let (parent_id, child0_id) = build_two_children_tree(bp.clone(), MIN_BYTES_USED);
                 let parent = bp.get_page_for_write(parent_id).unwrap();
                 let child0 = bp.get_page_for_write(child0_id).unwrap();
                 assert!(!is_small(&child0));
@@ -2654,8 +2658,8 @@ mod tests {
             {
                 // Should adopt
                 // Should not anti_adopt, root_descend
-                let (temp_dir, bp, parent_id, child0_id) =
-                    build_single_child_with_foster_child_tree(MIN_BYTES_USED);
+                let (parent_id, child0_id) =
+                    build_single_child_with_foster_child_tree(bp.clone(), MIN_BYTES_USED);
                 let parent = bp.get_page_for_write(parent_id).unwrap();
                 let child0 = bp.get_page_for_write(child0_id).unwrap();
                 assert!(!is_small(&child0));
@@ -2665,8 +2669,8 @@ mod tests {
             }
             {
                 // Should not adopt, anti_adopt, root_descend
-                let (temp_dir, bp, parent_id, child0_id) =
-                    build_single_child_with_foster_child_tree(MIN_BYTES_USED - 1);
+                let (parent_id, child0_id) =
+                    build_single_child_with_foster_child_tree(bp.clone(), MIN_BYTES_USED - 1);
                 let parent = bp.get_page_for_write(parent_id).unwrap();
                 let child0 = bp.get_page_for_write(child0_id).unwrap();
                 assert!(is_small(&child0));
@@ -2682,8 +2686,8 @@ mod tests {
             // Child0 [k0, k2)
             {
                 // Should not adopt, anti_adopt, root_descend
-                let (temp_dir, bp, parent_id, child0_id) =
-                    build_single_child_tree(MIN_BYTES_USED - 1);
+                let (parent_id, child0_id) =
+                    build_single_child_tree(bp.clone(), MIN_BYTES_USED - 1);
                 let parent = bp.get_page_for_write(parent_id).unwrap();
                 let child0 = bp.get_page_for_write(child0_id).unwrap();
                 assert!(!should_adopt(&parent, &child0));
@@ -2693,10 +2697,9 @@ mod tests {
         }
     }
 
-    fn setup_btree_empty() -> (TempDir, FosterBtree<BufferPool>) {
+    fn setup_btree_empty<T: MemPool>(bp: Arc<T>) -> FosterBtree<T> {
         let (db_id, c_id) = (0, 0);
         let c_key = ContainerKey::new(db_id, c_id);
-        let (temp_dir, bp) = get_buffer_pool(db_id);
 
         let root_key = {
             let mut root = bp.create_new_page_for_write(c_key).unwrap();
@@ -2709,12 +2712,14 @@ mod tests {
             root_key,
             mem_pool: bp.clone(),
         };
-        (temp_dir, btree)
+        btree
     }
 
-    #[test]
-    fn test_sorted_insertion() {
-        let (temp_dir, btree) = setup_btree_empty();
+    #[rstest]
+    #[case::bp(get_bp(100))]
+    #[case::in_mem(get_in_mem_pool())]
+    fn test_sorted_insertion<T: MemPool>(#[case] bp: Arc<T>) {
+        let btree = setup_btree_empty(bp.clone());
         // Insert 1024 bytes
         let val = vec![2_u8; 1024];
         for i in 0..10 {
@@ -2734,32 +2739,13 @@ mod tests {
             let current_val = btree.get(&key).unwrap();
             assert_eq!(current_val, val);
         }
-        drop(temp_dir);
     }
 
-    fn setup_inmem_btree_empty() -> FosterBtree<InMemPool> {
-        use super::MemPool;
-        let (db_id, c_id) = (0, 0);
-        let c_key = ContainerKey::new(db_id, c_id);
-        let mem_pool = Arc::new(InMemPool::new());
-
-        let root_key = {
-            let mut root = mem_pool.create_new_page_for_write(c_key).unwrap();
-            root.init_as_root();
-            root.key().unwrap()
-        };
-
-        let btree = FosterBtree {
-            c_key,
-            root_key,
-            mem_pool,
-        };
-        btree
-    }
-
-    #[test]
-    fn test_random_insertion() {
-        let btree = setup_inmem_btree_empty();
+    #[rstest]
+    #[case::bp(get_bp(100))]
+    #[case::in_mem(get_in_mem_pool())]
+    fn test_random_insertion<T: MemPool>(#[case] bp: Arc<T>) {
+        let btree = setup_btree_empty(bp.clone());
         // Insert 1024 bytes
         let val = vec![3_u8; 1024];
         let order = [6, 3, 8, 1, 5, 7, 2, 4, 9, 0];
@@ -2782,9 +2768,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_random_updates() {
-        let btree = setup_inmem_btree_empty();
+    #[rstest]
+    #[case::bp(get_bp(100))]
+    #[case::in_mem(get_in_mem_pool())]
+    fn test_random_updates<T: MemPool>(#[case] bp: Arc<T>) {
+        let btree = setup_btree_empty(bp.clone());
         // Insert 1024 bytes
         let val = vec![3_u8; 1024];
         let order = [6, 3, 8, 1, 5, 7, 2, 4, 9, 0];
@@ -2834,9 +2822,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_random_deletion() {
-        let btree = setup_inmem_btree_empty();
+    #[rstest]
+    #[case::bp(get_bp(100))]
+    #[case::in_mem(get_in_mem_pool())]
+    fn test_random_deletion<T: MemPool>(#[case] bp: Arc<T>) {
+        let btree = setup_btree_empty(bp.clone());
         // Insert 1024 bytes
         let val = vec![3_u8; 1024];
         let order = [6, 3, 8, 1, 5, 7, 2, 4, 9, 0];
@@ -2867,9 +2857,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_random_upserts() {
-        let btree = setup_inmem_btree_empty();
+    #[rstest]
+    #[case::bp(get_bp(100))]
+    #[case::in_mem(get_in_mem_pool())]
+    fn test_random_upserts<T: MemPool>(#[case] bp: Arc<T>) {
+        let btree = setup_btree_empty(bp.clone());
         // Insert 1024 bytes
         let val = vec![3_u8; 1024];
         let order = [6, 3, 8, 1, 5, 7, 2, 4, 9, 0];
@@ -2928,14 +2920,16 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_insertion_stress() {
+    #[rstest]
+    #[case::bp(get_bp(100))]
+    #[case::in_mem(get_in_mem_pool())]
+    fn test_insertion_stress<T: MemPool>(#[case] bp: Arc<T>) {
         let num_keys = 5000;
         let val_min_size = 50;
         let val_max_size = 100;
         let kvs = RandomKVs::new(num_keys, val_min_size, val_max_size);
 
-        let btree = setup_inmem_btree_empty();
+        let btree = setup_btree_empty(bp.clone());
 
         // Write kvs to file
         // let kvs_file = "kvs.dat";
@@ -2963,14 +2957,18 @@ mod tests {
             assert_eq!(current_val, *val);
         }
 
+        println!("{}", btree.page_stats(false));
+
         println!("SUCCESS");
     }
 
     // skip default
-    #[test]
+    #[rstest]
+    #[case::bp(get_bp(100))]
+    #[case::in_mem(get_in_mem_pool())]
     #[ignore]
-    fn replay_stress() {
-        let btree = setup_inmem_btree_empty();
+    fn replay_stress<T: MemPool>(#[case] bp: Arc<T>) {
+        let btree = setup_btree_empty(bp.clone());
 
         let kvs_file = "kvs.dat";
         let file = File::open(kvs_file).unwrap();
@@ -3020,7 +3018,7 @@ mod tests {
     #[test]
     fn test_parallel_insertion() {
         // init_test_logger();
-        let btree = Arc::new(setup_inmem_btree_empty());
+        let btree = Arc::new(setup_btree_empty(get_in_mem_pool()));
         let num_keys = 5000;
         let val_min_size = 50;
         let val_max_size = 100;
@@ -3065,7 +3063,7 @@ mod tests {
 
     #[test]
     fn test_page_stat_generator() {
-        let btree = setup_inmem_btree_empty();
+        let btree = setup_btree_empty(get_in_mem_pool());
         // Insert 1024 bytes
         let val = vec![3_u8; 1024];
         let order = [6, 3, 8, 1, 5, 7, 2];

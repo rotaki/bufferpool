@@ -20,6 +20,7 @@
     * [x] Revise the split decision
   * [x] Add thread-unsafe page traversal operator
     * [x] Add consistency checker
+  * [] Fix the buffer pool free frame allocation bug
   * [] Add memory usage profiler
   * [] Test with bp (limited memory pool with disk offloading)
   * [] Reuse the removed page in merge

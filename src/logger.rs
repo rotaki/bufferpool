@@ -6,6 +6,7 @@ use std::io::{self, Write};
 use std::sync::Mutex;
 use std::thread;
 
+/*
 // Multi-buffer logger
 // This will print logs to a separate file for each thread
 thread_local! {
@@ -34,16 +35,16 @@ pub fn log(level: &str, file: &str, line: u32, message: &str) {
         }
     });
 }
+*/
 
 // Single-buffer logger
 // This will print logs to a single file
-/*
 lazy_static! {
     static ref LOG_FILE: Mutex<io::Stdout> = Mutex::new(io::stdout());
 }
 
 #[inline]
-fn log(level: &str, file: &str, line: u32, message: &str) {
+pub fn log(level: &str, file: &str, line: u32, message: &str) {
     let now = Local::now();
     let thread_id = thread::current().id();
     let formatted_time = now.format("%Y-%m-%d %H:%M:%S").to_string();
@@ -57,7 +58,6 @@ fn log(level: &str, file: &str, line: u32, message: &str) {
     let _ = stdout.write_all(log_message.as_bytes());
     let _ = stdout.flush();
 }
-*/
 
 #[macro_export]
 macro_rules! log_error {

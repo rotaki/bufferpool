@@ -72,7 +72,7 @@ impl std::fmt::Display for MemPoolStatus {
     }
 }
 
-pub trait MemPool {
+pub trait MemPool: Sync {
     fn create_new_page_for_write(
         &self,
         c_key: ContainerKey,

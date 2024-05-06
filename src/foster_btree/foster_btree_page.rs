@@ -693,7 +693,7 @@ impl FosterBtreePage for Page {
             self.get_high_fence()
         } else {
             let key = self.get_raw_key(slot_id);
-            if key == &[] {
+            if key.is_empty() {
                 BTreeKey::MinusInfty
             } else {
                 BTreeKey::Normal(key)
@@ -781,7 +781,7 @@ impl FosterBtreePage for Page {
     }
 
     fn set_low_fence(&mut self, key: &[u8]) {
-        if key == &[] {
+        if key.is_empty() {
             self.set_left_most(true)
         }
         let res = self.update_at(self.low_fence_slot_id(), key, &[]);
@@ -791,7 +791,7 @@ impl FosterBtreePage for Page {
     /// Set the high fence of the page.
     /// This function will
     fn set_high_fence(&mut self, key: &[u8]) {
-        if key == &[] {
+        if key.is_empty() {
             self.set_right_most(true)
         }
         let res = self.update_at(self.high_fence_slot_id(), key, &[]);

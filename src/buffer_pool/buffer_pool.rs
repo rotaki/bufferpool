@@ -329,6 +329,12 @@ where
 
 #[cfg(test)]
 impl<T: EvictionPolicy> BufferPool<T> {
+    pub fn run_checks(&self) {
+        self.check_all_frames_unlatched();
+        self.check_id_to_index();
+        self.check_frame_id_and_page_id_match();
+    }
+
     pub fn check_all_frames_unlatched(&self) {
         let frames = unsafe { &*self.frames.get() };
         for frame in frames.iter() {
@@ -490,6 +496,50 @@ mod tests {
             }
         }
     }
+
+    /*
+    #[test]
+    fn test_bp_create_new_page() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_id = 0;
+        // create a directory for the database
+        std::fs::create_dir(temp_dir.path().join(db_id.to_string())).unwrap();
+
+        let num_pages = 3;
+        let ep = LFUEvictionPolicy::new(num_pages);
+        let bp = BufferPool::new(temp_dir.path(), num_pages, ep).unwrap();
+        let c_key = ContainerKey::new(db_id, 0);
+
+        let num_traversal = 100;
+
+        let mut count = 0;
+        let mut keys = Vec::new();
+
+        for _ in 0..num_traversal {
+            let mut guard1 = bp.create_new_page_for_write(c_key).unwrap();
+            guard1[0] = count;
+            count += 1;
+            keys.push(guard1.key().unwrap());
+
+            let mut guard2 = bp.create_new_page_for_write(c_key).unwrap();
+            guard2[0] = count;
+            count += 1;
+            keys.push(guard2.key().unwrap());
+        }
+
+        bp.run_checks();
+
+        // Traverse by 2 pages at a time
+        for i in 0..num_traversal {
+            let guard1 = bp.get_page_for_read(keys[i * 2]).unwrap();
+            assert_eq!(guard1[0], i as u8 * 2);
+            let guard2 = bp.get_page_for_read(keys[i * 2 + 1]).unwrap();
+            assert_eq!(guard2[0], i as u8 * 2 + 1);
+        }
+
+        bp.run_checks();
+    }
+    */
 
     #[test]
     fn test_bp_no_write_back_if_not_dirty() {
