@@ -941,37 +941,6 @@ fn ascend_root(root: &mut Page, child: &mut Page) {
     }
 }
 
-fn to_dot_string(page: &Page) -> String {
-    let mut result = format!("\t{} [label=\"[P{}](", page.get_id(), page.get_id());
-    // If page is a leaf, add the key-value pairs
-    let low_fence = page.get_raw_key(page.low_fence_slot_id());
-    if low_fence == &[] {
-        result.push_str("L[-∞], ");
-    } else {
-        let low_fence_usize = usize::from_be_bytes(low_fence.try_into().unwrap());
-        result.push_str(&format!("L[{}], ", low_fence_usize));
-    }
-    for i in 1..=page.active_slot_count() {
-        let key = page.get_raw_key(i);
-        let key = if key == &[] {
-            "-∞".to_string()
-        } else {
-            let key_usize = usize::from_be_bytes(key.try_into().unwrap());
-            key_usize.to_string()
-        };
-        result.push_str(&format!("{}, ", key));
-    }
-    let high_fence = page.get_raw_key(page.high_fence_slot_id());
-    if high_fence == &[] {
-        result.push_str("H[+∞])\"];");
-    } else {
-        let high_fence_usize = usize::from_be_bytes(high_fence.try_into().unwrap());
-        result.push_str(&format!("H[{}])\"];", high_fence_usize));
-    }
-    result.push_str("\n");
-    result
-}
-
 fn print_page(p: &Page) {
     println!(
         "----------------- Page ID: {} -----------------",
@@ -1050,68 +1019,26 @@ pub struct FosterBtree<T: MemPool> {
 }
 
 impl<T: MemPool> FosterBtree<T> {
+    /// Thread-unsafe traversal of the BTree
+    pub fn page_traverser(&self) -> FosterBTreePageTraversal<T> {
+        FosterBTreePageTraversal::new(self)
+    }
+
+    /// Check the consistency of the BTree
+    /// This is a thread-unsafe operation
     pub fn check_consistency(&self) {
         let mut checker = ConsistencyChecker {};
-        let traversal = FosterBTreePageTraversal::new(self);
-        traversal.visit(&mut checker);
+        let traverser = self.page_traverser();
+        traverser.visit(&mut checker);
     }
 
+    /// Accumulate the statistics of the pages in the BTree
+    /// This is a thread-unsafe operation
     pub fn page_stats(&self, verbose: bool) -> String {
         let mut stats = PageStatsGenerator::new();
-        let traversal = FosterBTreePageTraversal::new(self);
-        traversal.visit(&mut stats);
+        let traverser = self.page_traverser();
+        traverser.visit(&mut stats);
         stats.to_string(verbose)
-    }
-
-    pub fn generate_dot(&self) -> String {
-        let mut result = "digraph G {\n".to_string();
-        // rectangle nodes
-        result.push_str("\tnode [shape=rectangle];\n");
-        let current_page = self.read_page(self.root_key);
-        let mut levels = HashMap::new();
-        let mut stack = VecDeque::new();
-        stack.push_back(current_page);
-        while let Some(page) = stack.pop_front() {
-            result.push_str(&to_dot_string(&page));
-            levels
-                .entry(page.level())
-                .or_insert(HashSet::new())
-                .insert(page.get_id());
-            if page.has_foster_child() {
-                // Push the foster child to front of the stack
-                let foster_child_page_id = page.get_foster_page_id();
-                let foster_child_page = self
-                    .mem_pool
-                    .get_page_for_read(PageKey::new(self.c_key, foster_child_page_id))
-                    .unwrap();
-                result.push_str(&format!(
-                    "\t{} -> {};\n",
-                    page.get_id(),
-                    foster_child_page_id
-                ));
-                stack.push_front(foster_child_page);
-            }
-            if page.is_leaf() {
-                continue;
-            }
-            for i in 1..=page.active_slot_count() {
-                let child_page_id = PageId::from_be_bytes(page.get_val(i).try_into().unwrap());
-                let child_page = self
-                    .mem_pool
-                    .get_page_for_read(PageKey::new(self.c_key, child_page_id))
-                    .unwrap();
-                result.push_str(&format!("\t{} -> {};\n", page.get_id(), child_page_id));
-                stack.push_back(child_page);
-            }
-        }
-        // Map the same level pages to the same rank
-        for (_, page_ids) in levels {
-            result.push_str(&format!("\t{{rank=same; {:?}}}\n", page_ids));
-        }
-
-        result.push_str("}\n");
-
-        result
     }
 
     pub fn op_stats(&self) -> String {
@@ -1542,6 +1469,24 @@ impl<T: MemPool> FosterBTreePageTraversal<T> {
 }
 
 impl<T: MemPool> FosterBTreePageTraversal<T> {
+    // Return the children to visit in the order of the traversal
+    fn get_children_page_ids(&self, page: &Page) -> Vec<PageId> {
+        let mut children = Vec::new();
+        if page.is_leaf() {
+            if page.has_foster_child() {
+                let foster_child_page_id = page.get_foster_page_id();
+                children.push(foster_child_page_id);
+            }
+            children
+        } else {
+            for i in 1..=page.active_slot_count() {
+                let child_page_id = PageId::from_be_bytes(page.get_val(i).try_into().unwrap());
+                children.push(child_page_id);
+            }
+            children
+        }
+    }
+
     pub fn visit<V>(&self, visitor: &mut V)
     where
         V: PageVisitor,
@@ -1562,7 +1507,8 @@ impl<T: MemPool> FosterBTreePageTraversal<T> {
                 continue;
             } else {
                 *pre_visited = true;
-                let children = visitor.visit_pre(&page);
+                visitor.visit_pre(&page);
+                let children = self.get_children_page_ids(&page);
                 for child_key in children.into_iter().rev() {
                     stack.push((PageKey::new(self.c_key, child_key), false));
                 }
@@ -1572,30 +1518,15 @@ impl<T: MemPool> FosterBTreePageTraversal<T> {
 }
 
 pub trait PageVisitor {
-    // Return the children to visit in the order of the traversal
-    fn visit_pre(&mut self, page: &Page) -> Vec<PageId>;
+    fn visit_pre(&mut self, page: &Page);
     fn visit_post(&mut self, page: &Page);
 }
 
 pub struct ConsistencyChecker {}
 
 impl PageVisitor for ConsistencyChecker {
-    fn visit_pre(&mut self, page: &Page) -> Vec<PageId> {
+    fn visit_pre(&mut self, page: &Page) {
         page.run_consistency_checks(false);
-        let mut children = Vec::new();
-        if page.is_leaf() {
-            if page.has_foster_child() {
-                let foster_child_page_id = page.get_foster_page_id();
-                children.push(foster_child_page_id);
-            }
-            children
-        } else {
-            for i in 1..=page.active_slot_count() {
-                let child_page_id = PageId::from_be_bytes(page.get_val(i).try_into().unwrap());
-                children.push(child_page_id);
-            }
-            children
-        }
     }
 
     fn visit_post(&mut self, page: &Page) {}
@@ -1719,7 +1650,7 @@ impl PageStatsGenerator {
 }
 
 impl PageVisitor for PageStatsGenerator {
-    fn visit_pre(&mut self, page: &Page) -> Vec<PageId> {
+    fn visit_pre(&mut self, page: &Page) {
         let stats = PerPageStats {
             level: page.level(),
             has_foster: page.has_foster_child(),
@@ -1729,21 +1660,6 @@ impl PageVisitor for PageStatsGenerator {
             total_free_space: page.total_free_space() as usize,
         };
         self.update(page.get_id(), stats);
-
-        let mut children = Vec::new();
-        if page.is_leaf() {
-            if page.has_foster_child() {
-                let foster_child_page_id = page.get_foster_page_id();
-                children.push(foster_child_page_id);
-            }
-            children
-        } else {
-            for i in 1..=page.active_slot_count() {
-                let child_page_id = PageId::from_be_bytes(page.get_val(i).try_into().unwrap());
-                children.push(child_page_id);
-            }
-            children
-        }
     }
 
     fn visit_post(&mut self, page: &Page) {}

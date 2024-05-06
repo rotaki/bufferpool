@@ -3,8 +3,12 @@ use wasm_bindgen::prelude::*;
 use crate::buffer_pool::prelude::*;
 use crate::foster_btree::foster_btree::MAX_BYTES_USED;
 use crate::foster_btree::{FosterBtree, FosterBtreePage};
+use crate::page::{Page, PageId};
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+use super::foster_btree::PageVisitor;
 
 #[wasm_bindgen]
 pub struct FosterBtreeVisualizer {
@@ -98,6 +102,96 @@ impl FosterBtreeVisualizer {
     }
 
     pub fn visualize(&self) -> String {
-        self.bt.generate_dot()
+        let mut dot_gen = DotGraphGenerator::new();
+        let page_traverser = self.bt.page_traverser();
+        page_traverser.visit(&mut dot_gen);
+        dot_gen.to_string()
     }
+}
+
+pub struct DotGraphGenerator {
+    dot: String,
+    levels: HashMap<u8, HashSet<PageId>>,
+}
+
+impl DotGraphGenerator {
+    fn new() -> Self {
+        let mut dot = "digraph G {\n".to_string();
+        // rectangle nodes
+        dot.push_str("\tnode [shape=rectangle];\n");
+        Self {
+            dot,
+            levels: HashMap::new(),
+        }
+    }
+
+    fn page_to_dot_string(&self, page: &Page) -> String {
+        let mut result = format!("\t{} [label=\"[P{}](", page.get_id(), page.get_id());
+        // If page is a leaf, add the key-value pairs
+        let low_fence = page.get_raw_key(page.low_fence_slot_id());
+        if low_fence.is_empty() {
+            result.push_str("L[-∞], ");
+        } else {
+            let low_fence_usize = usize::from_be_bytes(low_fence.try_into().unwrap());
+            result.push_str(&format!("L[{}], ", low_fence_usize));
+        }
+        for i in 1..=page.active_slot_count() {
+            let key = page.get_raw_key(i);
+            let key = if key.is_empty() {
+                "-∞".to_string()
+            } else {
+                let key_usize = usize::from_be_bytes(key.try_into().unwrap());
+                key_usize.to_string()
+            };
+            result.push_str(&format!("{}, ", key));
+        }
+        let high_fence = page.get_raw_key(page.high_fence_slot_id());
+        if high_fence.is_empty() {
+            result.push_str("H[+∞])\"];");
+        } else {
+            let high_fence_usize = usize::from_be_bytes(high_fence.try_into().unwrap());
+            result.push_str(&format!("H[{}])\"];", high_fence_usize));
+        }
+        result.push_str("\n");
+        result
+    }
+
+    fn to_string(&self) -> String {
+        let mut result = self.dot.clone();
+        for (_, page_ids) in self.levels.iter() {
+            result.push_str(&format!("\t{{rank=same; {:?}}}\n", page_ids));
+        }
+        result.push_str("}\n");
+        result
+    }
+}
+
+impl PageVisitor for DotGraphGenerator {
+    fn visit_pre(&mut self, page: &Page) {
+        self.dot.push_str(&self.page_to_dot_string(page));
+
+        let level = page.level();
+        let id = page.get_id();
+
+        self.levels
+            .entry(level)
+            .or_insert(HashSet::new())
+            .insert(id);
+
+        if page.is_leaf() {
+            if page.has_foster_child() {
+                let foster_child_page_id = page.get_foster_page_id();
+                self.dot
+                    .push_str(&format!("\t{} -> {};\n", id, foster_child_page_id));
+            }
+        } else {
+            for i in 1..=page.active_slot_count() {
+                let child_page_id = PageId::from_be_bytes(page.get_val(i).try_into().unwrap());
+                self.dot
+                    .push_str(&format!("\t{} -> {};\n", id, child_page_id));
+            }
+        }
+    }
+
+    fn visit_post(&mut self, page: &Page) {}
 }
