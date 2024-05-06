@@ -269,19 +269,12 @@ pub trait FosterBtreePage {
     fn append_sorted<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, recs: &Vec<(K, V)>) -> bool;
     fn remove_range(&mut self, start: u16, end: u16);
 
-    #[cfg(any(test, debug_assertions))]
     fn run_consistency_checks(&self, include_no_garbage_checks: bool);
-    #[cfg(any(test, debug_assertions))]
     fn check_keys_are_sorted(&self);
-    #[cfg(any(test, debug_assertions))]
     fn check_total_bytes_used(&self);
-    #[cfg(any(test, debug_assertions))]
     fn check_fence_slots_exists(&self);
-    #[cfg(any(test, debug_assertions))]
     fn check_rec_start_offset_match_slots(&self);
-    #[cfg(any(test, debug_assertions))]
     fn check_ideal_space_usage(&self);
-    #[cfg(any(test, debug_assertions))]
     fn print_all<K: Fn(&[u8]) -> String>(&self, key_fn: K);
 }
 
@@ -1139,7 +1132,6 @@ impl FosterBtreePage for Page {
         }
     }
 
-    #[cfg(any(test, debug_assertions))]
     fn run_consistency_checks(&self, include_no_garbage_checks: bool) {
         self.check_keys_are_sorted();
         self.check_fence_slots_exists();
@@ -1150,7 +1142,6 @@ impl FosterBtreePage for Page {
         }
     }
 
-    #[cfg(any(test, debug_assertions))]
     fn check_keys_are_sorted(&self) {
         // debug print all the keys
         // for i in 0..self.header().slot_count() {
@@ -1169,7 +1160,6 @@ impl FosterBtreePage for Page {
         }
     }
 
-    #[cfg(any(test, debug_assertions))]
     fn check_total_bytes_used(&self) {
         let mut sum_used = PAGE_HEADER_SIZE;
         for i in 0..self.slot_count() {
@@ -1179,12 +1169,10 @@ impl FosterBtreePage for Page {
         assert_eq!(sum_used, self.total_bytes_used() as usize);
     }
 
-    #[cfg(any(test, debug_assertions))]
     fn check_fence_slots_exists(&self) {
         assert!(self.slot_count() >= 2);
     }
 
-    #[cfg(any(test, debug_assertions))]
     fn check_rec_start_offset_match_slots(&self) {
         let mut rec_start_offset = u16::MAX;
         for i in 0..self.slot_count() {
@@ -1197,7 +1185,6 @@ impl FosterBtreePage for Page {
         assert_eq!(rec_start_offset, self.rec_start_offset());
     }
 
-    #[cfg(any(test, debug_assertions))]
     fn check_ideal_space_usage(&self) {
         let mut rec_mem_usage = 0;
         for i in 0..self.slot_count() {
@@ -1209,7 +1196,6 @@ impl FosterBtreePage for Page {
         assert_eq!(ideal_start_offset, self.rec_start_offset());
     }
 
-    #[cfg(any(test, debug_assertions))]
     fn print_all<K: Fn(&[u8]) -> String>(&self, key_fn: K) {
         print!("[");
         let mut sep = "";

@@ -47,30 +47,38 @@ fn test_stress() {
     let btree = setup_inmem_btree_empty();
 
     // Write kvs to file
-    let kvs_file = "kvs.dat";
-    // serde cbor to write to file
-    let mut file = File::create(kvs_file).unwrap();
-    let kvs_str = serde_cbor::to_vec(&kvs).unwrap();
-    file.write_all(&kvs_str).unwrap();
+    // let kvs_file = "kvs.dat";
+    // // serde cbor to write to file
+    // let mut file = File::create(kvs_file).unwrap();
+    // let kvs_str = serde_cbor::to_vec(&kvs).unwrap();
+    // file.write_all(&kvs_str).unwrap();
 
+    println!("Inserting {} keys", num_keys);
     for (i, (key, val)) in kvs.iter().enumerate() {
-        println!(
-            "**************************** Inserting {} key={} **************************",
-            i, key
-        );
+        // println!(
+        //     "**************************** Inserting {} key={} **************************",
+        //     i, key
+        // );
         let key = to_bytes(*key);
         btree.insert(&key, val).unwrap();
     }
 
+    btree.check_consistency();
+    println!("{}", btree.page_stats(false));
+
+    println!("Getting {} keys", num_keys);
     for (key, val) in kvs.iter() {
-        println!(
-            "**************************** Getting key {} **************************",
-            key
-        );
+        // println!(
+        //     "**************************** Getting key {} **************************",
+        //     key
+        // );
         let key = to_bytes(*key);
         let current_val = btree.get(&key).unwrap();
         assert_eq!(current_val, *val);
     }
+
+    btree.check_consistency();
+    println!("{}", btree.page_stats(false));
 }
 
 // skip default
@@ -124,9 +132,10 @@ fn replay_stress() {
 
 fn main() {
     println!("Running stress test");
-    for _ in 0..100 {
-        test_stress();
-    }
+    // for _ in 0..100 {
+    //     test_stress();
+    // }
+    test_stress();
     println!("SUCCESS");
     // replay_stress();
 }

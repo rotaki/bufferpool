@@ -18,14 +18,16 @@
   * [x] Add upsert operator
   * [x] Add statistics for each structure modification
     * [x] Revise the split decision
-  * [] Add range scan operator
+  * [] Add memory usage profiler
+  * [] Add thread-unsafe range scan operator
     * [] Add consistency checker
-  * [] Optimistic lock coupling
-  * [] Add ghost record support
+  * [] Test with bp (limited memory pool with disk offloading)
   * [] Reuse the removed page in merge
+  * [] Add thread-safe range scan operator with page versioning (optimistic lock coupling)
+  * [] Optimistic lock coupling with hybrid latches
+  * [] Add ghost record support for transaction support
   * [] Add prefix compression in pages
   * [] Add page split into three pages
-  * [] Test with bp (limited memory pool with disk offloading)
 
 ## Add Logging
 * [x] Add log buffer with append and flush capabilities

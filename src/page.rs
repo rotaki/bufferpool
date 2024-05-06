@@ -4,7 +4,8 @@ use crate::write_ahead_log::prelude::{Lsn, LsnSize};
 
 pub const PAGE_SIZE: usize = 4096;
 pub type PageId = u32;
-pub const BASE_PAGE_HEADER_SIZE: usize = 4 + LsnSize;
+const BASE_PAGE_HEADER_SIZE: usize = 4 + LsnSize;
+pub const AVAILABLE_PAGE_SIZE: usize = PAGE_SIZE - BASE_PAGE_HEADER_SIZE;
 
 pub struct Page([u8; PAGE_SIZE]);
 

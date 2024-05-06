@@ -1,8 +1,10 @@
 use std::{
     cell::UnsafeCell,
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    hash::Hash,
+    rc::Rc,
     sync::{atomic::Ordering, Arc, Mutex},
-    thread,
+    thread::{self, current},
     time::Duration,
 };
 
@@ -13,7 +15,7 @@ use crate::{
     buffer_pool::prelude::*,
     foster_btree::foster_btree_page::PAGE_HEADER_SIZE,
     log, log_trace,
-    page::{Page, PageId, BASE_PAGE_HEADER_SIZE, PAGE_SIZE},
+    page::{Page, PageId, AVAILABLE_PAGE_SIZE, PAGE_SIZE},
     write_ahead_log::{prelude::LogRecord, LogBufferRef},
 };
 
@@ -317,9 +319,9 @@ fn inc_shared_page_latch_count() {
 // [MIN_BYTES_USED, MAX_BYTES_USED) is normal.
 // [MAX_BYTES_USED, PAGE_SIZE) is large.
 // If the page has less than MIN_BYTES_USED, then we need to MERGE or LOADBALANCE.
-pub const MIN_BYTES_USED: usize = (PAGE_SIZE - BASE_PAGE_HEADER_SIZE) / 5;
+pub const MIN_BYTES_USED: usize = AVAILABLE_PAGE_SIZE / 5;
 // If the page has more than MAX_BYTES_USED, then we need to LOADBALANCE.
-pub const MAX_BYTES_USED: usize = (PAGE_SIZE - BASE_PAGE_HEADER_SIZE) * 4 / 5;
+pub const MAX_BYTES_USED: usize = AVAILABLE_PAGE_SIZE * 4 / 5;
 
 #[inline]
 fn is_small(page: &Page) -> bool {
@@ -1048,6 +1050,19 @@ pub struct FosterBtree<T: MemPool> {
 }
 
 impl<T: MemPool> FosterBtree<T> {
+    pub fn check_consistency(&self) {
+        let mut checker = ConsistencyChecker {};
+        let traversal = FosterBTreePageTraversal::new(self);
+        traversal.visit(&mut checker);
+    }
+
+    pub fn page_stats(&self, verbose: bool) -> String {
+        let mut stats = PageStatsGenerator::new();
+        let traversal = FosterBTreePageTraversal::new(self);
+        traversal.visit(&mut stats);
+        stats.to_string(verbose)
+    }
+
     pub fn generate_dot(&self) -> String {
         let mut result = "digraph G {\n".to_string();
         // rectangle nodes
@@ -1283,38 +1298,51 @@ impl<T: MemPool> FosterBtree<T> {
         }
     }
 
-    fn traverse_to_leaf_for_read(&self, key: &[u8]) -> Result<FrameReadGuard, TreeStatus> {
+    fn traverse_to_leaf_for_read(
+        &self,
+        key: &[u8],
+        structure_modification: bool,
+        page_fn: &mut dyn FnMut(&FrameReadGuard),
+    ) -> Result<FrameReadGuard, TreeStatus> {
         let mut current_page = self.read_page(self.root_key);
         let mut op_byte = OpByte::new();
         loop {
             let this_page = current_page;
+            page_fn(&this_page);
             log_trace!("Traversal for read, page: {}", this_page.get_id());
             if this_page.is_leaf() {
                 if this_page.has_foster_child() && this_page.get_foster_key() <= key {
                     // Check whether the foster child should be traversed.
                     let foster_page_key = PageKey::new(self.c_key, this_page.get_foster_page_id());
                     let foster_page = self.read_page(foster_page_key);
-                    // Now we have two locks. We need to release the lock of the current page.
-                    let (op, this_page, foster_page) = self.modify_structure_if_needed_for_read(
-                        true,
-                        this_page,
-                        foster_page,
-                        &mut op_byte,
-                    );
-                    match op {
-                        Some(OpType::MERGE) | Some(OpType::LOADBALANCE) => {
-                            current_page = this_page;
-                            continue;
+                    if structure_modification {
+                        // Now we have two locks. We need to release the lock of the current page.
+                        let (op, this_page, foster_page) = self
+                            .modify_structure_if_needed_for_read(
+                                true,
+                                this_page,
+                                foster_page,
+                                &mut op_byte,
+                            );
+                        match op {
+                            Some(OpType::MERGE) | Some(OpType::LOADBALANCE) => {
+                                current_page = this_page;
+                                continue;
+                            }
+                            None | Some(OpType::SPLIT) | Some(OpType::ASCENDROOT) => {
+                                // Start from the child
+                                op_byte.reset();
+                                current_page = foster_page;
+                                continue;
+                            }
+                            _ => {
+                                panic!("Unexpected operation");
+                            }
                         }
-                        None | Some(OpType::SPLIT) | Some(OpType::ASCENDROOT) => {
-                            // Start from the child
-                            op_byte.reset();
-                            current_page = foster_page;
-                            continue;
-                        }
-                        _ => {
-                            panic!("Unexpected operation");
-                        }
+                    } else {
+                        op_byte.reset();
+                        current_page = foster_page;
+                        continue;
                     }
                 } else {
                     return Ok(this_page);
@@ -1330,34 +1358,43 @@ impl<T: MemPool> FosterBtree<T> {
             };
 
             let next_page = self.read_page(page_key);
-            // Now we have two locks. We need to release the lock of the current page.
-            let (op, this_page, next_page) = self.modify_structure_if_needed_for_read(
-                is_foster_relationship,
-                this_page,
-                next_page,
-                &mut op_byte,
-            );
-            match op {
-                Some(OpType::MERGE)
-                | Some(OpType::LOADBALANCE)
-                | Some(OpType::DESCENDROOT)
-                | Some(OpType::ADOPT) => {
-                    // Continue from the current page
-                    current_page = this_page;
-                    continue;
+            if structure_modification {
+                // Now we have two locks. We need to release the lock of the current page.
+                let (op, this_page, next_page) = self.modify_structure_if_needed_for_read(
+                    is_foster_relationship,
+                    this_page,
+                    next_page,
+                    &mut op_byte,
+                );
+                match op {
+                    Some(OpType::MERGE)
+                    | Some(OpType::LOADBALANCE)
+                    | Some(OpType::DESCENDROOT)
+                    | Some(OpType::ADOPT) => {
+                        // Continue from the current page
+                        current_page = this_page;
+                        continue;
+                    }
+                    None
+                    | Some(OpType::SPLIT)
+                    | Some(OpType::ASCENDROOT)
+                    | Some(OpType::ANTIADOPT) => {
+                        // Start from the child
+                        op_byte.reset();
+                        current_page = next_page;
+                        continue;
+                    }
                 }
-                None | Some(OpType::SPLIT) | Some(OpType::ASCENDROOT) | Some(OpType::ANTIADOPT) => {
-                    // Start from the child
-                    op_byte.reset();
-                    current_page = next_page;
-                    continue;
-                }
+            } else {
+                op_byte.reset();
+                current_page = next_page;
+                continue;
             }
         }
     }
 
     fn try_traverse_to_leaf_for_write(&self, key: &[u8]) -> Result<FrameWriteGuard, TreeStatus> {
-        let leaf_page = self.traverse_to_leaf_for_read(key)?;
+        let leaf_page = self.traverse_to_leaf_for_read(key, true, &mut |_| {})?;
         match leaf_page.try_upgrade(true) {
             Ok(upgraded) => Ok(upgraded),
             Err(_) => Err(TreeStatus::WriteLockFailed),
@@ -1394,7 +1431,7 @@ impl<T: MemPool> FosterBtree<T> {
     }
 
     pub fn get(&self, key: &[u8]) -> Result<Vec<u8>, TreeStatus> {
-        let foster_page = self.traverse_to_leaf_for_read(key)?;
+        let foster_page = self.traverse_to_leaf_for_read(key, true, &mut |_| {})?;
         let slot_id = foster_page.lower_bound_slot_id(&BTreeKey::new(key));
         if slot_id == 0 {
             // Lower fence. Non-existent key
@@ -1485,6 +1522,231 @@ impl<T: MemPool> FosterBtree<T> {
             }
         }
     }
+}
+
+pub struct FosterBTreePageTraversal<T: MemPool> {
+    // BTree parameters
+    c_key: ContainerKey,
+    root_key: PageKey,
+    mem_pool: Arc<T>,
+}
+
+impl<T: MemPool> FosterBTreePageTraversal<T> {
+    pub fn new(tree: &FosterBtree<T>) -> Self {
+        Self {
+            c_key: tree.c_key,
+            root_key: tree.root_key,
+            mem_pool: tree.mem_pool.clone(),
+        }
+    }
+}
+
+impl<T: MemPool> FosterBTreePageTraversal<T> {
+    pub fn visit<V>(&self, visitor: &mut V)
+    where
+        V: PageVisitor,
+    {
+        self.visit_subtree(visitor, self.root_key);
+    }
+
+    pub fn visit_subtree<V>(&self, visitor: &mut V, page_key: PageKey)
+    where
+        V: PageVisitor,
+    {
+        let mut stack = vec![(page_key, false)]; // (page_key, pre_visited)
+        while let Some((next_key, pre_visited)) = stack.last_mut() {
+            let page = self.mem_pool.get_page_for_read(*next_key).unwrap();
+            if *pre_visited {
+                visitor.visit_post(&page);
+                stack.pop();
+                continue;
+            } else {
+                *pre_visited = true;
+                let children = visitor.visit_pre(&page);
+                for child_key in children.into_iter().rev() {
+                    stack.push((PageKey::new(self.c_key, child_key), false));
+                }
+            }
+        }
+    }
+}
+
+pub trait PageVisitor {
+    // Return the children to visit in the order of the traversal
+    fn visit_pre(&mut self, page: &Page) -> Vec<PageId>;
+    fn visit_post(&mut self, page: &Page);
+}
+
+pub struct ConsistencyChecker {}
+
+impl PageVisitor for ConsistencyChecker {
+    fn visit_pre(&mut self, page: &Page) -> Vec<PageId> {
+        page.run_consistency_checks(false);
+        let mut children = Vec::new();
+        if page.is_leaf() {
+            if page.has_foster_child() {
+                let foster_child_page_id = page.get_foster_page_id();
+                children.push(foster_child_page_id);
+            }
+            children
+        } else {
+            for i in 1..=page.active_slot_count() {
+                let child_page_id = PageId::from_be_bytes(page.get_val(i).try_into().unwrap());
+                children.push(child_page_id);
+            }
+            children
+        }
+    }
+
+    fn visit_post(&mut self, page: &Page) {}
+}
+
+#[derive(Debug)]
+struct PerPageStats {
+    level: u8,
+    has_foster: bool,
+    slot_count: usize,
+    active_slot_count: usize,
+    total_bytes_used: usize,
+    total_free_space: usize,
+}
+
+impl PerPageStats {
+    fn to_string(&self) -> String {
+        let mut result = String::new();
+        result.push_str(&format!("Level: {}\n", self.level));
+        result.push_str(&format!("Has foster: {}\n", self.has_foster));
+        result.push_str(&format!("Slot count: {}\n", self.slot_count));
+        result.push_str(&format!("Active slot count: {}\n", self.active_slot_count));
+        result.push_str(&format!("Total bytes used: {}\n", self.total_bytes_used));
+        result.push_str(&format!("Total free space: {}\n", self.total_free_space));
+        result
+    }
+}
+
+struct PerLevelPageStats {
+    count: usize,
+    has_foster_count: usize,
+    min_fillfactor: f64,
+    max_fillfactor: f64,
+    sum_fillfactor: f64,
+    page_stats: BTreeMap<PageId, PerPageStats>,
+}
+
+impl PerLevelPageStats {
+    fn new() -> Self {
+        Self {
+            count: 0,
+            has_foster_count: 0,
+            min_fillfactor: 1.0,
+            max_fillfactor: 0.0,
+            sum_fillfactor: 0.0,
+            page_stats: BTreeMap::new(),
+        }
+    }
+}
+
+struct PageStatsGenerator {
+    stats: BTreeMap<u8, PerLevelPageStats>, // level -> stats
+}
+
+impl PageStatsGenerator {
+    fn new() -> Self {
+        Self {
+            stats: BTreeMap::new(),
+        }
+    }
+
+    fn update(&mut self, page_id: PageId, stats: PerPageStats) {
+        let level = stats.level;
+        let per_level_stats = self.stats.entry(level).or_insert(PerLevelPageStats::new());
+        per_level_stats.count += 1;
+        per_level_stats.has_foster_count += if stats.has_foster { 1 } else { 0 };
+        let fillfactor = stats.total_bytes_used as f64 / AVAILABLE_PAGE_SIZE as f64;
+        per_level_stats.min_fillfactor = per_level_stats.min_fillfactor.min(fillfactor);
+        per_level_stats.max_fillfactor = per_level_stats.max_fillfactor.max(fillfactor);
+        per_level_stats.sum_fillfactor += fillfactor;
+        per_level_stats.page_stats.insert(page_id, stats);
+    }
+
+    fn to_string(&self, verbose: bool) -> String {
+        let mut result = String::new();
+        for (level, stats) in self.stats.iter().rev() {
+            result.push_str(&format!(
+                "----------------- Level {} -----------------\n",
+                level
+            ));
+            result.push_str(&format!("Page count: {}\n", stats.count));
+            result.push_str(&format!("Has foster count: {}\n", stats.has_foster_count));
+            result.push_str(&format!("Min fillfactor: {:.4}\n", stats.min_fillfactor));
+            result.push_str(&format!("Max fillfactor: {:.4}\n", stats.max_fillfactor));
+            result.push_str(&format!(
+                "Avg fillfactor: {:.4}\n",
+                stats.sum_fillfactor / stats.count as f64
+            ));
+        }
+        // Print the page with high fillfactor
+        if verbose {
+            result.push_str("Pages with high fillfactor (> 0.99):\n");
+            for stats in self.stats.values().rev() {
+                for (page_id, per_page_stats) in stats.page_stats.iter() {
+                    let fillfactor =
+                        per_page_stats.total_bytes_used as f64 / AVAILABLE_PAGE_SIZE as f64;
+                    if fillfactor > 0.99 {
+                        result.push_str(&format!(
+                            "Page {} has high fillfactor: {:.2}\n",
+                            page_id, fillfactor
+                        ));
+                        result.push_str(&per_page_stats.to_string());
+                    }
+                }
+            }
+
+            // Print the page stats
+            result.push_str("Individual page stats:\n");
+            for stats in self.stats.values().rev() {
+                for (page_id, per_page_stats) in stats.page_stats.iter() {
+                    result.push_str(&format!(
+                        "----------------- Page {} -----------------\n",
+                        page_id
+                    ));
+                    result.push_str(&per_page_stats.to_string());
+                }
+            }
+        }
+        result
+    }
+}
+
+impl PageVisitor for PageStatsGenerator {
+    fn visit_pre(&mut self, page: &Page) -> Vec<PageId> {
+        let stats = PerPageStats {
+            level: page.level(),
+            has_foster: page.has_foster_child(),
+            slot_count: page.slot_count() as usize,
+            active_slot_count: page.active_slot_count() as usize,
+            total_bytes_used: page.total_bytes_used() as usize,
+            total_free_space: page.total_free_space() as usize,
+        };
+        self.update(page.get_id(), stats);
+
+        let mut children = Vec::new();
+        if page.is_leaf() {
+            if page.has_foster_child() {
+                let foster_child_page_id = page.get_foster_page_id();
+                children.push(foster_child_page_id);
+            }
+            children
+        } else {
+            for i in 1..=page.active_slot_count() {
+                let child_page_id = PageId::from_be_bytes(page.get_val(i).try_into().unwrap());
+                children.push(child_page_id);
+            }
+            children
+        }
+    }
+
+    fn visit_post(&mut self, page: &Page) {}
 }
 
 #[cfg(test)]
@@ -2912,5 +3174,36 @@ mod tests {
             let current_val = btree.get(&key).unwrap();
             assert_eq!(current_val, *val);
         }
+    }
+
+    #[test]
+    fn test_page_stat_generator() {
+        let btree = setup_inmem_btree_empty();
+        // Insert 1024 bytes
+        let val = vec![3_u8; 1024];
+        let order = [6, 3, 8, 1, 5, 7, 2];
+        for i in order.iter() {
+            println!(
+                "**************************** Inserting key {} **************************",
+                i
+            );
+            let key = to_bytes(*i);
+            btree.insert(&key, &val).unwrap();
+        }
+        let page_stats = btree.page_stats(true);
+        println!("{}", page_stats);
+
+        for i in order.iter() {
+            println!(
+                "**************************** Getting key {} **************************",
+                i
+            );
+            let key = to_bytes(*i);
+            let current_val = btree.get(&key).unwrap();
+            assert_eq!(current_val, val);
+        }
+
+        let page_stats = btree.page_stats(true);
+        println!("{}", page_stats);
     }
 }
