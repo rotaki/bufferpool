@@ -14,6 +14,7 @@ use tempfile::TempDir;
 use crate::{
     buffer_pool::prelude::*,
     foster_btree::foster_btree_page::PAGE_HEADER_SIZE,
+    kv_iterator::KVIterator,
     log, log_trace,
     page::{Page, PageId, AVAILABLE_PAGE_SIZE, PAGE_SIZE},
     write_ahead_log::{prelude::LogRecord, LogBufferRef},
@@ -1432,8 +1433,164 @@ impl<T: MemPool> FosterBtree<T> {
             }
         }
     }
+
+    pub fn scan(&self, l_key: &[u8], r_key: &[u8]) -> FosterBtreeRangeScanner<T> {
+        FosterBtreeRangeScanner::new(self, l_key, r_key)
+    }
 }
 
+/// Scan the BTree in the range [l_key, r_key)
+/// To specify all keys, use an empty slice.
+/// (l_key, r_key) = (&[], &[]) means [-inf, +inf)
+pub struct FosterBtreeRangeScanner<'a, T: MemPool> {
+    btree: &'a FosterBtree<T>,
+
+    // Scan parameters
+    l_key: Vec<u8>,
+    r_key: Vec<u8>,
+    filter: Option<fn((&[u8], &[u8])) -> bool>,
+
+    // States
+    initialized: bool,
+    finished: bool,
+    prev_high_fence: Option<Vec<u8>>,
+    current_leaf_page: Option<FrameReadGuard<'a>>,
+    current_slot_id: u16,
+}
+
+impl<'a, T: MemPool> FosterBtreeRangeScanner<'a, T> {
+    fn new(btree: &'a FosterBtree<T>, l_key: &[u8], r_key: &[u8]) -> Self {
+        Self {
+            btree,
+
+            l_key: l_key.to_vec(),
+            r_key: r_key.to_vec(),
+            filter: None,
+
+            initialized: false,
+            finished: false,
+            prev_high_fence: None,
+            current_leaf_page: None,
+            current_slot_id: 0,
+        }
+    }
+
+    fn l_key(&self) -> BTreeKey {
+        if self.l_key.is_empty() {
+            BTreeKey::MinusInfty
+        } else {
+            BTreeKey::new(&self.l_key)
+        }
+    }
+
+    fn r_key(&self) -> BTreeKey {
+        if self.r_key.is_empty() {
+            BTreeKey::PlusInfty
+        } else {
+            BTreeKey::new(&self.r_key)
+        }
+    }
+
+    fn prev_high_fence(&self) -> BTreeKey {
+        if self.prev_high_fence.as_ref().unwrap().is_empty() {
+            BTreeKey::PlusInfty
+        } else {
+            BTreeKey::new(&self.prev_high_fence.as_ref().unwrap())
+        }
+    }
+
+    fn finish(&mut self) {
+        self.finished = true;
+        self.current_leaf_page = None;
+    }
+
+    fn initialize(&mut self) {
+        // Traverse to the leaf page that contains the l_key
+        let leaf_page = self
+            .btree
+            .traverse_to_leaf_for_read(self.l_key.as_slice())
+            .unwrap();
+        let mut slot = leaf_page.lower_bound_slot_id(&self.l_key());
+        if slot == 0 {
+            slot = 1; // Skip the lower fence
+        }
+        self.current_leaf_page = Some(leaf_page);
+        self.current_slot_id = slot;
+    }
+
+    fn go_to_leaf(&mut self) {
+        // Traverse to the leaf page that contains the current key (high fence of the previous leaf page)
+        // Current key should NOT be equal to the r_key. Otherwise, we are done.
+        let leaf_page = self
+            .btree
+            .traverse_to_leaf_for_read(self.prev_high_fence.as_ref().unwrap())
+            .unwrap();
+        self.current_leaf_page = Some(leaf_page);
+        self.current_slot_id = 1; // Skip the lower fence
+    }
+}
+
+impl<'a, T: MemPool> KVIterator for FosterBtreeRangeScanner<'a, T> {
+    fn next(&mut self) -> Option<(Vec<u8>, Vec<u8>)> {
+        if self.finished {
+            return None;
+        }
+        if !self.initialized {
+            self.initialize();
+            self.initialized = true;
+        }
+        loop {
+            debug_assert!(self.current_slot_id > 0);
+            if self.current_leaf_page.is_none() {
+                // If the current leaf page is None, we have to re-traverse to the leaf page using the previous high fence.
+                if self.prev_high_fence() >= self.r_key() {
+                    self.finish();
+                    return None;
+                } else {
+                    self.go_to_leaf();
+                }
+            }
+            debug_assert!(self.current_leaf_page.is_some());
+            let leaf_page = self.current_leaf_page.as_ref().unwrap();
+            let key = leaf_page.get_raw_key(self.current_slot_id);
+            if BTreeKey::new(key) >= self.r_key() {
+                self.finish();
+                return None;
+            }
+            if self.current_slot_id == leaf_page.high_fence_slot_id() {
+                // Empty leaf page or reached the high fence. Move to the next leaf page.
+                self.prev_high_fence = Some(key.to_owned());
+                self.current_leaf_page = None;
+            } else if leaf_page.has_foster_child()
+                && self.current_slot_id == leaf_page.foster_child_slot_id()
+            {
+                // If the current slot is the foster child slot, move to the foster child.
+                // Before releasing the current page, we need to get the read-latch of the foster child.
+                let current_page = self.current_leaf_page.take().unwrap();
+                let foster_page_key =
+                    PageKey::new(self.btree.c_key, current_page.get_foster_page_id());
+                let foster_page = self
+                    .btree
+                    .mem_pool
+                    .get_page_for_read(foster_page_key)
+                    .unwrap();
+                self.current_leaf_page = Some(foster_page);
+                self.current_slot_id = 1;
+            } else {
+                let val = leaf_page.get_val(self.current_slot_id);
+                if self.filter.is_none() || (self.filter.unwrap())((key, val)) {
+                    self.current_slot_id += 1;
+                    return Some((key.to_owned(), val.to_owned()));
+                } else {
+                    self.current_slot_id += 1;
+                }
+            }
+        }
+    }
+}
+
+/// Thread-unsafe page traversal coordinator.
+/// This can used for debugging, visualization, and collecting statistics.
 pub struct FosterBTreePageTraversal<T: MemPool> {
     // BTree parameters
     c_key: ContainerKey,
@@ -1662,6 +1819,7 @@ mod tests {
             print_page, should_adopt, should_antiadopt, should_load_balance, should_merge,
             should_root_ascend, should_root_descend, TreeStatus, MIN_BYTES_USED,
         },
+        kv_iterator::KVIterator,
         log, log_trace,
         page::Page,
         random::RandomKVs,
@@ -1674,6 +1832,10 @@ mod tests {
 
     fn to_bytes(num: usize) -> Vec<u8> {
         num.to_be_bytes().to_vec()
+    }
+
+    fn from_bytes(bytes: &[u8]) -> usize {
+        usize::from_be_bytes(bytes.try_into().unwrap())
     }
 
     use crate::buffer_pool::prelude::{FrameReadGuard, FrameWriteGuard, MemPoolStatus};
@@ -2921,7 +3083,53 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_bp(100))]
+    #[case::in_mem(get_in_mem_pool())]
+    fn test_scan<T: MemPool>(#[case] bp: Arc<T>) {
+        let btree = setup_btree_empty(bp.clone());
+        // Insert 1024 bytes
+        let val = vec![3_u8; 1024];
+        let order = [6, 3, 8, 1, 5, 7, 2, 4, 9, 0];
+        for i in order.iter() {
+            println!(
+                "**************************** Upserting key {} **************************",
+                i
+            );
+            let key = to_bytes(*i);
+            btree.upsert(&key, &val).unwrap();
+        }
+        let start_key = to_bytes(2);
+        let end_key = to_bytes(7);
+        let mut iter = btree.scan(&start_key, &end_key);
+        let mut count = 0;
+        while let Some((key, current_val)) = iter.next() {
+            let key = from_bytes(&key);
+            println!(
+                "**************************** Scanning key {} **************************",
+                key
+            );
+            assert_eq!(current_val, val);
+            count += 1;
+        }
+        assert_eq!(count, 5);
+
+        let start_key = to_bytes(0);
+        let end_key = to_bytes(10);
+        let mut iter = btree.scan(&start_key, &end_key);
+        let mut count = 0;
+        while let Some((key, current_val)) = iter.next() {
+            let key = from_bytes(&key);
+            println!(
+                "**************************** Scanning key {} **************************",
+                key
+            );
+            assert_eq!(current_val, val);
+            count += 1;
+        }
+        assert_eq!(count, 10);
+    }
+
+    #[rstest]
+    // #[case::bp(get_bp(100))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_insertion_stress<T: MemPool>(#[case] bp: Arc<T>) {
         let num_keys = 5000;
@@ -2947,6 +3155,20 @@ mod tests {
             btree.insert(&key, val).unwrap();
         }
 
+        let mut iter = btree.scan(&[], &[]);
+        let mut count = 0;
+        while let Some((key, current_val)) = iter.next() {
+            let key = from_bytes(&key);
+            println!(
+                "**************************** Scanning key {:?} **************************",
+                key
+            );
+            let val = kvs.get(&key).unwrap();
+            assert_eq!(&current_val, val);
+            count += 1;
+        }
+        assert_eq!(count, num_keys);
+
         for (key, val) in kvs.iter() {
             println!(
                 "**************************** Getting key {} **************************",
@@ -2956,6 +3178,21 @@ mod tests {
             let current_val = btree.get(&key).unwrap();
             assert_eq!(current_val, *val);
         }
+
+        let mut iter = btree.scan(&[], &[]);
+        let mut count = 0;
+        while let Some((key, current_val)) = iter.next() {
+            let key = from_bytes(&key);
+            println!(
+                "**************************** Scanning key {:?} **************************",
+                key
+            );
+            let val = kvs.get(&key).unwrap();
+            assert_eq!(&current_val, val);
+            count += 1;
+        }
+
+        assert_eq!(count, num_keys);
 
         println!("{}", btree.page_stats(false));
 

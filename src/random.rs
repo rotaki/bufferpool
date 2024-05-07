@@ -110,6 +110,10 @@ impl RandomKVs {
     pub fn iter(&self) -> impl Iterator<Item = (&usize, &Vec<u8>)> {
         self.kvs.iter().map(|(k, v)| (k, v))
     }
+
+    pub fn get(&self, key: &usize) -> Option<&Vec<u8>> {
+        self.kvs.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+    }
 }
 
 impl std::ops::Index<usize> for RandomKVs {
