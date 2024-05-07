@@ -102,8 +102,8 @@ fn run_insertion_bench_single_thread() {
         btree.insert(&key, val).unwrap();
     }
 
-    println!("stats: \n{}", btree.page_stats(false));
-    println!("stats: \n{}", btree.op_stats());
+    println!("page stats: \n{}", btree.page_stats(false));
+    println!("op stats: \n{}", btree.op_stats());
 }
 
 // main function

@@ -35,6 +35,7 @@ impl RwLatch {
             {
                 break;
             }
+            std::hint::spin_loop();
         }
     }
 
@@ -69,6 +70,7 @@ impl RwLatch {
             {
                 break;
             }
+            std::hint::spin_loop();
         }
     }
 
@@ -101,6 +103,7 @@ impl RwLatch {
             {
                 break;
             }
+            std::hint::spin_loop();
         }
     }
 
@@ -133,6 +136,7 @@ impl RwLatch {
             {
                 break;
             }
+            std::hint::spin_loop();
         }
     }
 
