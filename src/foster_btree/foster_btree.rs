@@ -14,7 +14,6 @@ use tempfile::TempDir;
 use crate::{
     buffer_pool::prelude::*,
     foster_btree::foster_btree_page::PAGE_HEADER_SIZE,
-    kv_iterator::KVIterator,
     log, log_trace,
     page::{Page, PageId, AVAILABLE_PAGE_SIZE, PAGE_SIZE},
     write_ahead_log::{prelude::LogRecord, LogBufferRef},
@@ -1437,6 +1436,15 @@ impl<T: MemPool> FosterBtree<T> {
     pub fn scan(&self, l_key: &[u8], r_key: &[u8]) -> FosterBtreeRangeScanner<T> {
         FosterBtreeRangeScanner::new(self, l_key, r_key)
     }
+
+    pub fn scan_with_filter(
+        &self,
+        l_key: &[u8],
+        r_key: &[u8],
+        filter: Box<dyn FnMut((&[u8], &[u8])) -> bool>,
+    ) -> FosterBtreeRangeScanner<T> {
+        FosterBtreeRangeScanner::new_with_filter(self, l_key, r_key, filter)
+    }
 }
 
 /// Scan the BTree in the range [l_key, r_key)
@@ -1448,7 +1456,7 @@ pub struct FosterBtreeRangeScanner<'a, T: MemPool> {
     // Scan parameters
     l_key: Vec<u8>,
     r_key: Vec<u8>,
-    filter: Option<fn((&[u8], &[u8])) -> bool>,
+    filter: Option<Box<dyn FnMut((&[u8], &[u8])) -> bool>>,
 
     // States
     initialized: bool,
@@ -1466,6 +1474,27 @@ impl<'a, T: MemPool> FosterBtreeRangeScanner<'a, T> {
             l_key: l_key.to_vec(),
             r_key: r_key.to_vec(),
             filter: None,
+
+            initialized: false,
+            finished: false,
+            prev_high_fence: None,
+            current_leaf_page: None,
+            current_slot_id: 0,
+        }
+    }
+
+    fn new_with_filter(
+        btree: &'a FosterBtree<T>,
+        l_key: &[u8],
+        r_key: &[u8],
+        filter: Box<dyn FnMut((&[u8], &[u8])) -> bool>,
+    ) -> Self {
+        Self {
+            btree,
+
+            l_key: l_key.to_vec(),
+            r_key: r_key.to_vec(),
+            filter: Some(filter),
 
             initialized: false,
             finished: false,
@@ -1530,7 +1559,9 @@ impl<'a, T: MemPool> FosterBtreeRangeScanner<'a, T> {
     }
 }
 
-impl<'a, T: MemPool> KVIterator for FosterBtreeRangeScanner<'a, T> {
+impl<'a, T: MemPool> Iterator for FosterBtreeRangeScanner<'a, T> {
+    type Item = (Vec<u8>, Vec<u8>);
+
     fn next(&mut self) -> Option<(Vec<u8>, Vec<u8>)> {
         if self.finished {
             return None;
@@ -1578,7 +1609,7 @@ impl<'a, T: MemPool> KVIterator for FosterBtreeRangeScanner<'a, T> {
                 self.current_slot_id = 1;
             } else {
                 let val = leaf_page.get_val(self.current_slot_id);
-                if self.filter.is_none() || (self.filter.unwrap())((key, val)) {
+                if self.filter.is_none() || (self.filter.as_mut().unwrap())((key, val)) {
                     self.current_slot_id += 1;
                     return Some((key.to_owned(), val.to_owned()));
                 } else {
@@ -1819,7 +1850,6 @@ mod tests {
             print_page, should_adopt, should_antiadopt, should_load_balance, should_merge,
             should_root_ascend, should_root_descend, TreeStatus, MIN_BYTES_USED,
         },
-        kv_iterator::KVIterator,
         log, log_trace,
         page::Page,
         random::RandomKVs,
@@ -3126,6 +3156,83 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, 10);
+
+        let start_key = [];
+        let end_key = [];
+        let mut iter = btree.scan(&start_key, &end_key);
+        let mut count = 0;
+        while let Some((key, current_val)) = iter.next() {
+            let key = from_bytes(&key);
+            println!(
+                "**************************** Scanning key {} **************************",
+                key
+            );
+            assert_eq!(current_val, val);
+            count += 1;
+        }
+        assert_eq!(count, 10);
+    }
+
+    #[rstest]
+    #[case::in_mem(get_in_mem_pool())]
+    fn test_scan_with_filter<T: MemPool>(#[case] bp: Arc<T>) {
+        let btree = setup_btree_empty(bp.clone());
+        // Insert 512 and 1024 bytes. Odd keys have 512 bytes and even keys have 1024 bytes.
+        let val1 = vec![3_u8; 512];
+        let val2 = vec![4_u8; 1024];
+        let order = [6, 3, 8, 1, 5, 7, 2, 4, 9, 0];
+        for i in order.iter() {
+            println!(
+                "**************************** Upserting key {} **************************",
+                i
+            );
+            let key = to_bytes(*i);
+            if i % 2 == 0 {
+                btree.upsert(&key, &val2).unwrap();
+            } else {
+                btree.upsert(&key, &val1).unwrap();
+            }
+        }
+        let filter1 = Box::new(|(_, value): (&[u8], &[u8])| -> bool {
+            // Filter by value.
+            if value.len() == 512 {
+                true
+            } else {
+                false
+            }
+        });
+        let iter = btree.scan_with_filter(&[], &[], filter1);
+        let mut count = 0;
+        for (key, current_val) in iter {
+            let key = from_bytes(&key);
+            println!(
+                "**************************** Scanning key {} **************************",
+                key
+            );
+            assert_eq!(current_val, val1);
+            count += 1;
+        }
+        assert_eq!(count, 5);
+        let filter2 = Box::new(|(key, _): (&[u8], &[u8])| -> bool {
+            // Filter by key
+            if from_bytes(key) % 2 == 0 {
+                true
+            } else {
+                false
+            }
+        });
+        let iter = btree.scan_with_filter(&[], &[], filter2);
+        let mut count = 0;
+        for (key, current_val) in iter {
+            let key = from_bytes(&key);
+            println!(
+                "**************************** Scanning key {} **************************",
+                key
+            );
+            assert_eq!(current_val, val2);
+            count += 1;
+        }
+        assert_eq!(count, 5);
     }
 
     #[rstest]
