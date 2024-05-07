@@ -343,7 +343,7 @@ fn is_large(page: &Page) -> bool {
 fn is_parent_and_child(parent: &Page, child: &Page) -> bool {
     let low_key = BTreeKey::new(&child.get_raw_key(child.low_fence_slot_id()));
     // Find the slot id of the child page in the parent page.
-    let slot_id = parent.lower_bound_slot_id(&low_key);
+    let slot_id = parent.upper_bound_slot_id(&low_key) - 1;
     // Check if the value of the slot id is the same as the child page id.
     parent.get_val(slot_id) == child.get_id().to_be_bytes()
 }
@@ -485,13 +485,13 @@ fn should_antiadopt(this: &Page, child: &Page) -> bool {
         return false;
     }
     let low_key = BTreeKey::new(&child.get_raw_key(child.low_fence_slot_id()));
-    let slot_id = this.lower_bound_slot_id(&low_key);
+    let slot_id = this.upper_bound_slot_id(&low_key);
     if this.has_foster_child() {
-        if slot_id + 1 >= this.foster_child_slot_id() {
+        if slot_id >= this.foster_child_slot_id() {
             return false;
         }
     } else {
-        if slot_id + 1 >= this.high_fence_slot_id() {
+        if slot_id >= this.high_fence_slot_id() {
             return false;
         }
     }
@@ -831,22 +831,22 @@ fn anti_adopt(parent: &mut Page, child1: &mut Page) {
 
     // Identify child1 slot
     let low_key = BTreeKey::new(&child1.get_raw_key(child1.low_fence_slot_id()));
-    let slot_id = parent.lower_bound_slot_id(&low_key);
+    let slot_id = parent.upper_bound_slot_id(&low_key);
     if parent.has_foster_child() {
-        debug_assert!(slot_id + 1 < parent.foster_child_slot_id());
+        debug_assert!(slot_id < parent.foster_child_slot_id());
     } else {
-        debug_assert!(slot_id + 1 < parent.high_fence_slot_id());
+        debug_assert!(slot_id < parent.high_fence_slot_id());
     }
-    let k1 = parent.get_raw_key(slot_id + 1);
-    let child2_ptr = parent.get_val(slot_id + 1);
-    let k2 = parent.get_raw_key(slot_id + 2);
+    let k1 = parent.get_raw_key(slot_id);
+    let child2_ptr = parent.get_val(slot_id);
+    let k2 = parent.get_raw_key(slot_id + 1);
     child1.set_high_fence(k2);
     child1.set_has_foster_child(true);
     let res = child1.insert(k1, child2_ptr, false);
     if !res {
         panic!("Cannot insert the slot into the child page");
     }
-    parent.remove_at(slot_id + 1);
+    parent.remove_at(slot_id);
 }
 
 /// Descend the root page to the child page if the root page
@@ -1268,7 +1268,7 @@ impl<T: MemPool> FosterBtree<T> {
                 }
             }
             let (is_foster_relationship, page_key) = {
-                let slot_id = this_page.lower_bound_slot_id(&BTreeKey::new(key));
+                let slot_id = this_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
                 let is_foster_relationship =
                     this_page.has_foster_child() && slot_id == this_page.foster_child_slot_id();
                 let page_id_bytes = this_page.get_val(slot_id);
@@ -1342,7 +1342,7 @@ impl<T: MemPool> FosterBtree<T> {
 
     pub fn get(&self, key: &[u8]) -> Result<Vec<u8>, TreeStatus> {
         let foster_page = self.traverse_to_leaf_for_read(key)?;
-        let slot_id = foster_page.lower_bound_slot_id(&BTreeKey::new(key));
+        let slot_id = foster_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
         if slot_id == 0 {
             // Lower fence. Non-existent key
             Err(TreeStatus::NotFound)
@@ -1359,7 +1359,7 @@ impl<T: MemPool> FosterBtree<T> {
     pub fn insert(&self, key: &[u8], value: &[u8]) -> Result<(), TreeStatus> {
         let mut leaf_page = self.traverse_to_leaf_for_write(key)?;
         log_trace!("Acquired write lock for page {}", leaf_page.get_id());
-        let slot_id = leaf_page.lower_bound_slot_id(&BTreeKey::new(key));
+        let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
         if slot_id == 0 {
             // Lower fence so insert is ok. We insert the key-value at the next position of the lower fence.
             self.insert_at_slot_or_split(&mut leaf_page, slot_id + 1, key, value);
@@ -1378,7 +1378,7 @@ impl<T: MemPool> FosterBtree<T> {
     pub fn update(&self, key: &[u8], value: &[u8]) -> Result<(), TreeStatus> {
         let mut leaf_page = self.traverse_to_leaf_for_write(key)?;
         log_trace!("Acquired write lock for page {}", leaf_page.get_id());
-        let slot_id = leaf_page.lower_bound_slot_id(&BTreeKey::new(key));
+        let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
         if slot_id == 0 {
             // We cannot update the lower fence
             Err(TreeStatus::NotFound)
@@ -1397,7 +1397,7 @@ impl<T: MemPool> FosterBtree<T> {
     pub fn upsert(&self, key: &[u8], value: &[u8]) -> Result<(), TreeStatus> {
         let mut leaf_page = self.traverse_to_leaf_for_write(key)?;
         log_trace!("Acquired write lock for page {}", leaf_page.get_id());
-        let slot_id = leaf_page.lower_bound_slot_id(&BTreeKey::new(key));
+        let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
         if slot_id == 0 {
             // Lower fence so insert is ok. We insert the key-value at the next position of the lower fence.
             self.insert_at_slot_or_split(&mut leaf_page, slot_id + 1, key, value);
@@ -1417,7 +1417,7 @@ impl<T: MemPool> FosterBtree<T> {
     pub fn delete(&self, key: &[u8]) -> Result<(), TreeStatus> {
         let mut leaf_page = self.traverse_to_leaf_for_write(key)?;
         log_trace!("Acquired write lock for page {}", leaf_page.get_id());
-        let slot_id = leaf_page.lower_bound_slot_id(&BTreeKey::new(key));
+        let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
         if slot_id == 0 {
             // Lower fence cannot be deleted
             Err(TreeStatus::NotFound)

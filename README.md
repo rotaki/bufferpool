@@ -22,13 +22,17 @@
     * [x] Add consistency checker
   * [] Fix the buffer pool free frame allocation bug
   * [] Add memory usage profiler
-  * [] Test with bp (limited memory pool with disk offloading)
+  * [x] Test with bp (limited memory pool with disk offloading)
   * [] Reuse the removed page in merge
+  * [] Add range scan operator
   * [] Add thread-safe range scan operator with page versioning (optimistic lock coupling)
   * [] Optimistic lock coupling with hybrid latches
   * [] Add ghost record support for transaction support
   * [] Add prefix compression in pages
   * [] Add page split into three pages
+
+### Open Questions
+* [] How many threads are needed to get comparable performance with a single-threaded execution?
 
 ## Add Logging
 * [x] Add log buffer with append and flush capabilities

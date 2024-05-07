@@ -77,6 +77,7 @@ fn run_insertion_bench(num_threads: usize) {
         handle.join().unwrap();
     }
 
+    println!("stats: \n{}", btree.page_stats(false));
     println!("stats: \n{}", btree.op_stats());
 
     // Check if all keys have been inserted.
@@ -101,6 +102,7 @@ fn run_insertion_bench_single_thread() {
         btree.insert(&key, val).unwrap();
     }
 
+    println!("stats: \n{}", btree.page_stats(false));
     println!("stats: \n{}", btree.op_stats());
 }
 

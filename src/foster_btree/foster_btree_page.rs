@@ -257,6 +257,7 @@ pub trait FosterBtreePage {
     fn get_val(&self, slot_id: u16) -> &[u8];
     fn inside_range(&self, key: &BTreeKey) -> bool;
     fn lower_bound_slot_id(&self, key: &BTreeKey) -> u16;
+    fn upper_bound_slot_id(&self, key: &BTreeKey) -> u16;
     fn find_slot_id(&self, key: &BTreeKey) -> Option<u16>;
     fn insert_at(&mut self, slot_id: u16, key: &[u8], value: &[u8]) -> bool;
     fn update_at(&mut self, slot_id: u16, key: &[u8], value: &[u8]) -> bool;
@@ -733,35 +734,48 @@ impl FosterBtreePage for Page {
         low_fence <= *key && *key < high_fence
     }
 
-    /// Returns the right-most slot_id where the key is less than or equal to the given key.
-    /// The returned slot_id satisfies lower_fence_slot_id <= slot_id < high_fence_slot_id.
+    /// Returns the left-most slot_id where the key is greater or equal to the given key.
+    /// The returned slot_id satisfies low_fence_slot_id <= slot_id <= high_fence_slot_id.
     ///
     /// key: search key
-    ///   It must be in the range of the page. i.e. low_fence <= key < high_fence
+    /// It must be in the range of the page. i.e. low_fence <= key < high_fence
     ///
-    /// Note: To insert a new key, use this function to find the right-most slot_id where the key
-    /// is less than or equal to the given key. Then, shift the slots to the right starting from
-    /// slot_id + 1 to the end of the slots. Finally, insert the new key at slot_id + 1.
+    /// Example:
+    ///   0  1  2  3  4  5
+    /// [ 2, 3, 5, 5, 8, 13 ]
+    ///
+    /// lower_bound_slot_id(0) = NOT IN RANGE
+    /// lower_bound_slot_id(2) = 0
+    /// lower_bound_slot_id(5) = 2
+    /// lower_bound_slot_id(6) = 4
+    /// lower_bound_slot_id(13) = NOT IN RANGE
     fn lower_bound_slot_id(&self, key: &BTreeKey) -> u16 {
         debug_assert!(
             self.inside_range(key),
             "key is out of the range of the page"
         );
-        // Binary search returns the left-most slot_id where the key is greater than the given key.
-        let slot_id = self.binary_search(|slot_key| *key < slot_key);
-        debug_assert!(
-            self.low_fence_slot_id() + 1 <= slot_id && slot_id <= self.high_fence_slot_id()
-        );
-        // The right-most slot_id where the key is less than or equal to the given key.
-        slot_id - 1
+        // Binary search returns the left-most slot_id where the key is greater or equal to the given key.
+        let slot_id = self.binary_search(|slot_key| *key <= slot_key);
+        debug_assert!(self.low_fence_slot_id() <= slot_id && slot_id <= self.high_fence_slot_id());
+        slot_id
     }
 
-    /// Returns the slot_id where the key is equal to the given key if it exists.
-    /// Otherwise, return None. lower_bound_slot_id will not be returned.
+    /// Returns the left-most slot_id where the key is greater than the given key.
+    /// The returned slot_id satisfies low_fence_slot_id < slot_id <= high_fence_slot_id.
     ///
     /// key: search key
     ///  It must be in the range of the page. i.e. low_fence <= key < high_fence
-    fn find_slot_id(&self, key: &BTreeKey) -> Option<u16> {
+    ///
+    /// Example:
+    ///   0  1  2  3  4  5
+    /// [ 2, 3, 5, 5, 8, 13 ]
+    ///
+    /// upper_bound_slot_id(0) = NOT IN RANGE
+    /// upper_bound_slot_id(2) = 1
+    /// upper_bound_slot_id(5) = 4
+    /// upper_bound_slot_id(6) = 4
+    /// upper_bound_slot_id(13) = NOT IN RANGE
+    fn upper_bound_slot_id(&self, key: &BTreeKey) -> u16 {
         debug_assert!(
             self.inside_range(key),
             "key is out of the range of the page"
@@ -771,6 +785,16 @@ impl FosterBtreePage for Page {
         debug_assert!(
             self.low_fence_slot_id() + 1 <= slot_id && slot_id <= self.high_fence_slot_id()
         );
+        slot_id
+    }
+
+    /// Returns the right-most slot_id where the key is equal to the given key if it exists.
+    /// Otherwise, return None. low_fence_slot_id will not be returned.
+    ///
+    /// key: search key
+    ///  It must be in the range of the page. i.e. low_fence <= key < high_fence
+    fn find_slot_id(&self, key: &BTreeKey) -> Option<u16> {
+        let slot_id = self.upper_bound_slot_id(key);
         // The right-most slot_id where the key is less than or equal to the given key.
         let slot_id = slot_id - 1;
         if slot_id != self.low_fence_slot_id() && self.get_btree_key(slot_id) == *key {
@@ -970,15 +994,15 @@ impl FosterBtreePage for Page {
     /// 2. Panics if the key is out of the range of the page.
     /// 3. Panics if the key already exists in the page.
     fn insert(&mut self, key: &[u8], value: &[u8], _make_ghost: bool) -> bool {
-        let slot_id = self.lower_bound_slot_id(&BTreeKey::Normal(key));
+        let slot_id = self.upper_bound_slot_id(&BTreeKey::Normal(key));
         // Check duplicate key. Duplication is only allowed for LOWER FENCE.
-        if slot_id != self.low_fence_slot_id()
-            && self.get_btree_key(slot_id) == BTreeKey::Normal(key)
+        if (slot_id - 1) != self.low_fence_slot_id()
+            && self.get_btree_key(slot_id - 1) == BTreeKey::Normal(key)
         {
             panic!("Duplicate key");
         }
-        // Insert at slot_id + 1
-        self.insert_at(slot_id + 1, key, value)
+        // Insert at slot_id
+        self.insert_at(slot_id, key, value)
     }
 
     /// Mark the slot with the given key as a ghost slot.
@@ -1248,16 +1272,20 @@ mod tests {
 
         assert!(fbt_page.insert("b".as_bytes(), "bb".as_bytes(), make_ghost));
         assert!(fbt_page.slot_count() == 3);
-        assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("b")), 1);
-        assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("c")), 1);
+        assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("b")), 0);
+        assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("b")), 2);
+        assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("c")), 2);
+        assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("c")), 2);
         assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("b")), Some(1));
         assert_eq!(fbt_page.get_val(1), "bb".as_bytes());
         assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("c")), None);
 
         assert!(fbt_page.insert("c".as_bytes(), "cc".as_bytes(), make_ghost));
         assert!(fbt_page.slot_count() == 4);
-        assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("b")), 1);
+        assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("b")), 0);
+        assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("b")), 2);
         assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("c")), 2);
+        assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("c")), 3);
         assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("b")), Some(1));
         assert_eq!(fbt_page.get_val(1), "bb".as_bytes());
         assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("c")), Some(2));
@@ -1310,7 +1338,9 @@ mod tests {
             assert!(!fbt_page.is_right_most());
 
             assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("b")), 0);
-            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("c")), 0);
+            assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("b")), 1);
+            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("c")), 1);
+            assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("c")), 1);
             assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("b")), None);
             assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("c")), None);
 
@@ -1322,8 +1352,11 @@ mod tests {
             fbt_page.run_consistency_checks(true);
             assert!(fbt_page.slot_count() == 4);
 
-            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("b")), 1);
+            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("b")), 0);
+            assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("b")), 2);
             assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("c")), 2);
+            assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("c")), 3);
+
             assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("b")), Some(1));
             assert_eq!(fbt_page.get_val(1), "bb".as_bytes());
             assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("c")), Some(2));
@@ -1335,11 +1368,16 @@ mod tests {
             fbt_page.init_as_root();
             fbt_page.check_fence_slots_exists();
 
-            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("a")), 0);
-            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("b")), 0);
-            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("c")), 0);
-            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("d")), 0);
-            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("e")), 0);
+            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("a")), 1);
+            assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("a")), 1);
+            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("b")), 1);
+            assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("b")), 1);
+            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("c")), 1);
+            assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("c")), 1);
+            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("d")), 1);
+            assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("d")), 1);
+            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("e")), 1);
+            assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("e")), 1);
             assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("a")), None);
             assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("b")), None);
             assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("c")), None);
@@ -1353,11 +1391,16 @@ mod tests {
             fbt_page.run_consistency_checks(true);
             assert!(fbt_page.slot_count() == 4);
 
-            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("a")), 0);
+            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("a")), 1);
+            assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("a")), 1);
             assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("b")), 1);
+            assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("b")), 2);
             assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("c")), 2);
-            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("d")), 2);
-            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("e")), 2);
+            assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("c")), 3);
+            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("d")), 3);
+            assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("d")), 3);
+            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("e")), 3);
+            assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("e")), 3);
             assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("a")), None);
             assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("b")), Some(1));
             assert_eq!(fbt_page.get_val(1), "bb".as_bytes());
@@ -1376,9 +1419,12 @@ mod tests {
             fbt_page.set_high_fence(high_fence);
             fbt_page.check_fence_slots_exists();
 
-            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("a")), 0);
-            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("b")), 0);
-            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("c")), 0);
+            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("a")), 1);
+            assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("a")), 1);
+            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("b")), 1);
+            assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("b")), 1);
+            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("c")), 1);
+            assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("c")), 1);
             assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("a")), None);
             assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("b")), None);
             assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("c")), None);
@@ -1390,9 +1436,12 @@ mod tests {
             fbt_page.run_consistency_checks(true);
             assert!(fbt_page.slot_count() == 4);
 
-            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("a")), 0);
+            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("a")), 1);
+            assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("a")), 1);
             assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("b")), 1);
+            assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("b")), 2);
             assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("c")), 2);
+            assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("c")), 3);
             assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("a")), None);
             assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("b")), Some(1));
             assert_eq!(fbt_page.get_val(1), "bb".as_bytes());
@@ -1410,9 +1459,13 @@ mod tests {
             fbt_page.check_fence_slots_exists();
 
             assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("b")), 0);
-            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("c")), 0);
-            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("d")), 0);
-            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("e")), 0);
+            assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("b")), 1);
+            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("c")), 1);
+            assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("c")), 1);
+            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("d")), 1);
+            assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("d")), 1);
+            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("e")), 1);
+            assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("e")), 1);
             assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("b")), None);
             assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("c")), None);
             assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("d")), None);
@@ -1425,10 +1478,14 @@ mod tests {
             fbt_page.run_consistency_checks(true);
             assert!(fbt_page.slot_count() == 4);
 
-            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("b")), 1);
+            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("b")), 0);
+            assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("b")), 2);
             assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("c")), 2);
-            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("d")), 2);
-            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("e")), 2);
+            assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("c")), 3);
+            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("d")), 3);
+            assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("d")), 3);
+            assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("e")), 3);
+            assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("e")), 3);
             assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("b")), Some(1));
             assert_eq!(fbt_page.get_val(1), "bb".as_bytes());
             assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("c")), Some(2));
@@ -1459,8 +1516,10 @@ mod tests {
         fbt_page.remove("c".as_bytes());
         fbt_page.run_consistency_checks(false);
         assert_eq!(fbt_page.slot_count(), 3);
-        assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("b")), 1);
-        assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("c")), 1);
+        assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("b")), 0);
+        assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("b")), 2);
+        assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("c")), 2);
+        assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("c")), 2);
         assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("b")), Some(1));
         assert_eq!(fbt_page.get_val(1), "bb".as_bytes());
         assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("c")), None);
@@ -1468,8 +1527,10 @@ mod tests {
         fbt_page.compact_space();
         fbt_page.run_consistency_checks(true);
         assert_eq!(fbt_page.slot_count(), 3);
-        assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("b")), 1);
-        assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("c")), 1);
+        assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("b")), 0);
+        assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("b")), 2);
+        assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("c")), 2);
+        assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("c")), 2);
         assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("b")), Some(1));
         assert_eq!(fbt_page.get_val(1), "bb".as_bytes());
         assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("c")), None);
@@ -1477,7 +1538,9 @@ mod tests {
         fbt_page.remove("b".as_bytes());
         fbt_page.run_consistency_checks(false);
         assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("b")), 0); // Low fence
-        assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("c")), 0); // Low fence
+        assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("b")), 1); // High fence
+        assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("c")), 1); // High fence
+        assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("c")), 1); // High fence
         assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("b")), None);
         assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("c")), None);
 
@@ -1558,8 +1621,10 @@ mod tests {
         assert!(fbt_page.append_sorted(&recs));
         fbt_page.run_consistency_checks(true);
         assert_eq!(fbt_page.slot_count(), 4);
-        assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("b")), 1);
+        assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("b")), 0);
+        assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("b")), 2);
         assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("c")), 2);
+        assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("c")), 3);
         assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("b")), Some(1));
         assert_eq!(fbt_page.get_val(1), "bb".as_bytes());
         assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("c")), Some(2));
@@ -1594,8 +1659,10 @@ mod tests {
         fbt_page.remove_range(bbb_id, high_fence_id);
         fbt_page.run_consistency_checks(false);
         assert_eq!(fbt_page.slot_count(), 4);
-        assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("b")), 1);
+        assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("b")), 0);
+        assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("b")), 2);
         assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("bb")), 2);
+        assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("bb")), 3);
         assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("b")), Some(1));
         assert_eq!(fbt_page.get_val(1), "c".as_bytes());
         assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("bb")), Some(2));
