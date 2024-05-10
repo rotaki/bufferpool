@@ -20,16 +20,17 @@
     * [x] Revise the split decision
   * [x] Add thread-unsafe page traversal operator
     * [x] Add consistency checker
-  * [] Fix the buffer pool free frame allocation bug
+  * [x] Fix the buffer pool free frame allocation bug
   * [] Add memory usage profiler
   * [x] Test with bp (limited memory pool with disk offloading)
   * [] Reuse the removed page in merge
-  * [] Add range scan operator
+  * [x] Add range scan operator
   * [] Add thread-safe range scan operator with page versioning (optimistic lock coupling)
   * [] Optimistic lock coupling with hybrid latches
   * [] Add ghost record support for transaction support
   * [] Add prefix compression in pages
   * [] Add page split into three pages
+  * [] Add better latch for bp
 
 ### Open Questions
 * [] How many threads are needed to get comparable performance with a single-threaded execution?
