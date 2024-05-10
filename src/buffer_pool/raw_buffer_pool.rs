@@ -1,6 +1,7 @@
+use lazy_static::lazy_static;
 use tempfile::TempDir;
 
-use crate::{log, log_debug};
+use crate::{log, log_debug, random::gen_random_int};
 
 use super::{
     buffer_frame::{BufferFrame, FrameReadGuard, FrameWriteGuard},
@@ -15,16 +16,122 @@ use crate::{
 
 use std::{
     cell::UnsafeCell,
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     ops::{Deref, DerefMut},
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex,
     },
 };
 
+const NUM_FRAMES_LARGE_THRESHOLD: usize = 1000;
+const EVICTION_SCAN_DEPTH: usize = 10;
+
+#[cfg(feature = "stat")]
+/// Statistics #pages evicted from the buffer pool.
+struct BPStats {
+    victim_status: UnsafeCell<[usize; 4]>,
+}
+
+#[cfg(feature = "stat")]
+impl BPStats {
+    fn new() -> Self {
+        BPStats {
+            victim_status: UnsafeCell::new([0, 0, 0, 0]), // [free, clean, dirty, all_latched]
+        }
+    }
+
+    fn to_string(&self) -> String {
+        let victim_status = unsafe { &*self.victim_status.get() };
+        let mut result = String::new();
+        result.push_str("Eviction Statistics\n");
+        let op_types = ["Free", "Clean", "Dirty", "All Latched", "Total"];
+        for i in 0..4 {
+            result.push_str(&format!("{:12}: {:6}\n", op_types[i], victim_status[i]));
+        }
+        result.push_str(&format!(
+            "{:12}: {:6}\n",
+            op_types[4],
+            victim_status.iter().sum::<usize>()
+        ));
+        result
+    }
+
+    fn merge(&self, other: &BPStats) {
+        let victim_status = unsafe { &mut *self.victim_status.get() };
+        let other_victim_status = unsafe { &*other.victim_status.get() };
+        for i in 0..4 {
+            victim_status[i] += other_victim_status[i];
+        }
+    }
+
+    fn clear(&self) {
+        let victim_status = unsafe { &mut *self.victim_status.get() };
+        for i in 0..4 {
+            victim_status[i] = 0;
+        }
+    }
+}
+
+#[cfg(feature = "stat")]
+struct LocalBPStat {
+    pub stat: BPStats,
+}
+
+#[cfg(feature = "stat")]
+impl Drop for LocalBPStat {
+    fn drop(&mut self) {
+        GLOBAL_BP_STAT.lock().unwrap().merge(&self.stat);
+    }
+}
+
+#[cfg(feature = "stat")]
+lazy_static! {
+    static ref GLOBAL_BP_STAT: Mutex<BPStats> = Mutex::new(BPStats::new());
+}
+
+#[cfg(feature = "stat")]
+thread_local! {
+    static LOCAL_BP_STAT: LocalBPStat = LocalBPStat {
+        stat: BPStats::new(),
+    };
+}
+
+#[cfg(feature = "stat")]
+fn inc_local_bp_free_victim() {
+    LOCAL_BP_STAT.with(|stat| {
+        let victim_status = unsafe { &mut *stat.stat.victim_status.get() };
+        victim_status[0] += 1;
+    });
+}
+
+#[cfg(feature = "stat")]
+fn inc_local_bp_clean_victim() {
+    LOCAL_BP_STAT.with(|stat| {
+        let victim_status = unsafe { &mut *stat.stat.victim_status.get() };
+        victim_status[1] += 1;
+    });
+}
+
+#[cfg(feature = "stat")]
+fn inc_local_bp_dirty_victim() {
+    LOCAL_BP_STAT.with(|stat| {
+        let victim_status = unsafe { &mut *stat.stat.victim_status.get() };
+        victim_status[2] += 1;
+    });
+}
+
+#[cfg(feature = "stat")]
+fn inc_local_bp_all_latched_victim() {
+    LOCAL_BP_STAT.with(|stat| {
+        let victim_status = unsafe { &mut *stat.stat.victim_status.get() };
+        victim_status[3] += 1;
+    });
+}
+
 pub struct Frames<T: EvictionPolicy> {
+    num_frames: usize,
     initial_free_frames: VecDeque<usize>, // Used for initial free frames only
     frames: Vec<BufferFrame<T>>, // The Vec<frames> is fixed size. If not fixed size, then Pin must be used to ensure that the frame does not move when the vector is resized.
 }
@@ -32,6 +139,7 @@ pub struct Frames<T: EvictionPolicy> {
 impl<T: EvictionPolicy> Frames<T> {
     pub fn new(num_frames: usize) -> Self {
         Frames {
+            num_frames,
             initial_free_frames: (0..num_frames).collect(),
             frames: (0..num_frames).map(|_| BufferFrame::default()).collect(),
         }
@@ -49,7 +157,69 @@ impl<T: EvictionPolicy> Frames<T> {
     /// Return the index of the frame and whether the frame is dirty (requires writing back to disk).
     /// If all the frames are locked, then return None.
     pub fn choose_victim(&mut self) -> Option<(usize, bool)> {
+        if self.num_frames > NUM_FRAMES_LARGE_THRESHOLD {
+            self.choose_victim_num_frames_large()
+        } else {
+            self.choose_victim_num_frames_small()
+        }
+    }
+
+    fn choose_victim_num_frames_large(&mut self) -> Option<(usize, bool)> {
         if !self.initial_free_frames.is_empty() {
+            #[cfg(feature = "stat")]
+            inc_local_bp_free_victim();
+            let idx = self.initial_free_frames.pop_front().unwrap();
+            Some((idx, false))
+        } else {
+            // Scan the frames to find the victim
+            let mut clean_frame_with_min_score = (0, u64::MAX); // (index, score)
+            let mut drity_frame_with_min_score = (0, u64::MAX); // (index, score)
+
+            // randomly select EVICTION_SCAN_DEPTH frames to scan
+            let mut rand_indices = HashSet::new();
+            for _ in 0..EVICTION_SCAN_DEPTH {
+                let rand_idx = gen_random_int(0, self.num_frames - 1);
+                rand_indices.insert(rand_idx);
+            }
+            for i in rand_indices {
+                let frame = &self.frames[i];
+                if frame.is_locked() {
+                    continue;
+                }
+                let score = frame.eviction_score();
+                if !frame.is_dirty() {
+                    if score < clean_frame_with_min_score.1 {
+                        clean_frame_with_min_score = (i, score);
+                    }
+                } else {
+                    if score < drity_frame_with_min_score.1 {
+                        drity_frame_with_min_score = (i, score);
+                    }
+                }
+            }
+            if clean_frame_with_min_score.1 != u64::MAX {
+                #[cfg(feature = "stat")]
+                inc_local_bp_clean_victim();
+                // We can evict a clean frame
+                Some((clean_frame_with_min_score.0, false))
+            } else if drity_frame_with_min_score.1 != u64::MAX {
+                #[cfg(feature = "stat")]
+                inc_local_bp_dirty_victim();
+                // We need to evict a dirty frame because we have no clean frames
+                Some((drity_frame_with_min_score.0, true))
+            } else {
+                #[cfg(feature = "stat")]
+                inc_local_bp_all_latched_victim();
+                // All the frames are locked
+                None
+            }
+        }
+    }
+
+    fn choose_victim_num_frames_small(&mut self) -> Option<(usize, bool)> {
+        if !self.initial_free_frames.is_empty() {
+            #[cfg(feature = "stat")]
+            inc_local_bp_free_victim();
             let idx = self.initial_free_frames.pop_front().unwrap();
             Some((idx, false))
         } else {
@@ -72,12 +242,18 @@ impl<T: EvictionPolicy> Frames<T> {
                 }
             }
             if clean_frame_with_min_score.1 != u64::MAX {
+                #[cfg(feature = "stat")]
+                inc_local_bp_clean_victim();
                 // We can evict a clean frame
                 Some((clean_frame_with_min_score.0, false))
             } else if drity_frame_with_min_score.1 != u64::MAX {
+                #[cfg(feature = "stat")]
+                inc_local_bp_dirty_victim();
                 // We need to evict a dirty frame because we have no clean frames
                 Some((drity_frame_with_min_score.0, true))
             } else {
+                #[cfg(feature = "stat")]
+                inc_local_bp_all_latched_victim();
                 // All the frames are locked
                 None
             }
@@ -148,6 +324,22 @@ where
         })
     }
 
+    pub fn eviction_stats(&self) -> String {
+        #[cfg(feature = "stat")]
+        {
+            let stats = GLOBAL_BP_STAT.lock().unwrap();
+            LOCAL_BP_STAT.with(|local_stat| {
+                stats.merge(&local_stat.stat);
+                local_stat.stat.clear();
+            });
+            stats.to_string()
+        }
+        #[cfg(not(feature = "stat"))]
+        {
+            "Stat is disabled".to_string()
+        }
+    }
+
     #[cfg(test)]
     pub fn choose_victim(&self) -> Option<(usize, bool)> {
         let frames = unsafe { &mut *self.frames.get() };
@@ -185,7 +377,7 @@ where
         // Evict old page if necessary
         if let Some(old_key) = guard.key() {
             if is_dirty {
-                guard.dirty().store(true, Ordering::Relaxed);
+                guard.dirty().store(false, Ordering::Relaxed);
                 let file = container_to_file
                     .get(&old_key.c_key)
                     .ok_or(MemPoolStatus::FileManagerNotFound)?;
@@ -196,16 +388,15 @@ where
         }
 
         // Create a new page or read from disk
-        let page = if new_page {
-            Page::new(key.page_id)
+        if new_page {
+            guard.set_id(key.page_id);
         } else {
             let file = container_to_file
                 .get(&key.c_key)
                 .ok_or(MemPoolStatus::FileManagerNotFound)?;
-            file.read_page(key.page_id)?
+            file.read_page(key.page_id, &mut *guard)?;
         };
 
-        guard.copy(&page);
         id_to_index.insert(key, index);
         *guard.key() = Some(key);
         {
@@ -221,6 +412,8 @@ where
     /// Create a new page for write in memory.
     /// NOTE: This function does not write the page to disk.
     /// See more at `handle_page_fault(key, new_page=true)`
+    /// The newly allocated page is not formatted except for the page id.
+    /// The caller is responsible for initializing the page.
     pub fn create_new_page_for_write(
         &self,
         c_key: ContainerKey,
@@ -258,56 +451,6 @@ where
         let id_to_index = unsafe { &mut *self.id_to_index.get() };
         let frames = unsafe { &mut *self.frames.get() };
 
-        let result = match id_to_index.get(&key) {
-            Some(&index) => {
-                let guard = frames[index].try_write(true);
-                if guard.is_some() {
-                    guard
-                        .as_ref()
-                        .unwrap()
-                        .evict_info()
-                        .write()
-                        .unwrap()
-                        .update();
-                }
-                guard.ok_or(MemPoolStatus::FrameWriteLatchGrantFailed)
-            }
-            None => {
-                let res = self.handle_page_fault(key, false);
-                // If guard is ok, mark the page as dirty
-                if let Ok(ref guard) = res {
-                    guard.dirty().store(true, Ordering::Release);
-                }
-                res
-            }
-        };
-        self.unlatch();
-        result
-    }
-
-    pub fn get_last_page_for_write(
-        &self,
-        c_key: ContainerKey,
-    ) -> Result<FrameWriteGuard<T>, MemPoolStatus> {
-        self.latch();
-
-        let container_to_file = unsafe { &mut *self.container_to_file.get() };
-        let id_to_index = unsafe { &mut *self.id_to_index.get() };
-        let frames = unsafe { &mut *self.frames.get() };
-
-        let fm = if let Some(fm) = container_to_file.get(&c_key) {
-            fm
-        } else {
-            self.unlatch();
-            return Err(MemPoolStatus::FileManagerNotFound);
-        };
-
-        let num_pages = fm.get_num_pages();
-        if num_pages == 0 {
-            panic!("Create at least one page before calling this function")
-        }
-        let page_id = num_pages - 1;
-        let key = PageKey::new(c_key, page_id);
         let result = match id_to_index.get(&key) {
             Some(&index) => {
                 let guard = frames[index].try_write(true);
@@ -573,13 +716,11 @@ mod tests {
 
             let key1 = {
                 let mut guard = bp.create_new_page_for_write(c_key).unwrap();
-                assert_eq!(guard[0], 0);
                 guard[0] = 1;
                 guard.key().unwrap()
             };
             let key2 = {
                 let mut guard = bp.create_new_page_for_write(c_key).unwrap();
-                assert_eq!(guard[0], 0);
                 guard[0] = 2;
                 guard.key().unwrap()
             };
@@ -687,9 +828,52 @@ mod tests {
 
         // Now, we should be able to get a new page for write.
         let guard2 = bp.create_new_page_for_write(c_key).unwrap();
-        assert_eq!(guard2[0], 0);
+        drop(guard2);
     }
 
     #[test]
-    fn test_lru_eviction() {}
+    fn test_bp_stats() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_id = 0;
+        // create a directory for the database
+        std::fs::create_dir(temp_dir.path().join(db_id.to_string())).unwrap();
+
+        let num_pages = 1;
+        let bp = TestRAWBufferPool::new(temp_dir.path(), num_pages).unwrap();
+        let c_key = ContainerKey::new(db_id, 0);
+
+        let key_1 = {
+            let mut guard = bp.create_new_page_for_write(c_key).unwrap();
+            guard[0] = 1;
+            guard.key().unwrap()
+        };
+
+        let stats = bp.eviction_stats();
+        println!("{}", stats);
+
+        let key_2 = {
+            let mut guard = bp.create_new_page_for_write(c_key).unwrap();
+            guard[0] = 2;
+            guard.key().unwrap()
+        };
+
+        let stats = bp.eviction_stats();
+        println!("{}", stats);
+
+        {
+            let guard = bp.get_page_for_read(key_1).unwrap();
+            assert_eq!(guard[0], 1);
+        }
+
+        let stats = bp.eviction_stats();
+        println!("{}", stats);
+
+        {
+            let guard = bp.get_page_for_read(key_2).unwrap();
+            assert_eq!(guard[0], 2);
+        }
+
+        let stats = bp.eviction_stats();
+        println!("{}", stats);
+    }
 }

@@ -60,8 +60,7 @@ impl FileManager {
         self.num_pages.load(Ordering::Acquire)
     }
 
-    pub fn read_page(&self, page_id: PageId) -> Result<Page, FMStatus> {
-        let mut page = Page::new_empty();
+    pub fn read_page(&self, page_id: PageId, page: &mut Page) -> Result<(), FMStatus> {
         let mut file = self.file.lock().unwrap();
         log_trace!("Reading page: {} from file: {:?}", page_id, self.path);
         file.seek(SeekFrom::Start((page_id * PAGE_SIZE as PageId) as u64))
@@ -69,7 +68,7 @@ impl FileManager {
         file.read_exact(page.get_raw_bytes_mut())
             .map_err(|_| FMStatus::ReadError)?;
         debug_assert!(page.get_id() == page_id, "Page id mismatch");
-        Ok(page)
+        Ok(())
     }
 
     pub fn write_page(&self, page_id: PageId, page: &Page) -> Result<(), FMStatus> {

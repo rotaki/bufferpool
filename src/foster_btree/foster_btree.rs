@@ -127,6 +127,7 @@ impl OpByte {
     }
 }
 
+#[cfg(any(feature = "stat"))]
 struct OpStat {
     sm_trigger: UnsafeCell<[usize; 7]>, // Number of times the structure modification is triggered
     sm_success: UnsafeCell<[usize; 7]>, // Number of times the structure modification is successful
@@ -135,6 +136,7 @@ struct OpStat {
     exclusive_page_latch_failures: UnsafeCell<[usize; 2]>, // Number of times the exclusive page latch fails [0] failure, [1] total
 }
 
+#[cfg(any(feature = "stat"))]
 impl OpStat {
     pub fn new() -> Self {
         OpStat {
@@ -291,20 +293,24 @@ impl OpStat {
     }
 }
 
+#[cfg(any(feature = "stat"))]
 struct LocalStat {
     pub stat: OpStat,
 }
 
+#[cfg(any(feature = "stat"))]
 impl Drop for LocalStat {
     fn drop(&mut self) {
         GLOBAL_STAT.lock().unwrap().merge(&self.stat);
     }
 }
 
+#[cfg(any(feature = "stat"))]
 lazy_static! {
     static ref GLOBAL_STAT: Mutex<OpStat> = Mutex::new(OpStat::new());
 }
 
+#[cfg(any(feature = "stat"))]
 thread_local! {
     static LOCAL_STAT: LocalStat = LocalStat {
         stat: OpStat::new(),

@@ -133,7 +133,8 @@ impl LogChecker {
         let mut logs = Vec::new();
         let num_pages = self.file_manager.fetch_add_page_id();
         for page_id in 0..num_pages {
-            let mut page = self.file_manager.read_page(page_id).unwrap();
+            let mut page = Page::new_empty();
+            self.file_manager.read_page(page_id, &mut page).unwrap();
             let h_page = HeapPage::new(&mut page);
             for (_, rec) in h_page.get_all_valid_records() {
                 logs.push(rec.to_owned());
@@ -143,7 +144,8 @@ impl LogChecker {
     }
 
     pub fn get_log(&self, lsn: &Lsn) -> Vec<u8> {
-        let mut page = self.file_manager.read_page(lsn.page_id).unwrap();
+        let mut page = Page::new_empty();
+        self.file_manager.read_page(lsn.page_id, &mut page).unwrap();
         let h_page = HeapPage::new(&mut page);
         h_page.get_value(lsn.slot_id).unwrap().to_owned()
     }

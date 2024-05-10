@@ -25,7 +25,6 @@ const NUM_KEYS: usize = 500000;
 const KEY_SIZE: usize = 100;
 const VAL_MIN_SIZE: usize = 50;
 const VAL_MAX_SIZE: usize = 100;
-const NUM_THREADS: usize = 10;
 const BP_SIZE: usize = 10000;
 
 fn to_bytes(key: usize) -> Vec<u8> {
@@ -93,13 +92,8 @@ fn run_insertion_bench(num_threads: usize) {
         num_threads > 0,
         "Number of threads should be greater than 0"
     );
-    let btree = gen_foster_btree_in_mem();
-    let num_keys = 500000;
-    let val_min_size = 50;
-    let val_max_size = 100;
-
-    log_trace!("Generating {} keys into the tree", num_keys);
-    let original_kvs = RandomKVs::new(num_keys, val_min_size, val_max_size);
+    let btree = gen_foster_btree_on_disk();
+    let original_kvs = RandomKVs::new(NUM_KEYS, VAL_MIN_SIZE, VAL_MAX_SIZE);
     let mut kvs = original_kvs.partition(num_threads);
 
     // Check the total #kvs is same as num_keys
@@ -107,7 +101,7 @@ fn run_insertion_bench(num_threads: usize) {
     {
         assert_eq!(kvs.len(), num_threads);
         let total_kvs: usize = kvs.iter().map(|kvs| kvs.len()).sum();
-        assert_eq!(total_kvs, num_keys);
+        assert_eq!(total_kvs, NUM_KEYS);
     }
 
     let mut handles = vec![];
@@ -127,8 +121,9 @@ fn run_insertion_bench(num_threads: usize) {
 
     #[cfg(any(feature = "stat"))]
     {
-        println!("stats: \n{}", btree.op_stats());
-        println!("stats: \n{}", btree.page_stats(false));
+        println!("bp stats: \n{}", btree.mem_pool.eviction_stats());
+        println!("foster_op_stats: \n{}", btree.op_stats());
+        println!("foster_page_stats: \n{}", btree.page_stats(false));
     }
 
     // Check if all keys have been inserted.
@@ -144,18 +139,18 @@ fn run_insertion_bench(num_threads: usize) {
 fn run_insertion_bench_single_thread() {
     // let btree = gen_foster_btree_in_mem();
     let btree = gen_foster_btree_on_disk();
-    let num_keys = 100000;
-    let val_min_size = 50;
-    let val_max_size = 100;
-
-    let kvs = RandomKVs::new(num_keys, val_min_size, val_max_size);
+    let kvs = RandomKVs::new(NUM_KEYS, VAL_MIN_SIZE, VAL_MAX_SIZE);
     for (key, val) in kvs.iter() {
         let key = to_bytes(*key);
         btree.insert(&key, val).unwrap();
     }
 
-    println!("page stats: \n{}", btree.page_stats(false));
-    println!("op stats: \n{}", btree.op_stats());
+    #[cfg(any(feature = "stat"))]
+    {
+        println!("bp stats: \n{}", btree.mem_pool.eviction_stats());
+        println!("foster_op_stats: \n{}", btree.op_stats());
+        println!("foster_page_stats: \n{}", btree.page_stats(false));
+    }
 }
 
 // main function
@@ -164,7 +159,9 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     assert_eq!(args.len(), 2, "Usage: ./main <num_threads>");
     let num_threads = args[1].parse::<usize>().unwrap();
-    run_insertion_bench(num_threads);
-    // run_insertion_bench_single_thread();
-    // run_insertion_bench(2)
+    if num_threads == 1 {
+        run_insertion_bench_single_thread();
+    } else {
+        run_insertion_bench(num_threads);
+    }
 }

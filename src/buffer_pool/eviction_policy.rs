@@ -18,16 +18,20 @@ pub trait EvictionPolicy: Send + Sync {
 
 pub struct DummyEvictionPolicy; // Used for in-memory pool
 impl EvictionPolicy for DummyEvictionPolicy {
+    #[inline]
     fn new() -> Self {
         DummyEvictionPolicy
     }
 
+    #[inline]
     fn score(&self, _frame: &BufferFrame<Self>) -> u64 {
         0
     }
 
+    #[inline]
     fn update(&mut self) {}
 
+    #[inline]
     fn reset(&mut self) {}
 }
 
