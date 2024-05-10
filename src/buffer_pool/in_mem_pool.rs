@@ -12,6 +12,7 @@ use crate::{page::Page, rwlatch::RwLatch};
 
 use super::{
     buffer_frame::BufferFrame,
+    eviction_policy::EvictionPolicy,
     mem_pool_trait::MemPool,
     prelude::{ContainerKey, FrameReadGuard, FrameWriteGuard, MemPoolStatus, PageKey},
 };
@@ -22,14 +23,14 @@ use super::{
 /// An exclusive latch is required to create a new page and append it to the pool.
 /// Getting a page for read or write requires a shared latch.
 
-pub struct InMemPool {
+pub struct InMemPool<T: EvictionPolicy> {
     latch: RwLatch,
-    frames: UnsafeCell<Vec<Box<BufferFrame>>>, // Box is required to ensure that the frame does not move when the vector is resized
+    frames: UnsafeCell<Vec<Box<BufferFrame<T>>>>, // Box is required to ensure that the frame does not move when the vector is resized
     id_to_index: UnsafeCell<HashMap<PageKey, usize>>,
     container_page_count: UnsafeCell<HashMap<ContainerKey, u32>>,
 }
 
-impl InMemPool {
+impl<T: EvictionPolicy> InMemPool<T> {
     pub fn new() -> Self {
         InMemPool {
             latch: RwLatch::default(),
@@ -56,11 +57,11 @@ impl InMemPool {
     }
 }
 
-impl MemPool for InMemPool {
+impl<T: EvictionPolicy> MemPool<T> for InMemPool<T> {
     fn create_new_page_for_write(
         &self,
         c_key: ContainerKey,
-    ) -> Result<FrameWriteGuard, MemPoolStatus> {
+    ) -> Result<FrameWriteGuard<T>, MemPoolStatus> {
         self.exclusive();
         let frames = unsafe { &mut *self.frames.get() };
         let id_to_index = unsafe { &mut *self.id_to_index.get() };
@@ -92,7 +93,7 @@ impl MemPool for InMemPool {
         Ok(guard)
     }
 
-    fn get_page_for_write(&self, key: PageKey) -> Result<FrameWriteGuard, MemPoolStatus> {
+    fn get_page_for_write(&self, key: PageKey) -> Result<FrameWriteGuard<T>, MemPoolStatus> {
         self.shared();
         let frames = unsafe { &*self.frames.get() };
         let id_to_index = unsafe { &*self.id_to_index.get() };
@@ -113,7 +114,7 @@ impl MemPool for InMemPool {
         }
     }
 
-    fn get_page_for_read(&self, key: PageKey) -> Result<FrameReadGuard, MemPoolStatus> {
+    fn get_page_for_read(&self, key: PageKey) -> Result<FrameReadGuard<T>, MemPoolStatus> {
         self.shared();
         let frames = unsafe { &*self.frames.get() };
         let id_to_index = unsafe { &*self.id_to_index.get() };
@@ -148,12 +149,12 @@ impl MemPool for InMemPool {
 }
 
 #[cfg(test)]
-impl InMemPool {
+impl<T: EvictionPolicy> InMemPool<T> {
     pub fn check_all_frames_unlatched(&self) {
         let frames = unsafe { &*self.frames.get() };
         for frame in frames.iter() {
-            assert!(!frame.latch.is_shared());
-            assert!(!frame.latch.is_exclusive());
+            assert!(!frame.is_shared());
+            assert!(!frame.is_exclusive());
         }
     }
 
@@ -163,26 +164,32 @@ impl InMemPool {
         let id_to_index = unsafe { &*self.id_to_index.get() };
         for (key, index) in id_to_index.iter() {
             let frame = &frames[*index];
-            assert_eq!(unsafe { *frame.key.get() }, Some(*key));
+            let frame = frame.read();
+            assert_eq!(*frame.key(), Some(*key));
         }
     }
 
     pub fn check_frame_id_and_page_id_match(&self) {
         let frames = unsafe { &*self.frames.get() };
         for frame in frames.iter() {
-            let key = unsafe { &*frame.key.get() }.unwrap();
-            let page_id = unsafe { &*frame.page.get() }.get_id();
+            let frame = frame.read();
+            let key = frame.key().unwrap();
+            let page_id = frame.get_id();
             assert_eq!(key.page_id, page_id);
         }
     }
 }
 
-unsafe impl Sync for InMemPool {}
+unsafe impl<T: EvictionPolicy> Sync for InMemPool<T> {}
 
 #[cfg(test)]
 mod tests {
+    use crate::buffer_pool::prelude::DummyEvictionPolicy;
+
     use super::*;
     use std::thread;
+
+    pub type InMemPool = super::InMemPool<DummyEvictionPolicy>;
 
     #[test]
     fn test_mp_and_frame_latch() {

@@ -1,4 +1,5 @@
 use super::buffer_frame::{FrameReadGuard, FrameWriteGuard};
+use super::eviction_policy::EvictionPolicy;
 
 use crate::{file_manager::FMStatus, page::PageId};
 
@@ -48,6 +49,7 @@ pub enum MemPoolStatus {
     PageNotFound,
     FrameReadLatchGrantFailed,
     FrameWriteLatchGrantFailed,
+    CannotEvictPage,
 }
 
 impl From<FMStatus> for MemPoolStatus {
@@ -68,16 +70,35 @@ impl std::fmt::Display for MemPoolStatus {
             MemPoolStatus::FrameWriteLatchGrantFailed => {
                 write!(f, "[MP] Frame write latch grant failed")
             }
+            MemPoolStatus::CannotEvictPage => {
+                write!(f, "[MP] All frames are latched and cannot evict page")
+            }
         }
     }
 }
 
-pub trait MemPool: Sync {
+pub trait MemPool<T: EvictionPolicy>: Sync + Send {
+    /// Create a new page for write.
+    /// This function will allocate a new page in memory and return a FrameWriteGuard.
+    /// In general, this function does not need to write the page to disk.
+    /// Disk write will be handled when the page is evicted from the buffer pool.
     fn create_new_page_for_write(
         &self,
         c_key: ContainerKey,
-    ) -> Result<FrameWriteGuard, MemPoolStatus>;
-    fn get_page_for_write(&self, key: PageKey) -> Result<FrameWriteGuard, MemPoolStatus>;
-    fn get_page_for_read(&self, key: PageKey) -> Result<FrameReadGuard, MemPoolStatus>;
+    ) -> Result<FrameWriteGuard<T>, MemPoolStatus>;
+
+    /// Get a page for read.
+    /// This function will return a FrameReadGuard.
+    /// This function assumes that a page is already created and either in memory or on disk.
+    fn get_page_for_write(&self, key: PageKey) -> Result<FrameWriteGuard<T>, MemPoolStatus>;
+
+    /// Get a page for write.
+    /// This function will return a FrameWriteGuard.
+    /// This function assumes that a page is already created and either in memory or on disk.
+    fn get_page_for_read(&self, key: PageKey) -> Result<FrameReadGuard<T>, MemPoolStatus>;
+
+    /// Reset the memory pool.
+    /// This function will reset the memory pool to its initial state.
+    /// This function is useful for testing purposes.
     fn reset(&self);
 }

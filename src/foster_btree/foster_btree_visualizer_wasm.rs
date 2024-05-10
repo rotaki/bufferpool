@@ -12,7 +12,7 @@ use super::foster_btree::PageVisitor;
 
 #[wasm_bindgen]
 pub struct FosterBtreeVisualizer {
-    bt: FosterBtree<InMemPool>,
+    bt: FosterBtree<DummyEvictionPolicy, InMemPool<DummyEvictionPolicy>>,
 }
 
 #[wasm_bindgen]
@@ -22,18 +22,7 @@ impl FosterBtreeVisualizer {
         let (db_id, c_id) = (0, 0);
         let c_key = ContainerKey::new(db_id, c_id);
         let mem_pool = Arc::new(InMemPool::new());
-
-        let root_key = {
-            let mut root = mem_pool.create_new_page_for_write(c_key).unwrap();
-            root.init_as_root();
-            root.key().unwrap()
-        };
-
-        let btree = FosterBtree {
-            c_key,
-            root_key,
-            mem_pool: mem_pool.clone(),
-        };
+        let btree = FosterBtree::new(c_key, mem_pool);
         FosterBtreeVisualizer { bt: btree }
     }
 

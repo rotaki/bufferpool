@@ -1,9 +1,11 @@
+use tempfile::TempDir;
+
 use crate::{log, log_debug};
 
 use super::{
     buffer_frame::{BufferFrame, FrameReadGuard, FrameWriteGuard},
+    eviction_policy::EvictionPolicy,
     mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, PageKey},
-    EvictionPolicy,
 };
 
 use crate::{
@@ -13,28 +15,106 @@ use crate::{
 
 use std::{
     cell::UnsafeCell,
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
+    ops::{Deref, DerefMut},
     path::PathBuf,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
-pub struct BufferPool<T: EvictionPolicy> {
-    path: PathBuf,
-    latch: AtomicBool,
-    frames: UnsafeCell<Vec<BufferFrame>>, // frames is fixed size. If not fixed size, then Pin must be used to ensure that the frame does not move when the vector is resized.
-    id_to_index: UnsafeCell<HashMap<PageKey, usize>>, // (c_id, page_id) -> index
-    container_to_file: UnsafeCell<HashMap<ContainerKey, FileManager>>,
-    eviction_policy: UnsafeCell<T>,
+pub struct Frames<T: EvictionPolicy> {
+    initial_free_frames: VecDeque<usize>, // Used for initial free frames only
+    frames: Vec<BufferFrame<T>>, // The Vec<frames> is fixed size. If not fixed size, then Pin must be used to ensure that the frame does not move when the vector is resized.
 }
 
-impl<T> BufferPool<T>
+impl<T: EvictionPolicy> Frames<T> {
+    pub fn new(num_frames: usize) -> Self {
+        Frames {
+            initial_free_frames: (0..num_frames).collect(),
+            frames: (0..num_frames).map(|_| BufferFrame::default()).collect(),
+        }
+    }
+
+    pub fn get(&self, index: usize) -> &BufferFrame<T> {
+        &self.frames[index]
+    }
+
+    pub fn get_mut(&mut self, index: usize) -> &mut BufferFrame<T> {
+        &mut self.frames[index]
+    }
+
+    /// Choose a victim frame to be evicted.
+    /// Return the index of the frame and whether the frame is dirty (requires writing back to disk).
+    /// If all the frames are locked, then return None.
+    pub fn choose_victim(&mut self) -> Option<(usize, bool)> {
+        if !self.initial_free_frames.is_empty() {
+            let idx = self.initial_free_frames.pop_front().unwrap();
+            Some((idx, false))
+        } else {
+            // Scan the frames to find the victim
+            let mut clean_frame_with_min_score = (0, u64::MAX); // (index, score)
+            let mut drity_frame_with_min_score = (0, u64::MAX); // (index, score)
+            for (i, frame) in self.frames.iter().enumerate() {
+                if frame.is_locked() {
+                    continue;
+                }
+                let score = frame.eviction_score();
+                if !frame.is_dirty() {
+                    if score < clean_frame_with_min_score.1 {
+                        clean_frame_with_min_score = (i, score);
+                    }
+                } else {
+                    if score < drity_frame_with_min_score.1 {
+                        drity_frame_with_min_score = (i, score);
+                    }
+                }
+            }
+            if clean_frame_with_min_score.1 != u64::MAX {
+                // We can evict a clean frame
+                Some((clean_frame_with_min_score.0, false))
+            } else if drity_frame_with_min_score.1 != u64::MAX {
+                // We need to evict a dirty frame because we have no clean frames
+                Some((drity_frame_with_min_score.0, true))
+            } else {
+                // All the frames are locked
+                None
+            }
+        }
+    }
+}
+
+impl<T: EvictionPolicy> Deref for Frames<T> {
+    type Target = Vec<BufferFrame<T>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.frames
+    }
+}
+
+impl<T: EvictionPolicy> DerefMut for Frames<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.frames
+    }
+}
+
+/// Read-after-write buffer pool.
+pub struct RAWBufferPool<T: EvictionPolicy> {
+    path: PathBuf,
+    latch: AtomicBool,
+    frames: UnsafeCell<Frames<T>>,
+    id_to_index: UnsafeCell<HashMap<PageKey, usize>>, // (c_id, page_id) -> index
+    container_to_file: UnsafeCell<HashMap<ContainerKey, FileManager>>,
+}
+
+impl<T> RAWBufferPool<T>
 where
     T: EvictionPolicy,
 {
     pub fn new<P: AsRef<std::path::Path>>(
         path: P,
         num_frames: usize,
-        eviction_policy: T,
     ) -> Result<Self, MemPoolStatus> {
         log_debug!("Buffer pool created: num_frames: {}", num_frames);
 
@@ -59,15 +139,19 @@ where
             }
         }
 
-        let frames = (0..num_frames).map(|_| BufferFrame::default()).collect();
-        Ok(BufferPool {
+        Ok(RAWBufferPool {
             path: path.as_ref().to_path_buf(),
             latch: AtomicBool::new(false),
             id_to_index: UnsafeCell::new(HashMap::new()),
-            frames: UnsafeCell::new(frames),
+            frames: UnsafeCell::new(Frames::new(num_frames)),
             container_to_file: UnsafeCell::new(container),
-            eviction_policy: UnsafeCell::new(eviction_policy),
         })
+    }
+
+    #[cfg(test)]
+    pub fn choose_victim(&self) -> Option<(usize, bool)> {
+        let frames = unsafe { &mut *self.frames.get() };
+        frames.choose_victim()
     }
 
     fn latch(&self) {
@@ -86,20 +170,22 @@ where
         &self,
         key: PageKey,
         new_page: bool,
-    ) -> Result<FrameWriteGuard, MemPoolStatus> {
-        let pages = unsafe { &mut *self.frames.get() };
+    ) -> Result<FrameWriteGuard<T>, MemPoolStatus> {
+        let frames = unsafe { &mut *self.frames.get() };
         let id_to_index = unsafe { &mut *self.id_to_index.get() };
         let container_to_file = unsafe { &mut *self.container_to_file.get() };
-        let eviction_policy = unsafe { &mut *self.eviction_policy.get() };
 
-        let index = eviction_policy.choose_victim();
-        let mut guard = pages[index]
-            .try_write(false)
-            .ok_or(MemPoolStatus::FrameWriteLatchGrantFailed)?;
+        let (index, is_dirty) = if let Some((index, is_dirty)) = frames.choose_victim() {
+            (index, is_dirty)
+        } else {
+            return Err(MemPoolStatus::CannotEvictPage);
+        };
+        let mut guard = frames[index].try_write(false).unwrap(); // We have already checked that the frame is not locked
 
         // Evict old page if necessary
         if let Some(old_key) = guard.key() {
-            if guard.dirty().swap(false, Ordering::Acquire) {
+            if is_dirty {
+                guard.dirty().store(true, Ordering::Relaxed);
                 let file = container_to_file
                     .get(&old_key.c_key)
                     .ok_or(MemPoolStatus::FileManagerNotFound)?;
@@ -122,8 +208,11 @@ where
         guard.copy(&page);
         id_to_index.insert(key, index);
         *guard.key() = Some(key);
-        eviction_policy.reset(index);
-        eviction_policy.update(index);
+        {
+            let mut evict_info = guard.evict_info().write().unwrap();
+            evict_info.reset();
+            evict_info.update();
+        }
 
         log_debug!("Page loaded: key: {}", key);
         Ok(guard)
@@ -135,40 +224,51 @@ where
     pub fn create_new_page_for_write(
         &self,
         c_key: ContainerKey,
-    ) -> Result<FrameWriteGuard, MemPoolStatus> {
+    ) -> Result<FrameWriteGuard<T>, MemPoolStatus> {
         self.latch();
 
-        let fm = (unsafe { &mut *self.container_to_file.get() })
-            .entry(c_key)
-            .or_insert_with(|| {
-                FileManager::new(
-                    &self
-                        .path
-                        .join(c_key.db_id.to_string())
-                        .join(c_key.c_id.to_string()),
-                )
-                .unwrap()
-            });
+        let container_to_file = unsafe { &mut *self.container_to_file.get() };
 
-        let page_id = fm.get_new_page_id();
+        let fm = container_to_file.entry(c_key).or_insert_with(|| {
+            FileManager::new(
+                &self
+                    .path
+                    .join(c_key.db_id.to_string())
+                    .join(c_key.c_id.to_string()),
+            )
+            .unwrap()
+        });
+
+        let page_id = fm.fetch_add_page_id();
         let key = PageKey::new(c_key, page_id);
-        let res = self.handle_page_fault(key, true);
+        let res: Result<FrameWriteGuard<T>, MemPoolStatus> = self.handle_page_fault(key, true);
         if let Ok(ref guard) = res {
             guard.dirty().store(true, Ordering::Release);
+        } else {
+            fm.fetch_sub_page_id();
         }
 
         self.unlatch();
         res
     }
 
-    pub fn get_page_for_write(&self, key: PageKey) -> Result<FrameWriteGuard, MemPoolStatus> {
+    pub fn get_page_for_write(&self, key: PageKey) -> Result<FrameWriteGuard<T>, MemPoolStatus> {
         self.latch();
 
-        let result = match unsafe { &mut *self.id_to_index.get() }.get(&key) {
+        let id_to_index = unsafe { &mut *self.id_to_index.get() };
+        let frames = unsafe { &mut *self.frames.get() };
+
+        let result = match id_to_index.get(&key) {
             Some(&index) => {
-                let guard = (unsafe { &mut *self.frames.get() })[index].try_write(true);
+                let guard = frames[index].try_write(true);
                 if guard.is_some() {
-                    unsafe { &mut *self.eviction_policy.get() }.update(index);
+                    guard
+                        .as_ref()
+                        .unwrap()
+                        .evict_info()
+                        .write()
+                        .unwrap()
+                        .update();
                 }
                 guard.ok_or(MemPoolStatus::FrameWriteLatchGrantFailed)
             }
@@ -188,10 +288,14 @@ where
     pub fn get_last_page_for_write(
         &self,
         c_key: ContainerKey,
-    ) -> Result<FrameWriteGuard, MemPoolStatus> {
+    ) -> Result<FrameWriteGuard<T>, MemPoolStatus> {
         self.latch();
 
-        let fm = if let Some(fm) = (unsafe { &mut *self.container_to_file.get() }).get(&c_key) {
+        let container_to_file = unsafe { &mut *self.container_to_file.get() };
+        let id_to_index = unsafe { &mut *self.id_to_index.get() };
+        let frames = unsafe { &mut *self.frames.get() };
+
+        let fm = if let Some(fm) = container_to_file.get(&c_key) {
             fm
         } else {
             self.unlatch();
@@ -204,11 +308,17 @@ where
         }
         let page_id = num_pages - 1;
         let key = PageKey::new(c_key, page_id);
-        let result = match unsafe { &mut *self.id_to_index.get() }.get(&key) {
+        let result = match id_to_index.get(&key) {
             Some(&index) => {
-                let guard = (unsafe { &mut *self.frames.get() })[index].try_write(true);
+                let guard = frames[index].try_write(true);
                 if guard.is_some() {
-                    unsafe { &mut *self.eviction_policy.get() }.update(index);
+                    guard
+                        .as_ref()
+                        .unwrap()
+                        .evict_info()
+                        .write()
+                        .unwrap()
+                        .update();
                 }
                 guard.ok_or(MemPoolStatus::FrameWriteLatchGrantFailed)
             }
@@ -225,14 +335,24 @@ where
         result
     }
 
-    pub fn get_page_for_read(&self, key: PageKey) -> Result<FrameReadGuard, MemPoolStatus> {
+    pub fn get_page_for_read(&self, key: PageKey) -> Result<FrameReadGuard<T>, MemPoolStatus> {
         self.latch();
+        log_debug!("Page read: {}", key);
 
-        let result = match unsafe { &mut *self.id_to_index.get() }.get(&key) {
+        let id_to_index = unsafe { &mut *self.id_to_index.get() };
+        let frames = unsafe { &mut *self.frames.get() };
+
+        let result = match id_to_index.get(&key) {
             Some(&index) => {
-                let guard = (unsafe { &mut *self.frames.get() })[index].try_read();
+                let guard = frames[index].try_read();
                 if guard.is_some() {
-                    unsafe { &mut *self.eviction_policy.get() }.update(index);
+                    guard
+                        .as_ref()
+                        .unwrap()
+                        .evict_info()
+                        .write()
+                        .unwrap()
+                        .update();
                 }
                 guard.ok_or(MemPoolStatus::FrameReadLatchGrantFailed)
             }
@@ -247,7 +367,10 @@ where
     pub fn flush_all(&self) -> Result<(), MemPoolStatus> {
         self.latch();
 
-        for frame in unsafe { &*self.frames.get() }.iter() {
+        let frames = unsafe { &*self.frames.get() };
+        let container_to_file = unsafe { &mut *self.container_to_file.get() };
+
+        for frame in frames.iter() {
             let frame = loop {
                 if let Some(guard) = frame.try_read() {
                     break guard;
@@ -258,8 +381,7 @@ where
             if frame.dirty().swap(false, Ordering::Acquire) {
                 // swap is required to avoid concurrent flushes
                 let key = frame.key().unwrap();
-                if let Some(file) = (unsafe { &mut *self.container_to_file.get() }).get(&key.c_key)
-                {
+                if let Some(file) = container_to_file.get(&key.c_key) {
                     file.write_page(key.page_id, &*frame)?;
                 } else {
                     self.unlatch();
@@ -280,10 +402,11 @@ where
 
         unsafe { &mut *self.id_to_index.get() }.clear();
         unsafe { &mut *self.container_to_file.get() }.clear();
-        unsafe { &mut *self.eviction_policy.get() }.reset_all();
 
-        for frame in unsafe { &mut *self.frames.get() }.iter_mut() {
-            let mut frame = loop {
+        let frames = unsafe { &mut *self.frames.get() };
+
+        for frame in frames.iter_mut() {
+            let frame = loop {
                 if let Some(guard) = frame.try_write(false) {
                     break guard;
                 }
@@ -292,6 +415,8 @@ where
             };
             frame.clear();
         }
+
+        frames.initial_free_frames = (0..frames.len()).collect();
 
         for entry in std::fs::read_dir(&self.path).unwrap() {
             let entry = entry.unwrap();
@@ -303,32 +428,32 @@ where
     }
 }
 
-impl<T> MemPool for BufferPool<T>
+impl<T> MemPool<T> for RAWBufferPool<T>
 where
     T: EvictionPolicy,
 {
     fn create_new_page_for_write(
         &self,
         c_key: ContainerKey,
-    ) -> Result<FrameWriteGuard, MemPoolStatus> {
-        BufferPool::create_new_page_for_write(self, c_key)
+    ) -> Result<FrameWriteGuard<T>, MemPoolStatus> {
+        RAWBufferPool::create_new_page_for_write(self, c_key)
     }
 
-    fn get_page_for_write(&self, key: PageKey) -> Result<FrameWriteGuard, MemPoolStatus> {
-        BufferPool::get_page_for_write(self, key)
+    fn get_page_for_write(&self, key: PageKey) -> Result<FrameWriteGuard<T>, MemPoolStatus> {
+        RAWBufferPool::get_page_for_write(self, key)
     }
 
-    fn get_page_for_read(&self, key: PageKey) -> Result<FrameReadGuard, MemPoolStatus> {
-        BufferPool::get_page_for_read(self, key)
+    fn get_page_for_read(&self, key: PageKey) -> Result<FrameReadGuard<T>, MemPoolStatus> {
+        RAWBufferPool::get_page_for_read(self, key)
     }
 
     fn reset(&self) {
-        BufferPool::reset(self);
+        RAWBufferPool::reset(self);
     }
 }
 
 #[cfg(test)]
-impl<T: EvictionPolicy> BufferPool<T> {
+impl<T: EvictionPolicy> RAWBufferPool<T> {
     pub fn run_checks(&self) {
         self.check_all_frames_unlatched();
         self.check_id_to_index();
@@ -338,8 +463,8 @@ impl<T: EvictionPolicy> BufferPool<T> {
     pub fn check_all_frames_unlatched(&self) {
         let frames = unsafe { &*self.frames.get() };
         for frame in frames.iter() {
-            assert!(!frame.latch.is_exclusive());
-            assert!(!frame.latch.is_shared());
+            assert!(!frame.is_exclusive());
+            assert!(!frame.is_shared());
         }
     }
 
@@ -352,10 +477,11 @@ impl<T: EvictionPolicy> BufferPool<T> {
         }
         let frames = unsafe { &*self.frames.get() };
         for (i, frame) in frames.iter().enumerate() {
+            let frame = frame.read();
             if index_to_id.contains_key(&i) {
-                assert_eq!((unsafe { *frame.key.get() }).unwrap(), *index_to_id[&i]);
+                assert_eq!(frame.key().unwrap(), *index_to_id[&i]);
             } else {
-                assert_eq!(unsafe { *frame.key.get() }, None);
+                assert_eq!(frame.key(), &None);
             }
         }
         // println!("id_to_index: {:?}", id_to_index);
@@ -364,8 +490,9 @@ impl<T: EvictionPolicy> BufferPool<T> {
     pub fn check_frame_id_and_page_id_match(&self) {
         let frames = unsafe { &*self.frames.get() };
         for frame in frames.iter() {
-            if let Some(key) = unsafe { *frame.key.get() } {
-                let page_id = unsafe { &*frame.page.get() }.get_id();
+            let frame = frame.read();
+            if let Some(key) = frame.key() {
+                let page_id = frame.get_id();
                 assert_eq!(key.page_id, page_id);
             }
         }
@@ -377,16 +504,18 @@ impl<T: EvictionPolicy> BufferPool<T> {
     }
 }
 
-unsafe impl<T: EvictionPolicy> Sync for BufferPool<T> {}
+unsafe impl<T: EvictionPolicy> Sync for RAWBufferPool<T> {}
 
 #[cfg(test)]
 mod tests {
+    use crate::buffer_pool::eviction_policy::LRUEvictionPolicy;
     use crate::{log, log_trace};
 
-    use super::super::LFUEvictionPolicy;
     use super::*;
     use std::thread;
     use tempfile::TempDir;
+
+    pub type TestRAWBufferPool = RAWBufferPool<LRUEvictionPolicy>;
 
     #[test]
     fn test_bp_and_frame_latch() {
@@ -395,9 +524,8 @@ mod tests {
         // create a directory for the database
         std::fs::create_dir(temp_dir.path().join(db_id.to_string())).unwrap();
         {
-            let num_pages = 10;
-            let ep = LFUEvictionPolicy::new(num_pages);
-            let bp = BufferPool::new(temp_dir.path(), num_pages, ep).unwrap();
+            let num_frames = 10;
+            let bp = TestRAWBufferPool::new(temp_dir.path(), num_frames).unwrap();
             let c_key = ContainerKey::new(db_id, 0);
             let frame = bp.create_new_page_for_write(c_key).unwrap();
             let key = frame.key().unwrap();
@@ -423,11 +551,12 @@ mod tests {
                     });
                 }
             });
-
-            bp.check_all_frames_unlatched();
-            bp.check_id_to_index();
-            let guard = bp.get_page_for_read(key).unwrap();
-            assert_eq!(guard[0], num_threads * num_iterations);
+            bp.run_checks();
+            {
+                let guard = bp.get_page_for_read(key).unwrap();
+                assert_eq!(guard[0], num_threads * num_iterations);
+            }
+            bp.run_checks();
         }
     }
 
@@ -438,9 +567,8 @@ mod tests {
         // create a directory for the database
         std::fs::create_dir(temp_dir.path().join(db_id.to_string())).unwrap();
         {
-            let num_pages = 1;
-            let ep = LFUEvictionPolicy::new(num_pages);
-            let bp = BufferPool::new(temp_dir.path(), 1, ep).unwrap();
+            let num_frames = 1;
+            let bp = TestRAWBufferPool::new(temp_dir.path(), num_frames).unwrap();
             let c_key = ContainerKey::new(db_id, 0);
 
             let key1 = {
@@ -455,7 +583,7 @@ mod tests {
                 guard[0] = 2;
                 guard.key().unwrap()
             };
-            bp.check_all_frames_unlatched();
+            bp.run_checks();
             // check contents of evicted page
             {
                 let guard = bp.get_page_for_read(key1).unwrap();
@@ -466,6 +594,7 @@ mod tests {
                 let guard = bp.get_page_for_read(key2).unwrap();
                 assert_eq!(guard[0], 2);
             }
+            bp.run_checks();
         }
     }
 
@@ -477,27 +606,24 @@ mod tests {
         std::fs::create_dir(temp_dir.path().join(db_id.to_string())).unwrap();
         {
             let mut keys = Vec::new();
-            let num_pages = 1;
-            let ep = LFUEvictionPolicy::new(num_pages);
-            let bp = BufferPool::new(temp_dir.path(), 1, ep).unwrap();
+            let num_frames = 1;
+            let bp = TestRAWBufferPool::new(temp_dir.path(), num_frames).unwrap();
             let c_key = ContainerKey::new(db_id, 0);
 
             for i in 0..100 {
                 let mut guard = bp.create_new_page_for_write(c_key).unwrap();
                 guard[0] = i;
                 keys.push(guard.key().unwrap());
-
-                bp.check_id_to_index();
             }
-            bp.check_all_frames_unlatched();
+            bp.run_checks();
             for (i, key) in keys.iter().enumerate() {
-                let guard: FrameReadGuard<'_> = bp.get_page_for_read(*key).unwrap();
+                let guard = bp.get_page_for_read(*key).unwrap();
                 assert_eq!(guard[0], i as u8);
             }
+            bp.run_checks();
         }
     }
 
-    /*
     #[test]
     fn test_bp_create_new_page() {
         let temp_dir = TempDir::new().unwrap();
@@ -505,9 +631,8 @@ mod tests {
         // create a directory for the database
         std::fs::create_dir(temp_dir.path().join(db_id.to_string())).unwrap();
 
-        let num_pages = 3;
-        let ep = LFUEvictionPolicy::new(num_pages);
-        let bp = BufferPool::new(temp_dir.path(), num_pages, ep).unwrap();
+        let num_pages = 2;
+        let bp = TestRAWBufferPool::new(temp_dir.path(), num_pages).unwrap();
         let c_key = ContainerKey::new(db_id, 0);
 
         let num_traversal = 100;
@@ -539,11 +664,32 @@ mod tests {
 
         bp.run_checks();
     }
-    */
 
     #[test]
-    fn test_bp_no_write_back_if_not_dirty() {
-        // TODO: Implement a mock file manager to check if write_page is called
-        // when replacing a non-dirty page with a new page.
+    fn test_bp_all_frames_latched() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_id = 0;
+        // create a directory for the database
+        std::fs::create_dir(temp_dir.path().join(db_id.to_string())).unwrap();
+
+        let num_pages = 1;
+        let bp = TestRAWBufferPool::new(temp_dir.path(), num_pages).unwrap();
+        let c_key = ContainerKey::new(db_id, 0);
+
+        let mut guard1 = bp.create_new_page_for_write(c_key).unwrap();
+        guard1[0] = 1;
+
+        // Try to get a new page for write. This should fail because all the frames are latched.
+        let res = bp.create_new_page_for_write(c_key);
+        assert_eq!(res.unwrap_err(), MemPoolStatus::CannotEvictPage);
+
+        drop(guard1);
+
+        // Now, we should be able to get a new page for write.
+        let guard2 = bp.create_new_page_for_write(c_key).unwrap();
+        assert_eq!(guard2[0], 0);
     }
+
+    #[test]
+    fn test_lru_eviction() {}
 }

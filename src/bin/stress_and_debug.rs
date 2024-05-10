@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     fs::File,
     io::Write,
     sync::{
@@ -9,33 +10,69 @@ use std::{
 };
 
 use foster_btree::{
-    buffer_pool::prelude::{ContainerKey, InMemPool, MemPool},
+    buffer_pool::{
+        get_in_mem_pool, get_test_bp,
+        prelude::{
+            ContainerKey, DummyEvictionPolicy, EvictionPolicy, InMemPool, LRUEvictionPolicy,
+            MemPool,
+        },
+        BufferPoolForTest,
+    },
     foster_btree::{FosterBtree, FosterBtreePage},
     log, log_trace,
     random::RandomKVs,
 };
 
-fn to_bytes(key: usize) -> Vec<u8> {
-    key.to_be_bytes().to_vec()
+fn to_bytes(key: usize, key_size: usize) -> Vec<u8> {
+    // Pad the key with 0s to make it key_size bytes long.
+    let mut key_vec = vec![0u8; key_size];
+    let bytes = key.to_be_bytes().to_vec();
+    key_vec[..bytes.len()].copy_from_slice(&bytes);
+    key_vec
 }
 
-fn setup_inmem_btree_empty() -> FosterBtree<InMemPool> {
+fn gen_foster_btree_in_mem() -> Arc<FosterBtree<DummyEvictionPolicy, InMemPool<DummyEvictionPolicy>>>
+{
     let (db_id, c_id) = (0, 0);
     let c_key = ContainerKey::new(db_id, c_id);
-    let mem_pool = Arc::new(InMemPool::new());
+    let btree = FosterBtree::new(c_key, get_in_mem_pool());
+    Arc::new(btree)
+}
 
-    let root_key = {
-        let mut root = mem_pool.create_new_page_for_write(c_key).unwrap();
-        root.init_as_root();
-        root.key().unwrap()
-    };
+fn gen_foster_btree_on_disk(
+) -> Arc<FosterBtree<LRUEvictionPolicy, BufferPoolForTest<LRUEvictionPolicy>>> {
+    let (db_id, c_id) = (0, 0);
+    let c_key = ContainerKey::new(db_id, c_id);
+    let btree = FosterBtree::new(c_key, get_test_bp(1000));
+    Arc::new(btree)
+}
 
-    let btree = FosterBtree {
-        c_key,
-        root_key,
-        mem_pool,
-    };
-    btree
+fn insert_into_foster_tree<E: EvictionPolicy, M: MemPool<E>>(
+    btree: Arc<FosterBtree<E, M>>,
+    kvs: &RandomKVs,
+) {
+    for (k, v) in kvs.iter() {
+        let key = to_bytes(*k, 100);
+        btree.insert(&key, v).unwrap();
+    }
+}
+
+fn insert_into_foster_tree_parallel<E: EvictionPolicy, M: MemPool<E>>(
+    btree: Arc<FosterBtree<E, M>>,
+    kvs: &VecDeque<RandomKVs>,
+) {
+    // Scopeed threads
+    thread::scope(|s| {
+        for partition in kvs.iter() {
+            let btree = btree.clone();
+            s.spawn(move || {
+                for (k, v) in partition.iter() {
+                    let key = to_bytes(*k, 100);
+                    btree.insert(&key, v).unwrap();
+                }
+            });
+        }
+    })
 }
 
 fn test_stress() {
@@ -44,7 +81,7 @@ fn test_stress() {
     let val_max_size = 100;
     let kvs = RandomKVs::new(num_keys, val_min_size, val_max_size);
 
-    let btree = setup_inmem_btree_empty();
+    let btree = gen_foster_btree_in_mem();
 
     // Write kvs to file
     // let kvs_file = "kvs.dat";
@@ -59,7 +96,7 @@ fn test_stress() {
         //     "**************************** Inserting {} key={} **************************",
         //     i, key
         // );
-        let key = to_bytes(*key);
+        let key = to_bytes(*key, 100);
         btree.insert(&key, val).unwrap();
     }
 
@@ -72,7 +109,7 @@ fn test_stress() {
         //     "**************************** Getting key {} **************************",
         //     key
         // );
-        let key = to_bytes(*key);
+        let key = to_bytes(*key, 100);
         let current_val = btree.get(&key).unwrap();
         assert_eq!(current_val, *val);
     }
@@ -83,7 +120,7 @@ fn test_stress() {
 
 // skip default
 fn replay_stress() {
-    let btree = setup_inmem_btree_empty();
+    let btree = gen_foster_btree_in_mem();
 
     let kvs_file = "kvs.dat";
     let file = File::open(kvs_file).unwrap();
@@ -98,7 +135,7 @@ fn replay_stress() {
             "**************************** Inserting {} key={} **************************",
             i, key
         );
-        let key = to_bytes(*key);
+        let key = to_bytes(*key, 100);
         btree.insert(&key, val).unwrap();
     }
 
@@ -107,7 +144,7 @@ fn replay_stress() {
         "BUG INSERT ************** Inserting {} key={} **************************",
         bug_occurred_at, k
     );
-    let key = to_bytes(*k);
+    let key = to_bytes(*k, 100);
     btree.insert(&key, &v).unwrap();
 
     /*

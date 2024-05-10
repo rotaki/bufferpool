@@ -48,8 +48,12 @@ impl FileManager {
         })
     }
 
-    pub fn get_new_page_id(&self) -> PageId {
+    pub fn fetch_add_page_id(&self) -> PageId {
         self.num_pages.fetch_add(1, Ordering::AcqRel)
+    }
+
+    pub fn fetch_sub_page_id(&self) -> PageId {
+        self.num_pages.fetch_sub(1, Ordering::AcqRel)
     }
 
     pub fn get_num_pages(&self) -> PageId {

@@ -40,7 +40,7 @@ impl LogBufferInner {
         let file_manager = FileManager::new(path).unwrap();
         let mut buffer = Vec::with_capacity(num_pages);
         for _ in 0..num_pages {
-            let page_id = file_manager.get_new_page_id();
+            let page_id = file_manager.fetch_add_page_id();
             let mut page = Page::new_empty();
             HeapPage::init(&mut page);
             page.set_id(page_id as u32);
@@ -87,7 +87,7 @@ impl LogBufferInner {
         for page in &mut self.buffer {
             self.file_manager.write_page(page.get_id(), page);
             HeapPage::init(page);
-            let new_page_id = self.file_manager.get_new_page_id();
+            let new_page_id = self.file_manager.fetch_add_page_id();
             page.set_id(new_page_id);
         }
         self.file_manager.flush();
@@ -131,7 +131,7 @@ impl LogChecker {
 
     pub fn get_all_logs(&self) -> Vec<Vec<u8>> {
         let mut logs = Vec::new();
-        let num_pages = self.file_manager.get_new_page_id();
+        let num_pages = self.file_manager.fetch_add_page_id();
         for page_id in 0..num_pages {
             let mut page = self.file_manager.read_page(page_id).unwrap();
             let h_page = HeapPage::new(&mut page);

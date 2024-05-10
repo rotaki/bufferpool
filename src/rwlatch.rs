@@ -13,6 +13,10 @@ impl Default for RwLatch {
 }
 
 impl RwLatch {
+    pub fn is_locked(&self) -> bool {
+        self.cnt.load(Ordering::Acquire) != 0
+    }
+
     pub fn is_shared(&self) -> bool {
         self.cnt.load(Ordering::Acquire) > 0
     }
