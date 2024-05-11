@@ -135,7 +135,7 @@ fn run_insertion_bench(num_threads: usize) {
 
 fn run_insertion_bench_single_thread() {
     // let btree = gen_foster_btree_in_mem();
-    let btree = gen_foster_btree_on_disk();
+    let btree = gen_foster_btree_in_mem();
     let mut kvs = RandomKVs::new(1, NUM_KEYS, VAL_MIN_SIZE, VAL_MAX_SIZE);
     let kvs = kvs.pop().unwrap();
     for (key, val) in kvs.iter() {

@@ -4,6 +4,7 @@ use std::{
     hash::Hash,
     marker::PhantomData,
     rc::Rc,
+    result,
     sync::{atomic::Ordering, Arc, Mutex},
     thread::{self, current},
     time::Duration,
@@ -132,8 +133,8 @@ struct OpStat {
     sm_trigger: UnsafeCell<[usize; 7]>, // Number of times the structure modification is triggered
     sm_success: UnsafeCell<[usize; 7]>, // Number of times the structure modification is successful
     additional_traversals: UnsafeCell<[usize; 11]>, // Number of additional traversals for exclusive page latch
-    shared_page_latch_failures: UnsafeCell<[usize; 2]>, // Number of times the read page fails [0] failure, [1] total
-    exclusive_page_latch_failures: UnsafeCell<[usize; 2]>, // Number of times the exclusive page latch fails [0] failure, [1] total
+    shared_page_latch_failures: UnsafeCell<[usize; 3]>, // Number of times the read page fails [0] leaf failure, [1] inner failure, [2] total(#attempt \neq leaf + inner)
+    exclusive_page_latch_failures: UnsafeCell<[usize; 3]>, // Number of times the exclusive page latch fails [0] leaf failure, [1] inner failure, [2] total(#attempt \neq leaf + inner)
 }
 
 #[cfg(any(feature = "stat"))]
@@ -143,8 +144,8 @@ impl OpStat {
             sm_trigger: UnsafeCell::new([0; 7]),
             sm_success: UnsafeCell::new([0; 7]),
             additional_traversals: UnsafeCell::new([0; 11]),
-            shared_page_latch_failures: UnsafeCell::new([0; 2]),
-            exclusive_page_latch_failures: UnsafeCell::new([0; 2]),
+            shared_page_latch_failures: UnsafeCell::new([0; 3]),
+            exclusive_page_latch_failures: UnsafeCell::new([0; 3]),
         }
     }
 
@@ -204,38 +205,82 @@ impl OpStat {
         }
         result.push_str("\n\n");
         let shared_page_latch_failures = unsafe { &*self.shared_page_latch_failures.get() };
-        result.push_str("Shared Page Latch Failure\n");
+
+        result.push_str("Shared Page Latch Failure by Node Type\n");
+        let leaf_failure = shared_page_latch_failures[0];
+        let inner_failure = shared_page_latch_failures[1];
+        let total_failure = leaf_failure + inner_failure;
+        let total = shared_page_latch_failures[2];
         result.push_str(&format!(
-            "Failure: {:6} / {:6} ({:6})",
-            shared_page_latch_failures[0],
-            shared_page_latch_failures[1],
-            if shared_page_latch_failures[1] == 0 {
+            "Leaf : {:6} / {:6} ({:6})",
+            leaf_failure,
+            total,
+            if total == 0 {
                 "N/A".to_owned()
             } else {
-                format!(
-                    "{:.2}%",
-                    (shared_page_latch_failures[0] as f64) / (shared_page_latch_failures[1] as f64)
-                        * 100.0
-                )
+                format!("{:.2}%", (leaf_failure as f64) / (total as f64) * 100.0)
+            }
+        ));
+        result.push_str("\n");
+        result.push_str(&format!(
+            "Inner: {:6} / {:6} ({:6})",
+            inner_failure,
+            total,
+            if total == 0 {
+                "N/A".to_owned()
+            } else {
+                format!("{:.2}%", (inner_failure as f64) / (total as f64) * 100.0)
+            }
+        ));
+        result.push_str("\n");
+        result.push_str(&format!(
+            "Total: {:6} / {:6} ({:6})",
+            total_failure,
+            total,
+            if total == 0 {
+                "N/A".to_owned()
+            } else {
+                format!("{:.2}%", (total_failure as f64) / (total as f64) * 100.0)
             }
         ));
 
         result.push_str("\n\n");
         let exclusive_page_latch_failures = unsafe { &*self.exclusive_page_latch_failures.get() };
-        result.push_str("Exclusive Page Latch Failure\n");
+        result.push_str("Exclusive Page Latch Failure by Node Type\n");
+        let leaf_failure = exclusive_page_latch_failures[0];
+        let inner_failure = exclusive_page_latch_failures[1];
+        let total_failure = leaf_failure + inner_failure;
+        let total = exclusive_page_latch_failures[2];
         result.push_str(&format!(
-            "Failure: {:6} / {:6} ({:6})",
-            exclusive_page_latch_failures[0],
-            exclusive_page_latch_failures[1],
-            if exclusive_page_latch_failures[1] == 0 {
+            "Leaf : {:6} / {:6} ({:6})",
+            leaf_failure,
+            total,
+            if total == 0 {
                 "N/A".to_owned()
             } else {
-                format!(
-                    "{:.2}%",
-                    (exclusive_page_latch_failures[0] as f64)
-                        / (exclusive_page_latch_failures[1] as f64)
-                        * 100.0
-                )
+                format!("{:.2}%", (leaf_failure as f64) / (total as f64) * 100.0)
+            }
+        ));
+        result.push_str("\n");
+        result.push_str(&format!(
+            "Inner: {:6} / {:6} ({:6})",
+            inner_failure,
+            total,
+            if total == 0 {
+                "N/A".to_owned()
+            } else {
+                format!("{:.2}%", (inner_failure as f64) / (total as f64) * 100.0)
+            }
+        ));
+        result.push_str("\n");
+        result.push_str(&format!(
+            "Total: {:6} / {:6} ({:6})",
+            total_failure,
+            total,
+            if total == 0 {
+                "N/A".to_owned()
+            } else {
+                format!("{:.2}%", (total_failure as f64) / (total as f64) * 100.0)
             }
         ));
 
@@ -258,14 +303,12 @@ impl OpStat {
         }
         let shared_page_latch_failures = unsafe { &mut *self.shared_page_latch_failures.get() };
         let other_shared_page_latch_failures = unsafe { &*other.shared_page_latch_failures.get() };
-        for i in 0..2 {
-            shared_page_latch_failures[i] += other_shared_page_latch_failures[i];
-        }
         let exclusive_page_latch_failures =
             unsafe { &mut *self.exclusive_page_latch_failures.get() };
         let other_exclusive_page_latch_failures =
             unsafe { &*other.exclusive_page_latch_failures.get() };
-        for i in 0..2 {
+        for i in 0..3 {
+            shared_page_latch_failures[i] += other_shared_page_latch_failures[i];
             exclusive_page_latch_failures[i] += other_exclusive_page_latch_failures[i];
         }
     }
@@ -284,10 +327,8 @@ impl OpStat {
         for i in 0..11 {
             additional_traversals[i] = 0;
         }
-        for i in 0..2 {
+        for i in 0..3 {
             shared_page_latch_failures[i] = 0;
-        }
-        for i in 0..2 {
             exclusive_page_latch_failures[i] = 0;
         }
     }
@@ -344,11 +385,15 @@ fn inc_local_additional_traversals(attempts: u32) {
 }
 
 #[cfg(any(feature = "stat"))]
-fn inc_shared_page_latch_failures() {
+fn inc_shared_page_latch_failures(is_leaf: bool, attempts: usize) {
     LOCAL_STAT.with(|stat| {
         let shared_page_latch_failures =
             unsafe { &mut *stat.stat.shared_page_latch_failures.get() };
-        shared_page_latch_failures[0] += 1;
+        if is_leaf {
+            shared_page_latch_failures[0] += attempts;
+        } else {
+            shared_page_latch_failures[1] += attempts;
+        }
     });
 }
 
@@ -357,16 +402,20 @@ fn inc_shared_page_latch_count() {
     LOCAL_STAT.with(|stat| {
         let shared_page_latch_failures =
             unsafe { &mut *stat.stat.shared_page_latch_failures.get() };
-        shared_page_latch_failures[1] += 1;
+        shared_page_latch_failures[2] += 1;
     });
 }
 
 #[cfg(any(feature = "stat"))]
-fn inc_exclusive_page_latch_failures() {
+fn inc_exclusive_page_latch_failures(is_leaf: bool) {
     LOCAL_STAT.with(|stat| {
         let exclusive_page_latch_failures =
             unsafe { &mut *stat.stat.exclusive_page_latch_failures.get() };
-        exclusive_page_latch_failures[0] += 1;
+        if is_leaf {
+            exclusive_page_latch_failures[0] += 1;
+        } else {
+            exclusive_page_latch_failures[1] += 1;
+        }
     });
 }
 
@@ -375,7 +424,7 @@ fn inc_exclusive_page_latch_count() {
     LOCAL_STAT.with(|stat| {
         let exclusive_page_latch_failures =
             unsafe { &mut *stat.stat.exclusive_page_latch_failures.get() };
-        exclusive_page_latch_failures[1] += 1;
+        exclusive_page_latch_failures[2] += 1;
     });
 }
 
@@ -1137,21 +1186,25 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
     }
 
     fn read_page(&self, page_key: PageKey) -> FrameReadGuard<E> {
+        let base = Duration::from_millis(1);
+        let mut attempts = 0;
         loop {
             #[cfg(any(feature = "stat"))]
             inc_shared_page_latch_count();
             let page = self.mem_pool.get_page_for_read(page_key);
             match page {
-                Ok(page) => return page,
-                Err(MemPoolStatus::FrameReadLatchGrantFailed) => {
+                Ok(page) => {
                     #[cfg(any(feature = "stat"))]
-                    inc_shared_page_latch_failures();
+                    inc_shared_page_latch_failures(page.is_leaf(), attempts as usize);
+                    return page;
+                }
+                Err(MemPoolStatus::FrameReadLatchGrantFailed) => {
+                    attempts += 1;
                     log_warn!("Shared page latch grant failed: {:?}. Will retry", page_key);
-                    std::hint::spin_loop();
+                    std::thread::sleep(base * attempts);
+                    // std::hint::spin_loop();
                 }
                 Err(MemPoolStatus::CannotEvictPage) => {
-                    #[cfg(any(feature = "stat"))]
-                    inc_shared_page_latch_failures();
                     log_warn!("All frames are latched and cannot evict page to read the page: {:?}. Will retry", page_key);
                     // sleep for a while
                     std::thread::sleep(Duration::from_millis(1)); // Backoff because there is a lot of contention in the buffer pool
@@ -1365,7 +1418,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
             Ok(upgraded) => Ok(upgraded),
             Err(_) => {
                 #[cfg(any(feature = "stat"))]
-                inc_exclusive_page_latch_failures();
+                inc_exclusive_page_latch_failures(true);
                 Err(TreeStatus::WriteLatchFailed)
             }
         }

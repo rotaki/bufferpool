@@ -19,8 +19,8 @@ use foster_btree::{
     random::RandomKVs,
 };
 
-const NUM_KEYS: usize = 100000;
-const KEY_SIZE: usize = 8;
+const NUM_KEYS: usize = 500000;
+const KEY_SIZE: usize = 100;
 const VAL_MIN_SIZE: usize = 50;
 const VAL_MAX_SIZE: usize = 100;
 const NUM_THREADS: usize = 10;
@@ -28,11 +28,10 @@ const BP_SIZE: usize = 10000;
 
 fn to_bytes(key: usize) -> Vec<u8> {
     // Pad the key with 0s to make it key_size bytes long.
-    // let mut key_vec = vec![0u8; KEY_SIZE];
-    // let bytes = key.to_be_bytes().to_vec();
-    // key_vec[..bytes.len()].copy_from_slice(&bytes);
-    // key_vec
-    key.to_be_bytes().to_vec()
+    let mut key_vec = vec![0u8; KEY_SIZE];
+    let bytes = key.to_be_bytes().to_vec();
+    key_vec[..bytes.len()].copy_from_slice(&bytes);
+    key_vec
 }
 
 fn gen_foster_btree_in_mem() -> Arc<FosterBtree<DummyEvictionPolicy, InMemPool<DummyEvictionPolicy>>>
@@ -95,7 +94,7 @@ fn bench_random_insertion(c: &mut Criterion) {
     let kvs = RandomKVs::new(NUM_THREADS, NUM_KEYS, VAL_MIN_SIZE, VAL_MAX_SIZE);
 
     let mut group = c.benchmark_group("Random Insertion");
-    // group.sample_size(10);
+    group.sample_size(10);
 
     group.bench_function("In memory Foster BTree Insertion", |b| {
         b.iter(|| insert_into_foster_tree(gen_foster_btree_in_mem(), &kvs));
