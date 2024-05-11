@@ -1,7 +1,7 @@
 use crate::page::{Page, PAGE_SIZE};
 
 // Page layout:
-// 2 byte: total bytes used (slots + records)
+// 2 byte: total bytes used (PAGE_HEADER_SIZE + slots + records)
 // 1 byte: flags (is_root, leftmost, rightmost, has_foster_children)
 // 1 byte: level (0 for leaf)
 // 2 byte: slot count (generally >=2  because of low and high fences)
@@ -583,12 +583,9 @@ impl FosterBtreePage for Page {
     }
 
     fn compact_space(&mut self) {
-        let mut rec_mem_usage = 0;
-        for i in 0..self.slot_count() {
-            if let Some(slot) = self.slot(i) {
-                rec_mem_usage += slot.key_size() + slot.value_size();
-            }
-        }
+        let rec_mem_usage = self.total_bytes_used()
+            - PAGE_HEADER_SIZE as u16
+            - SLOT_SIZE as u16 * self.slot_count();
         let ideal_start_offset = self.len() as u16 - rec_mem_usage;
         let rec_start_offset = self.rec_start_offset();
 
@@ -1041,12 +1038,7 @@ impl FosterBtreePage for Page {
     /// 2. Panics if the page is not empty except for the low and high fences.
     /// 3. Panics if the range of the key-value pairs is out of the range of the page.
     fn append_sorted<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, recs: &Vec<(K, V)>) -> bool {
-        let recs_ref = recs
-            .iter()
-            .map(|(k, v)| (k.as_ref(), v.as_ref()))
-            .collect::<Vec<(&[u8], &[u8])>>();
-
-        if recs_ref.is_empty() {
+        if recs.is_empty() {
             return true;
         }
 
@@ -1056,23 +1048,23 @@ impl FosterBtreePage for Page {
             let last_key = self.get_btree_key(self.high_fence_slot_id() - 1);
             let high_fence = self.get_high_fence();
             if self.low_fence_slot_id() == self.high_fence_slot_id() - 1 {
-                debug_assert!(last_key <= BTreeKey::Normal(recs_ref[0].0));
+                debug_assert!(last_key <= BTreeKey::Normal(recs[0].0.as_ref()));
             } else {
-                debug_assert!(last_key < BTreeKey::Normal(recs_ref[0].0));
+                debug_assert!(last_key < BTreeKey::Normal(recs[0].0.as_ref()));
             }
-            assert!(BTreeKey::Normal(recs_ref[recs_ref.len() - 1].0) < high_fence);
+            assert!(BTreeKey::Normal(recs[recs.len() - 1].0.as_ref()) < high_fence);
             // Check sortedness of the input recs
-            for i in 1..recs_ref.len() {
-                debug_assert!(recs_ref[i - 1].0 < recs_ref[i].0);
+            for i in 1..recs.len() {
+                debug_assert!(recs[i - 1].0.as_ref() < recs[i].0.as_ref());
             }
         }
 
         // Calculate the inserting size and check if the page has enough space.
-        let inserting_size = recs_ref
+        let inserting_size = recs
             .iter()
-            .map(|(k, v)| k.len() + v.len())
+            .map(|(k, v)| k.as_ref().len() + v.as_ref().len())
             .sum::<usize>()
-            + recs_ref.len() * SLOT_SIZE;
+            + recs.len() * SLOT_SIZE;
         if inserting_size > self.contiguous_free_space() as usize {
             if inserting_size > self.total_free_space() as usize {
                 return false;
@@ -1083,9 +1075,9 @@ impl FosterBtreePage for Page {
         }
 
         // Place the key-value pairs in the record space and create the slots.
-        let mut slots = Vec::new();
+        let mut slots = Vec::with_capacity(recs.len() + 1);
         let mut offset = self.rec_start_offset();
-        for (key, value) in recs_ref {
+        for (key, value) in recs.iter().map(|(k, v)| (k.as_ref(), v.as_ref())) {
             let rec_size = key.len() + value.len();
             offset -= rec_size as u16;
             let slot = Slot::new(offset, key.len() as u16, value.len() as u16);
@@ -1145,10 +1137,8 @@ impl FosterBtreePage for Page {
 
         let start = self.slot_offset(to);
         let end = self.slot_offset(self.slot_count());
-        let data = self[start..end].to_vec();
         let new_start = start - (to - from) as usize * SLOT_SIZE;
-        let new_end = end - (to - from) as usize * SLOT_SIZE;
-        self[new_start..new_end].copy_from_slice(&data);
+        self.copy_within(start..end, new_start);
 
         // Update the slot_count of the page
         for _ in from..to {

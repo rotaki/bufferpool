@@ -597,8 +597,8 @@ fn split(this: &mut Page, foster_child: &mut Page) -> Vec<u8> {
     // First, we split the page into two pages with (almost) equal sizes.
     let total_size = this.total_bytes_used();
     let mut half_bytes = total_size / 2;
-    let mut moving_slot_ids = Vec::new();
-    let mut moving_kvs = Vec::new();
+    let mut moving_slot_ids = Vec::with_capacity((this.active_slot_count() as usize) / 2); // Roughly half of the slots will be moved to the foster child.
+    let mut moving_kvs = Vec::with_capacity((this.active_slot_count() as usize) / 2); // Roughly half of the slots will be moved to the foster child.
     for i in (1..this.high_fence_slot_id()).rev() {
         let key = this.get_raw_key(i);
         let val = this.get_val(i);
@@ -853,17 +853,16 @@ fn adopt(parent: &mut Page, child: &mut Page) {
     debug_assert!(!is_foster_relationship(parent, child));
     debug_assert!(child.has_foster_child());
 
-    let foster_child_slot_id = child.foster_child_slot_id();
-    let foster_key = child.get_foster_key().to_owned();
-    let foster_child_page_id = child.get_foster_page_id();
-
-    // Try insert into parent page.
-    let res = parent.insert(&foster_key, &foster_child_page_id.to_be_bytes(), false);
+    // Try insert the foster key and value into parent page.
+    let res = parent.insert(
+        &child.get_foster_key(),
+        &child.get_val(child.foster_child_slot_id()),
+        false,
+    );
     assert!(res);
-    // Remove the foster key from the child page.
-    child.remove_at(foster_child_slot_id);
+    // Make the foster key the high fence of the child page.
+    child.remove_at(child.high_fence_slot_id()); // Remove the high fence to make the foster key the high fence.
     child.set_has_foster_child(false);
-    child.set_high_fence(foster_key.as_ref());
 }
 
 /// Anti-adopt.
@@ -3257,7 +3256,8 @@ mod tests {
         let num_keys = 10000;
         let val_min_size = 50;
         let val_max_size = 100;
-        let kvs = RandomKVs::new(num_keys, val_min_size, val_max_size);
+        let mut kvs = RandomKVs::new(1, num_keys, val_min_size, val_max_size);
+        let kvs = kvs.pop().unwrap();
 
         let btree = setup_btree_empty(bp.clone());
 
@@ -3374,35 +3374,31 @@ mod tests {
         // file.write_all(dot_string.as_bytes()).unwrap();
     }
 
-    #[test]
-    fn test_parallel_insertion_in_memory() {
+    #[rstest]
+    #[case::bp(get_test_bp::<LRUEvictionPolicy>(100))]
+    #[case::in_mem(get_in_mem_pool())]
+    fn test_parallel_insertion<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
         // init_test_logger();
-        let btree = Arc::new(setup_btree_empty(get_in_mem_pool()));
+        let btree = Arc::new(setup_btree_empty(bp.clone()));
         let num_keys = 5000;
         let val_min_size = 50;
         let val_max_size = 100;
-        let kvs = Arc::new(RandomKVs::new(num_keys, val_min_size, val_max_size));
+        let num_threads = 3;
+        let kvs = RandomKVs::new(num_threads, num_keys, val_min_size, val_max_size);
+        let verify_kvs = kvs.clone();
 
         log_trace!("Number of keys: {}", num_keys);
 
         // Use 3 threads to insert keys into the tree.
         // Increment the counter for each key inserted and if the counter is equal to the number of keys, then all keys have been inserted.
-        let counter = Arc::new(AtomicUsize::new(0));
         thread::scope(
             // issue three threads to insert keys into the tree
             |s| {
-                for i in 0..3 {
+                for kvs_i in kvs.iter() {
                     let btree = btree.clone();
-                    let kvs = kvs.clone();
-                    let counter = counter.clone();
                     s.spawn(move || {
                         log_trace!("Spawned");
-                        loop {
-                            let counter = counter.fetch_add(1, Ordering::AcqRel);
-                            if counter >= num_keys {
-                                break;
-                            }
-                            let (key, val) = &kvs[counter];
+                        for (key, val) in kvs_i.iter() {
                             log_trace!("Inserting key {}", key);
                             let key = to_bytes(*key);
                             btree.insert(&key, val).unwrap();
@@ -3413,56 +3409,12 @@ mod tests {
         );
 
         // Check if all keys have been inserted.
-        for (key, val) in kvs.iter() {
-            let key = to_bytes(*key);
-            let current_val = btree.get(&key).unwrap();
-            assert_eq!(current_val, *val);
-        }
-    }
-
-    #[test]
-    fn test_parallel_insertion_disk_based() {
-        // init_test_logger();
-        let btree = Arc::new(setup_btree_empty(get_test_bp::<LRUEvictionPolicy>(100)));
-        let num_keys = 50000;
-        let val_min_size = 50;
-        let val_max_size = 100;
-        let kvs = Arc::new(RandomKVs::new(num_keys, val_min_size, val_max_size));
-
-        log_trace!("Number of keys: {}", num_keys);
-
-        // Use 3 threads to insert keys into the tree.
-        // Increment the counter for each key inserted and if the counter is equal to the number of keys, then all keys have been inserted.
-        let counter = Arc::new(AtomicUsize::new(0));
-        thread::scope(
-            // issue three threads to insert keys into the tree
-            |s| {
-                for i in 0..3 {
-                    let btree = btree.clone();
-                    let kvs = kvs.clone();
-                    let counter = counter.clone();
-                    s.spawn(move || {
-                        log_trace!("Spawned");
-                        loop {
-                            let counter = counter.fetch_add(1, Ordering::AcqRel);
-                            if counter >= num_keys {
-                                break;
-                            }
-                            let (key, val) = &kvs[counter];
-                            log_trace!("Inserting key {}", key);
-                            let key = to_bytes(*key);
-                            btree.insert(&key, val).unwrap();
-                        }
-                    });
-                }
-            },
-        );
-
-        // Check if all keys have been inserted.
-        for (key, val) in kvs.iter() {
-            let key = to_bytes(*key);
-            let current_val = btree.get(&key).unwrap();
-            assert_eq!(current_val, *val);
+        for kvs_i in verify_kvs {
+            for (key, val) in kvs_i.iter() {
+                let key = to_bytes(*key);
+                let current_val = btree.get(&key).unwrap();
+                assert_eq!(current_val, *val);
+            }
         }
     }
 

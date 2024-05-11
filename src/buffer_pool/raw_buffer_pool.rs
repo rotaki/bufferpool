@@ -132,6 +132,7 @@ fn inc_local_bp_all_latched_victim() {
 
 pub struct Frames<T: EvictionPolicy> {
     num_frames: usize,
+    eviction_candidates: [usize; EVICTION_SCAN_DEPTH],
     initial_free_frames: VecDeque<usize>, // Used for initial free frames only
     frames: Vec<BufferFrame<T>>, // The Vec<frames> is fixed size. If not fixed size, then Pin must be used to ensure that the frame does not move when the vector is resized.
 }
@@ -140,6 +141,7 @@ impl<T: EvictionPolicy> Frames<T> {
     pub fn new(num_frames: usize) -> Self {
         Frames {
             num_frames,
+            eviction_candidates: [0; EVICTION_SCAN_DEPTH],
             initial_free_frames: (0..num_frames).collect(),
             frames: (0..num_frames).map(|_| BufferFrame::default()).collect(),
         }
@@ -176,24 +178,23 @@ impl<T: EvictionPolicy> Frames<T> {
             let mut drity_frame_with_min_score = (0, u64::MAX); // (index, score)
 
             // randomly select EVICTION_SCAN_DEPTH frames to scan
-            let mut rand_indices = HashSet::new();
-            for _ in 0..EVICTION_SCAN_DEPTH {
+            for i in 0..EVICTION_SCAN_DEPTH {
                 let rand_idx = gen_random_int(0, self.num_frames - 1);
-                rand_indices.insert(rand_idx);
+                self.eviction_candidates[i] = rand_idx;
             }
-            for i in rand_indices {
-                let frame = &self.frames[i];
+            for i in self.eviction_candidates.iter() {
+                let frame = &self.frames[*i];
                 if frame.is_locked() {
                     continue;
                 }
                 let score = frame.eviction_score();
                 if !frame.is_dirty() {
                     if score < clean_frame_with_min_score.1 {
-                        clean_frame_with_min_score = (i, score);
+                        clean_frame_with_min_score = (*i, score);
                     }
                 } else {
                     if score < drity_frame_with_min_score.1 {
-                        drity_frame_with_min_score = (i, score);
+                        drity_frame_with_min_score = (*i, score);
                     }
                 }
             }

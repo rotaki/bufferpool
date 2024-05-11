@@ -92,31 +92,27 @@ fn run_insertion_bench(num_threads: usize) {
         num_threads > 0,
         "Number of threads should be greater than 0"
     );
-    let btree = gen_foster_btree_on_disk();
-    let original_kvs = RandomKVs::new(NUM_KEYS, VAL_MIN_SIZE, VAL_MAX_SIZE);
-    let mut kvs = original_kvs.partition(num_threads);
+    let btree = gen_foster_btree_in_mem();
+    let kvs = RandomKVs::new(num_threads, NUM_KEYS, VAL_MIN_SIZE, VAL_MAX_SIZE);
 
-    // Check the total #kvs is same as num_keys
     #[cfg(debug_assertions)]
-    {
-        assert_eq!(kvs.len(), num_threads);
-        let total_kvs: usize = kvs.iter().map(|kvs| kvs.len()).sum();
-        assert_eq!(total_kvs, NUM_KEYS);
-    }
+    let orig_kvs = kvs.clone();
 
-    let mut handles = vec![];
-    while let Some(kvs) = kvs.pop_front() {
-        let btree = Arc::clone(&btree);
-        let handle = thread::spawn(move || {
-            for (key, val) in kvs.iter() {
-                let key = to_bytes(*key);
-                btree.insert(&key, val).unwrap();
-            }
-        });
-        handles.push(handle);
-    }
-    for handle in handles {
-        handle.join().unwrap();
+    {
+        let mut handles = vec![];
+        for kvs_i in kvs {
+            let btree = Arc::clone(&btree);
+            let handle = thread::spawn(move || {
+                for (key, val) in kvs_i.iter() {
+                    let key = to_bytes(*key);
+                    btree.insert(&key, val).unwrap();
+                }
+            });
+            handles.push(handle);
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
     }
 
     #[cfg(any(feature = "stat"))]
@@ -128,18 +124,20 @@ fn run_insertion_bench(num_threads: usize) {
 
     // Check if all keys have been inserted.
     #[cfg(debug_assertions)]
-    for (key, val) in original_kvs.iter() {
-        log_trace!("Checking key: {:?}", key);
-        let key = to_bytes(*key);
-        let current_val = btree.get(&key).unwrap();
-        assert_eq!(current_val, *val);
+    for kvs_i in &orig_kvs {
+        for (key, val) in kvs_i.iter() {
+            let key = to_bytes(*key);
+            let res = btree.get(&key).unwrap();
+            assert_eq!(res, *val);
+        }
     }
 }
 
 fn run_insertion_bench_single_thread() {
     // let btree = gen_foster_btree_in_mem();
     let btree = gen_foster_btree_on_disk();
-    let kvs = RandomKVs::new(NUM_KEYS, VAL_MIN_SIZE, VAL_MAX_SIZE);
+    let mut kvs = RandomKVs::new(1, NUM_KEYS, VAL_MIN_SIZE, VAL_MAX_SIZE);
+    let kvs = kvs.pop().unwrap();
     for (key, val) in kvs.iter() {
         let key = to_bytes(*key);
         btree.insert(&key, val).unwrap();

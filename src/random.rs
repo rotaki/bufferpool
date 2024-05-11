@@ -70,41 +70,34 @@ pub struct RandomKVs {
 }
 
 impl RandomKVs {
-    pub fn new(num_keys: usize, val_min_size: usize, val_max_size: usize) -> Self {
+    pub fn new(
+        partitions: usize,
+        num_keys: usize,
+        val_min_size: usize,
+        val_max_size: usize,
+    ) -> Vec<Self> {
         let keys = (0..num_keys).collect::<Vec<usize>>();
         let keys = gen_random_permutation(keys);
-        let vals = (0..num_keys)
-            .map(|_| gen_random_byte_vec(val_min_size, val_max_size))
-            .collect::<Vec<Vec<u8>>>();
-        let kvs = keys
-            .iter()
-            .zip(vals.iter())
-            .map(|(&k, v)| (k, v.clone()))
-            .collect();
-        RandomKVs { kvs }
+        let mut kvs = Vec::with_capacity(partitions);
+        for i in 0..partitions {
+            let start = i * num_keys / partitions;
+            let end = if i == partitions - 1 {
+                num_keys
+            } else {
+                (i + 1) * num_keys / partitions
+            };
+            let mut kvs_i = Vec::with_capacity(end - start);
+            for key in &keys[start..end] {
+                kvs_i.push((*key, gen_random_byte_vec(val_min_size, val_max_size)));
+            }
+            kvs.push(Self { kvs: kvs_i });
+        }
+
+        kvs
     }
 
     pub fn len(&self) -> usize {
         self.kvs.len()
-    }
-
-    pub fn partition(&self, num_partitions: usize) -> VecDeque<Self> {
-        let mut partitions = VecDeque::new();
-        let partition_size = self.len() / num_partitions;
-        let mut start = 0;
-        for i in 0..num_partitions {
-            let end = if i == num_partitions - 1 {
-                self.len()
-            } else {
-                start + partition_size
-            };
-            let partition = RandomKVs {
-                kvs: self.kvs[start..end].to_vec(),
-            };
-            partitions.push_back(partition);
-            start = end;
-        }
-        partitions
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&usize, &Vec<u8>)> {

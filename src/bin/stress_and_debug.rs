@@ -79,7 +79,8 @@ fn test_stress() {
     let num_keys = 100000;
     let val_min_size = 50;
     let val_max_size = 100;
-    let kvs = RandomKVs::new(num_keys, val_min_size, val_max_size);
+    let mut kvs = RandomKVs::new(1, num_keys, val_min_size, val_max_size);
+    let kvs = kvs.pop().unwrap();
 
     let btree = gen_foster_btree_in_mem();
 

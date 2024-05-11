@@ -127,4 +127,11 @@ perf record -e cycles -g --call-graph dwarf ./target/release/main
 hotspot perf.data
 ```
 
-if sudo is needed, set `echo -1 | sudo tee /proc/sys/kernel/perf_event_paranoid` and `echo 0 | sudo tee /proc/sys/kernel/kptr_restrict`
+if sudo is needed, set `echo -1 | sudo tee /proc/sys/kernel/perf_event_paranoid` and `echo 0 | sudo tee /proc/sys/kernel/kptr_restrict`.
+To install `perf`, `apt-get install linux-tools-common linux-tools-generic linux-tools-`uname -r``
+To install `hotspot`, `apt-get install hotspot`
+
+## Heaptrack
+Heaptrack is a heap memory profiler. To install, `apt-get install heaptrack heaptrack-gui`.
+To profile, `heaptrack <binary> <my params>`. This will open a gui to analyze the heap memory usage.
+To open the gui later, `heaptrack_gui <heaptrack.log>`
