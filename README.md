@@ -21,7 +21,8 @@
   * [x] Add thread-unsafe page traversal operator
     * [x] Add consistency checker
   * [x] Fix the buffer pool free frame allocation bug
-  * [] Add memory usage profiler
+  * [x] Add memory usage profiler
+    * [x] Heaptrack for memory profiling
   * [x] Test with bp (limited memory pool with disk offloading)
   * [] Reuse the removed page in merge
   * [x] Add range scan operator
