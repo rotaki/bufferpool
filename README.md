@@ -65,59 +65,58 @@ cargo bench
 
 #### Test scenario
 
-Inserting to a Foster BTree and BTreeMap with 100000 keys and values of size 50-100 bytes.
-```
-    let num_keys = 100000;
-    let val_min_size = 50;
-    let val_max_size = 100;
-```
-
-1. Inserting 100000 keys to Foster BTree single-threaded
-2. Inserting 100000 keys to Foster BTree multi-threaded (10 threads)
-3. Inserting 100000 keys to BTreeMap
-
+Measured the time taken to insert kvs.
 
 ```
-     Running benches/random_insert.rs (target/release/deps/random_insert-1e8dd7ac6b41ff2a)
-Gnuplot not found, using plotters backend
+unique_keys: true,
+num_threads: 3 (when run in parallel),
+num_keys: 500000,
+key_size: 100,
+val_min_size: 50,
+val_max_size: 100,
+bp_size: 10000 (when run on-disk)
+```
+
+
+```Benchmarking Random Insertion/In memory Foster BTree Insertion: Warming up for 3.0000 s
+Warning: Unable to complete 10 samples in 5.0s. You may wish to increase target time to 5.2s.
+Benchmarking Random Insertion/In memory Foster BTree Insertion: Collecting 10 samples in estimated 
 Random Insertion/In memory Foster BTree Insertion
-                        time:   [48.246 ms 48.583 ms 48.990 ms]
-                        change: [-1.4311% -0.6377% +0.3116%] (p = 0.14 > 0.05)
+                        time:   [514.77 ms 516.88 ms 519.51 ms]
+                        change: [-1.0819% -0.3517% +0.3521%] (p = 0.41 > 0.05)
                         No change in performance detected.
-Found 2 outliers among 100 measurements (2.00%)
-  2 (2.00%) high severe
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) high mild
+  1 (10.00%) high severe
+Benchmarking Random Insertion/In memory Foster BTree Insertion Parallel: Collecting 10 samples in e
 Random Insertion/In memory Foster BTree Insertion Parallel
-                        time:   [21.482 ms 21.634 ms 21.789 ms]
-                        change: [-3.2891% -1.8410% -0.5282%] (p = 0.01 < 0.05)
-                        Change within noise threshold.
-Found 2 outliers among 100 measurements (2.00%)
-  2 (2.00%) high mild
+                        time:   [287.53 ms 289.63 ms 292.29 ms]
+                        change: [-0.8400% +0.2885% +1.5403%] (p = 0.65 > 0.05)
+                        No change in performance detected.
+Found 2 outliers among 10 measurements (20.00%)
+  2 (20.00%) high severe
 Benchmarking Random Insertion/On disk Foster BTree Insertion: Warming up for 3.0000 s
-Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 6.7s, or reduce sample count to 70.
+Warning: Unable to complete 10 samples in 5.0s. You may wish to increase target time to 12.2s.
+Benchmarking Random Insertion/On disk Foster BTree Insertion: Collecting 10 samples in estimated 12
 Random Insertion/On disk Foster BTree Insertion
-                        time:   [66.690 ms 67.001 ms 67.341 ms]
-                        change: [-0.0443% +0.5471% +1.2015%] (p = 0.09 > 0.05)
-                        No change in performance detected.
-Found 13 outliers among 100 measurements (13.00%)
-  2 (2.00%) low mild
-  3 (3.00%) high mild
-  8 (8.00%) high severe
-Benchmarking Random Insertion/On disk Foster BTree Insertion Parallel: Warming up for 3.0000 s
-Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 10.0s, or reduce sample count to 40.
-Random Insertion/On disk Foster BTree Insertion Parallel
-                        time:   [99.642 ms 104.53 ms 109.60 ms]
-                        change: [-13.673% -6.7232% +0.9424%] (p = 0.08 > 0.05)
-                        No change in performance detected.
-Found 4 outliers among 100 measurements (4.00%)
-  4 (4.00%) high mild
-Benchmarking Random Insertion/BTreeMap Insertion: Warming up for 3.0000 s
-Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 5.7s, or reduce sample count to 80.
-Random Insertion/BTreeMap Insertion
-                        time:   [56.393 ms 56.881 ms 57.392 ms]
-                        change: [+0.9020% +2.2179% +3.4426%] (p = 0.00 < 0.05)
+                        time:   [1.2123 s 1.2167 s 1.2216 s]
+                        change: [+0.1426% +0.6233% +1.1586%] (p = 0.03 < 0.05)
                         Change within noise threshold.
-Found 2 outliers among 100 measurements (2.00%)
-  2 (2.00%) high mild
+Benchmarking Random Insertion/On disk Foster BTree Insertion Parallel: Warming up for 3.0000 s
+Warning: Unable to complete 10 samples in 5.0s. You may wish to increase target time to 11.3s.
+Benchmarking Random Insertion/On disk Foster BTree Insertion Parallel: Collecting 10 samples in est
+Random Insertion/On disk Foster BTree Insertion Parallel
+                        time:   [1.1191 s 1.1252 s 1.1316 s]
+                        change: [-2.8239% -2.2421% -1.6455%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Benchmarking Random Insertion/BTreeMap Insertion: Collecting 10 samples in estimated 8.6512 s (20 i
+Random Insertion/BTreeMap Insertion
+                        time:   [435.52 ms 442.65 ms 451.68 ms]
+                        change: [-1.6347% +0.1575% +2.0383%] (p = 0.89 > 0.05)
+                        No change in performance detected.
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) high mild
+  1 (10.00%) high severe
 ```
 
 

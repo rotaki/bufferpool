@@ -1,3 +1,4 @@
+pub mod bench_utils;
 pub mod buffer_pool;
 pub mod foster_btree;
 pub mod write_ahead_log;

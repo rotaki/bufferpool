@@ -1,97 +1,11 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use std::{
-    collections::{BTreeMap, VecDeque},
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
-    thread,
-};
+use std::collections::BTreeMap;
 
-use foster_btree::{
-    buffer_pool::{
-        prelude::{
-            get_in_mem_pool, get_test_bp, DummyEvictionPolicy, EvictionPolicy, LRUEvictionPolicy,
-        },
-        BufferPoolForTest, ContainerKey, InMemPool, MemPool,
-    },
-    foster_btree::{FosterBtree, FosterBtreePage},
-    random::RandomKVs,
-};
-
-const NUM_KEYS: usize = 500000;
-const KEY_SIZE: usize = 100;
-const VAL_MIN_SIZE: usize = 50;
-const VAL_MAX_SIZE: usize = 100;
-const NUM_THREADS: usize = 10;
-const BP_SIZE: usize = 10000;
-
-fn to_bytes(key: usize) -> Vec<u8> {
-    // Pad the key with 0s to make it key_size bytes long.
-    let mut key_vec = vec![0u8; KEY_SIZE];
-    let bytes = key.to_be_bytes().to_vec();
-    key_vec[..bytes.len()].copy_from_slice(&bytes);
-    key_vec
-}
-
-fn gen_foster_btree_in_mem() -> Arc<FosterBtree<DummyEvictionPolicy, InMemPool<DummyEvictionPolicy>>>
-{
-    let (db_id, c_id) = (0, 0);
-    let c_key = ContainerKey::new(db_id, c_id);
-    let btree = FosterBtree::new(c_key, get_in_mem_pool());
-    Arc::new(btree)
-}
-
-fn gen_foster_btree_on_disk(
-) -> Arc<FosterBtree<LRUEvictionPolicy, BufferPoolForTest<LRUEvictionPolicy>>> {
-    let (db_id, c_id) = (0, 0);
-    let c_key = ContainerKey::new(db_id, c_id);
-    let btree = FosterBtree::new(c_key, get_test_bp(BP_SIZE));
-    Arc::new(btree)
-}
-
-fn insert_into_foster_tree<E: EvictionPolicy, M: MemPool<E>>(
-    btree: Arc<FosterBtree<E, M>>,
-    kvs: &Vec<RandomKVs>,
-) {
-    for partition in kvs.iter() {
-        for (k, v) in partition.iter() {
-            let key = to_bytes(*k);
-            btree.insert(&key, v).unwrap();
-        }
-    }
-}
-
-fn insert_into_foster_tree_parallel<E: EvictionPolicy, M: MemPool<E>>(
-    btree: Arc<FosterBtree<E, M>>,
-    kvs: &Vec<RandomKVs>,
-) {
-    // Scopeed threads
-    thread::scope(|s| {
-        for partition in kvs.iter() {
-            let btree = btree.clone();
-            s.spawn(move || {
-                for (k, v) in partition.iter() {
-                    let key = to_bytes(*k);
-                    btree.insert(&key, v).unwrap();
-                }
-            });
-        }
-    })
-}
-
-fn insert_into_btree(kvs: &Vec<RandomKVs>) {
-    let mut tree = BTreeMap::new();
-    for partition in kvs.iter() {
-        for (k, v) in partition.iter() {
-            let key = to_bytes(*k);
-            tree.insert(key, v.clone());
-        }
-    }
-}
+use criterion::{criterion_group, criterion_main, Criterion};
+use foster_btree::{bench_utils::*, random::RandomKVs};
 
 fn bench_random_insertion(c: &mut Criterion) {
-    let kvs = RandomKVs::new(NUM_THREADS, NUM_KEYS, VAL_MIN_SIZE, VAL_MAX_SIZE);
+    let kvs = RandomKVs::new(true, 3, 500000, 100, 50, 100);
+    let bp_size = 10000;
 
     let mut group = c.benchmark_group("Random Insertion");
     group.sample_size(10);
@@ -105,15 +19,15 @@ fn bench_random_insertion(c: &mut Criterion) {
     });
 
     group.bench_function("On disk Foster BTree Insertion", |b| {
-        b.iter(|| insert_into_foster_tree(gen_foster_btree_on_disk(), &kvs));
+        b.iter(|| insert_into_foster_tree(gen_foster_btree_on_disk(bp_size), &kvs));
     });
 
     group.bench_function("On disk Foster BTree Insertion Parallel", |b| {
-        b.iter(|| insert_into_foster_tree_parallel(gen_foster_btree_on_disk(), &kvs));
+        b.iter(|| insert_into_foster_tree_parallel(gen_foster_btree_on_disk(bp_size), &kvs));
     });
 
     group.bench_function("BTreeMap Insertion", |b| {
-        b.iter(|| black_box(insert_into_btree(&kvs)));
+        b.iter(|| insert_into_btree_map(BTreeMap::new(), &kvs));
     });
 
     group.finish();

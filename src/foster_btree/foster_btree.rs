@@ -2439,7 +2439,7 @@ mod tests {
         assert_eq!(root.active_slot_count(), 2);
         assert_eq!(root.level(), 1);
         assert_eq!(root.has_foster_child(), false);
-        assert_eq!(root.get_raw_key(1), &[]);
+        assert!(root.get_raw_key(1).is_empty());
         assert_eq!(root.get_val(1), child.get_id().to_be_bytes());
         assert_eq!(root.get_raw_key(2), &foster_key);
         assert_eq!(root.get_val(2), foster_child.get_id().to_be_bytes());
@@ -3307,9 +3307,10 @@ mod tests {
     #[case::in_mem(get_in_mem_pool())]
     fn test_insertion_stress<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
         let num_keys = 10000;
+        let key_size = 8;
         let val_min_size = 50;
         let val_max_size = 100;
-        let mut kvs = RandomKVs::new(1, num_keys, val_min_size, val_max_size);
+        let mut kvs = RandomKVs::new(true, 1, num_keys, key_size, val_min_size, val_max_size);
         let kvs = kvs.pop().unwrap();
 
         let btree = setup_btree_empty(bp.clone());
@@ -3323,17 +3324,15 @@ mod tests {
 
         for (i, (key, val)) in kvs.iter().enumerate() {
             println!(
-                "**************************** Inserting {} key={} **************************",
+                "**************************** Inserting {} key={:?} **************************",
                 i, key
             );
-            let key = to_bytes(*key);
             btree.insert(&key, val).unwrap();
         }
 
         let mut iter = btree.scan(&[], &[]);
         let mut count = 0;
         while let Some((key, current_val)) = iter.next() {
-            let key = from_bytes(&key);
             println!(
                 "**************************** Scanning key {:?} **************************",
                 key
@@ -3346,10 +3345,9 @@ mod tests {
 
         for (key, val) in kvs.iter() {
             println!(
-                "**************************** Getting key {} **************************",
+                "**************************** Getting key {:?} **************************",
                 key
             );
-            let key = to_bytes(*key);
             let current_val = btree.get(&key).unwrap();
             assert_eq!(current_val, *val);
         }
@@ -3357,7 +3355,6 @@ mod tests {
         let mut iter = btree.scan(&[], &[]);
         let mut count = 0;
         while let Some((key, current_val)) = iter.next() {
-            let key = from_bytes(&key);
             println!(
                 "**************************** Scanning key {:?} **************************",
                 key
@@ -3392,20 +3389,18 @@ mod tests {
                 break;
             }
             println!(
-                "**************************** Inserting {} key={} **************************",
+                "**************************** Inserting {} key={:?} **************************",
                 i, key
             );
-            let key = to_bytes(*key);
             btree.insert(&key, val).unwrap();
         }
 
         let (k, v) = &kvs[bug_occurred_at];
         println!(
-            "BUG INSERT ************** Inserting {} key={} **************************",
+            "BUG INSERT ************** Inserting {} key={:?} **************************",
             bug_occurred_at, k
         );
-        let key = to_bytes(*k);
-        btree.insert(&key, &v).unwrap();
+        btree.insert(&k, &v).unwrap();
 
         /*
         for (i, (key, val)) in kvs.iter().enumerate() {
@@ -3434,10 +3429,18 @@ mod tests {
         // init_test_logger();
         let btree = Arc::new(setup_btree_empty(bp.clone()));
         let num_keys = 5000;
+        let key_size = 100;
         let val_min_size = 50;
         let val_max_size = 100;
         let num_threads = 3;
-        let kvs = RandomKVs::new(num_threads, num_keys, val_min_size, val_max_size);
+        let kvs = RandomKVs::new(
+            true,
+            num_threads,
+            num_keys,
+            key_size,
+            val_min_size,
+            val_max_size,
+        );
         let verify_kvs = kvs.clone();
 
         log_trace!("Number of keys: {}", num_keys);
@@ -3452,8 +3455,7 @@ mod tests {
                     s.spawn(move || {
                         log_trace!("Spawned");
                         for (key, val) in kvs_i.iter() {
-                            log_trace!("Inserting key {}", key);
-                            let key = to_bytes(*key);
+                            log_trace!("Inserting key {:?}", key);
                             btree.insert(&key, val).unwrap();
                         }
                     });
@@ -3464,7 +3466,6 @@ mod tests {
         // Check if all keys have been inserted.
         for kvs_i in verify_kvs {
             for (key, val) in kvs_i.iter() {
-                let key = to_bytes(*key);
                 let current_val = btree.get(&key).unwrap();
                 assert_eq!(current_val, *val);
             }
