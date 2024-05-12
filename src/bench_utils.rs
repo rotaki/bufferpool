@@ -179,20 +179,16 @@ pub fn run_bench<E: EvictionPolicy, M: MemPool<E>>(
                     let op = rand.get();
                     match op {
                         TreeOperation::Insert => {
-                            let res = btree.insert(&k, v);
-                            black_box(res);
+                            let _ = btree.insert(&k, v);
                         }
                         TreeOperation::Update => {
-                            let res = btree.update(&k, v);
-                            black_box(res);
+                            let _ = btree.update(&k, v);
                         }
                         TreeOperation::Delete => {
-                            let res = btree.delete(&k);
-                            black_box(res);
+                            let _ = btree.delete(&k);
                         }
                         TreeOperation::Get => {
-                            let res = btree.get(&k);
-                            black_box(res);
+                            let _ = btree.get(&k);
                         }
                     };
                 }

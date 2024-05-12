@@ -19,6 +19,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     ops::{Deref, DerefMut},
     path::PathBuf,
+    result,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -31,6 +32,7 @@ const EVICTION_SCAN_DEPTH: usize = 10;
 #[cfg(feature = "stat")]
 /// Statistics #pages evicted from the buffer pool.
 struct BPStats {
+    hit_rate: UnsafeCell<[usize; 2]>, // [faults, total]
     victim_status: UnsafeCell<[usize; 4]>,
 }
 
@@ -38,27 +40,53 @@ struct BPStats {
 impl BPStats {
     fn new() -> Self {
         BPStats {
+            hit_rate: UnsafeCell::new([0, 0]),            // [faults, total]
             victim_status: UnsafeCell::new([0, 0, 0, 0]), // [free, clean, dirty, all_latched]
         }
     }
 
     fn to_string(&self) -> String {
+        let hit_rate = unsafe { &*self.hit_rate.get() };
         let victim_status = unsafe { &*self.victim_status.get() };
         let mut result = String::new();
+        result.push_str("Buffer Pool Statistics\n");
+        result.push_str("Hit Rate\n");
+        result.push_str(&format!(
+            "Hits  :  {:8} ({:.2}%)\n",
+            hit_rate[1] - hit_rate[0],
+            (hit_rate[1] - hit_rate[0]) as f64 / hit_rate[1] as f64 * 100.0
+        ));
+        result.push_str(&format!(
+            "Faults:  {:8} ({:.2}%)\n",
+            hit_rate[0],
+            hit_rate[0] as f64 / hit_rate[1] as f64 * 100.0
+        ));
+        result.push_str(&format!("Total :  {:8} ({:.2}%)\n", hit_rate[1], 100.0));
+        result.push_str("\n");
         result.push_str("Eviction Statistics\n");
         let op_types = ["Free", "Clean", "Dirty", "All Latched", "Total"];
+        let total = victim_status.iter().sum::<usize>();
         for i in 0..4 {
-            result.push_str(&format!("{:12}: {:6}\n", op_types[i], victim_status[i]));
+            result.push_str(&format!(
+                "{:12}: {:8} ({:.2}%)\n",
+                op_types[i],
+                victim_status[i],
+                (victim_status[i] as f64 / total as f64) * 100.0
+            ));
         }
         result.push_str(&format!(
-            "{:12}: {:6}\n",
-            op_types[4],
-            victim_status.iter().sum::<usize>()
+            "{:12}: {:8} ({:.2}%)\n",
+            op_types[4], total, 100.0
         ));
         result
     }
 
     fn merge(&self, other: &BPStats) {
+        let hit_rate = unsafe { &mut *self.hit_rate.get() };
+        let other_hit_rate = unsafe { &*other.hit_rate.get() };
+        for i in 0..2 {
+            hit_rate[i] += other_hit_rate[i];
+        }
         let victim_status = unsafe { &mut *self.victim_status.get() };
         let other_victim_status = unsafe { &*other.victim_status.get() };
         for i in 0..4 {
@@ -67,6 +95,10 @@ impl BPStats {
     }
 
     fn clear(&self) {
+        let hit_rate = unsafe { &mut *self.hit_rate.get() };
+        for i in 0..2 {
+            hit_rate[i] = 0;
+        }
         let victim_status = unsafe { &mut *self.victim_status.get() };
         for i in 0..4 {
             victim_status[i] = 0;
@@ -96,6 +128,22 @@ thread_local! {
     static LOCAL_BP_STAT: LocalBPStat = LocalBPStat {
         stat: BPStats::new(),
     };
+}
+
+#[cfg(feature = "stat")]
+fn inc_local_bp_lookup() {
+    LOCAL_BP_STAT.with(|stat| {
+        let hit_rate = unsafe { &mut *stat.stat.hit_rate.get() };
+        hit_rate[1] += 1;
+    });
+}
+
+#[cfg(feature = "stat")]
+fn inc_local_bp_faults() {
+    LOCAL_BP_STAT.with(|stat| {
+        let hit_rate = unsafe { &mut *stat.stat.hit_rate.get() };
+        hit_rate[0] += 1;
+    });
 }
 
 #[cfg(feature = "stat")]
@@ -364,6 +412,9 @@ where
         key: PageKey,
         new_page: bool,
     ) -> Result<FrameWriteGuard<T>, MemPoolStatus> {
+        #[cfg(feature = "stat")]
+        inc_local_bp_faults();
+
         let frames = unsafe { &mut *self.frames.get() };
         let id_to_index = unsafe { &mut *self.id_to_index.get() };
         let container_to_file = unsafe { &mut *self.container_to_file.get() };
@@ -447,6 +498,9 @@ where
     }
 
     pub fn get_page_for_write(&self, key: PageKey) -> Result<FrameWriteGuard<T>, MemPoolStatus> {
+        #[cfg(feature = "stat")]
+        inc_local_bp_lookup();
+
         self.latch();
 
         let id_to_index = unsafe { &mut *self.id_to_index.get() };
@@ -480,6 +534,9 @@ where
     }
 
     pub fn get_page_for_read(&self, key: PageKey) -> Result<FrameReadGuard<T>, MemPoolStatus> {
+        #[cfg(feature = "stat")]
+        inc_local_bp_lookup();
+
         self.latch();
         log_debug!("Page read: {}", key);
 
