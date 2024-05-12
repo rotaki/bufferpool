@@ -1,7 +1,7 @@
 use lazy_static::lazy_static;
 use tempfile::TempDir;
 
-use crate::{log, log_debug, random::gen_random_int};
+use crate::{log, log_debug, random::gen_random_int, rwlatch::RwLatch};
 
 use super::{
     buffer_frame::{BufferFrame, FrameReadGuard, FrameWriteGuard},
@@ -327,7 +327,7 @@ impl<T: EvictionPolicy> DerefMut for Frames<T> {
 /// Read-after-write buffer pool.
 pub struct RAWBufferPool<T: EvictionPolicy> {
     path: PathBuf,
-    latch: AtomicBool,
+    latch: RwLatch,
     frames: UnsafeCell<Frames<T>>,
     id_to_index: UnsafeCell<HashMap<PageKey, usize>>, // (c_id, page_id) -> index
     container_to_file: UnsafeCell<HashMap<ContainerKey, FileManager>>,
@@ -366,7 +366,7 @@ where
 
         Ok(RAWBufferPool {
             path: path.as_ref().to_path_buf(),
-            latch: AtomicBool::new(false),
+            latch: RwLatch::default(),
             id_to_index: UnsafeCell::new(HashMap::new()),
             frames: UnsafeCell::new(Frames::new(num_frames)),
             container_to_file: UnsafeCell::new(container),
@@ -395,18 +395,23 @@ where
         frames.choose_victim()
     }
 
-    fn latch(&self) {
-        while self.latch.swap(true, Ordering::Acquire) {
-            // spin
-            std::hint::spin_loop();
-        }
+    fn shared(&self) {
+        self.latch.shared();
     }
 
-    fn unlatch(&self) {
-        self.latch.store(false, Ordering::Release);
+    fn exclusive(&self) {
+        self.latch.exclusive();
     }
 
-    // Invariant: The latch must be held when calling this function
+    fn release_shared(&self) {
+        self.latch.release_shared();
+    }
+
+    fn release_exclusive(&self) {
+        self.latch.release_exclusive();
+    }
+
+    // Invariant: The exclusive latch must be held when calling this function
     fn handle_page_fault(
         &self,
         key: PageKey,
@@ -470,7 +475,7 @@ where
         &self,
         c_key: ContainerKey,
     ) -> Result<FrameWriteGuard<T>, MemPoolStatus> {
-        self.latch();
+        self.exclusive();
 
         let container_to_file = unsafe { &mut *self.container_to_file.get() };
 
@@ -493,19 +498,44 @@ where
             fm.fetch_sub_page_id();
         }
 
-        self.unlatch();
+        self.release_exclusive();
         res
     }
 
     pub fn get_page_for_write(&self, key: PageKey) -> Result<FrameWriteGuard<T>, MemPoolStatus> {
         #[cfg(feature = "stat")]
         inc_local_bp_lookup();
+        log_debug!("Page write: {}", key);
 
-        self.latch();
+        {
+            self.shared();
+            let id_to_index = unsafe { &mut *self.id_to_index.get() };
+            let frames = unsafe { &mut *self.frames.get() };
+
+            if let Some(&index) = id_to_index.get(&key) {
+                let guard = frames[index].try_write(true);
+                if guard.is_some() {
+                    guard
+                        .as_ref()
+                        .unwrap()
+                        .evict_info()
+                        .write()
+                        .unwrap()
+                        .update();
+                }
+                self.release_shared();
+                return guard.ok_or(MemPoolStatus::FrameWriteLatchGrantFailed);
+            }
+
+            self.release_shared();
+        }
+
+        self.exclusive();
 
         let id_to_index = unsafe { &mut *self.id_to_index.get() };
         let frames = unsafe { &mut *self.frames.get() };
 
+        // We need to recheck the id_to_index because another thread might have inserted the page
         let result = match id_to_index.get(&key) {
             Some(&index) => {
                 let guard = frames[index].try_write(true);
@@ -529,16 +559,39 @@ where
                 res
             }
         };
-        self.unlatch();
+        self.release_exclusive();
         result
     }
 
     pub fn get_page_for_read(&self, key: PageKey) -> Result<FrameReadGuard<T>, MemPoolStatus> {
         #[cfg(feature = "stat")]
         inc_local_bp_lookup();
-
-        self.latch();
         log_debug!("Page read: {}", key);
+
+        {
+            self.shared();
+            let id_to_index = unsafe { &mut *self.id_to_index.get() };
+            let frames = unsafe { &mut *self.frames.get() };
+
+            if let Some(&index) = id_to_index.get(&key) {
+                let guard = frames[index].try_read();
+                if guard.is_some() {
+                    guard
+                        .as_ref()
+                        .unwrap()
+                        .evict_info()
+                        .write()
+                        .unwrap()
+                        .update();
+                }
+                self.release_shared();
+                return guard.ok_or(MemPoolStatus::FrameReadLatchGrantFailed);
+            }
+
+            self.release_shared();
+        }
+
+        self.exclusive();
 
         let id_to_index = unsafe { &mut *self.id_to_index.get() };
         let frames = unsafe { &mut *self.frames.get() };
@@ -561,12 +614,12 @@ where
                 .handle_page_fault(key, false)
                 .map(|guard| guard.downgrade()),
         };
-        self.unlatch();
+        self.release_exclusive();
         result
     }
 
     pub fn flush_all(&self) -> Result<(), MemPoolStatus> {
-        self.latch();
+        self.shared();
 
         let frames = unsafe { &*self.frames.get() };
         let container_to_file = unsafe { &mut *self.container_to_file.get() };
@@ -585,13 +638,13 @@ where
                 if let Some(file) = container_to_file.get(&key.c_key) {
                     file.write_page(key.page_id, &*frame)?;
                 } else {
-                    self.unlatch();
+                    self.release_shared();
                     return Err(MemPoolStatus::FileManagerNotFound);
                 }
             }
         }
 
-        self.unlatch();
+        self.release_shared();
         Ok(())
     }
 
@@ -599,7 +652,7 @@ where
     /// This will not flush the dirty pages to disk.
     /// This also removes all the files in disk.
     pub fn reset(&self) {
-        self.latch();
+        self.exclusive();
 
         unsafe { &mut *self.id_to_index.get() }.clear();
         unsafe { &mut *self.container_to_file.get() }.clear();
@@ -625,7 +678,7 @@ where
             std::fs::remove_file(path).unwrap();
         }
 
-        self.unlatch();
+        self.release_exclusive();
     }
 }
 
