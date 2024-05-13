@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use foster_btree::{bench_utils::*, random::RandomKVs};
 
 fn bench_random_insertion(c: &mut Criterion) {
@@ -10,12 +10,26 @@ fn bench_random_insertion(c: &mut Criterion) {
     let mut group = c.benchmark_group("Random Insertion");
     group.sample_size(10);
 
+    group.bench_function("In memory Foster BTree Initial Allocation", |b| {
+        b.iter(|| {
+            let tree = gen_foster_btree_in_mem();
+            black_box(tree);
+        });
+    });
+
     group.bench_function("In memory Foster BTree Insertion", |b| {
         b.iter(|| insert_into_foster_tree(gen_foster_btree_in_mem(), &kvs));
     });
 
     group.bench_function("In memory Foster BTree Insertion Parallel", |b| {
         b.iter(|| insert_into_foster_tree_parallel(gen_foster_btree_in_mem(), &kvs));
+    });
+
+    group.bench_function("On disk Foster BTree Initial Allocation", |b| {
+        b.iter(|| {
+            let tree = gen_foster_btree_on_disk(bp_size);
+            black_box(tree);
+        });
     });
 
     group.bench_function("On disk Foster BTree Insertion", |b| {

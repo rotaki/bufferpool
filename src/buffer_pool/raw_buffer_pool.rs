@@ -526,7 +526,6 @@ where
                 self.release_shared();
                 return guard.ok_or(MemPoolStatus::FrameWriteLatchGrantFailed);
             }
-
             self.release_shared();
         }
 
