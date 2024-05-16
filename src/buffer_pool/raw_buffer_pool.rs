@@ -21,7 +21,7 @@ use std::{
     path::PathBuf,
     result,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
 };
@@ -179,41 +179,114 @@ fn inc_local_bp_all_latched_victim() {
 }
 
 pub struct Frames<T: EvictionPolicy> {
+    head: Mutex<usize>, // Head of the circular buffer. The head contains the most recently used frame. The next frame contains the second most recently used frame, and so on. The previous frame contains the least recently used frame.
     num_frames: usize,
-    eviction_candidates: [usize; EVICTION_SCAN_DEPTH],
-    initial_free_frames: VecDeque<usize>, // Used for initial free frames only
     frames: Vec<BufferFrame<T>>, // The Vec<frames> is fixed size. If not fixed size, then Pin must be used to ensure that the frame does not move when the vector is resized.
 }
 
 impl<T: EvictionPolicy> Frames<T> {
     pub fn new(num_frames: usize) -> Self {
+        let frames: Vec<BufferFrame<T>> = (0..num_frames).map(|_| BufferFrame::default()).collect();
+        for i in 0..num_frames {
+            if i == 0 {
+                frames[i].set_next(1);
+                frames[i].set_prev(num_frames - 1);
+            } else if i == num_frames - 1 {
+                frames[i].set_next(0);
+                frames[i].set_prev(num_frames - 2);
+            } else {
+                frames[i].set_next(i + 1);
+                frames[i].set_prev(i - 1);
+            }
+        }
         Frames {
+            head: Mutex::new(0),
             num_frames,
-            eviction_candidates: [0; EVICTION_SCAN_DEPTH],
-            initial_free_frames: (0..num_frames).collect(),
-            frames: (0..num_frames).map(|_| BufferFrame::default()).collect(),
+            frames,
         }
     }
 
-    pub fn get(&self, index: usize) -> &BufferFrame<T> {
-        &self.frames[index]
-    }
+    /// Move the frame-index to the head of the doubly linked list
+    /// This function gets called by multiple reader threads when the shared latch to the buffer pool is held.
+    /// It assures thread-safety by acquiring the lock on the head.
+    pub fn move_to_head(&self, index: usize) {
+        let mut current_head = self.head.lock().unwrap();
+        let current_tail = self.frames[*current_head].get_prev();
+        if index == *current_head {
+            return;
+        } else if index == current_tail {
+            *current_head = index;
+            return;
+        } else {
+            let frame = &self.frames[index];
+            // First, remove the frame from the doubly linked list
+            let frame_prev_id = frame.get_prev();
+            let frame_next_id = frame.get_next();
+            self.frames[frame_prev_id].set_next(frame_next_id);
+            self.frames[frame_next_id].set_prev(frame_prev_id);
 
-    pub fn get_mut(&mut self, index: usize) -> &mut BufferFrame<T> {
-        &mut self.frames[index]
+            // Then, insert the frame to the head
+            frame.set_prev(current_tail);
+            frame.set_next(*current_head);
+            self.frames[current_tail].set_next(index);
+            self.frames[*current_head].set_prev(index);
+            *current_head = index;
+        }
     }
 
     /// Choose a victim frame to be evicted.
     /// Return the index of the frame and whether the frame is dirty (requires writing back to disk).
     /// If all the frames are locked, then return None.
-    pub fn choose_victim(&mut self) -> Option<(usize, bool)> {
-        if self.num_frames > NUM_FRAMES_LARGE_THRESHOLD {
-            self.choose_victim_num_frames_large()
-        } else {
-            self.choose_victim_num_frames_small()
+    /// This function gets called by a **single-thread** when the exclusive latch to the buffer pool is held.
+    pub fn choose_victim(&self) -> Option<(usize, bool)> {
+        // Find a unlatched frame from the head
+        let mut checked = *self.head.lock().unwrap();
+        let mut count = 0;
+        let mut dirty_victim = None;
+        loop {
+            if count == EVICTION_SCAN_DEPTH {
+                if let Some(idx) = dirty_victim {
+                    return Some((idx, true));
+                } else {
+                    return None;
+                }
+            }
+            count += 1;
+            let current_idx = self.frames[checked].get_prev();
+            if self.frames[current_idx].is_locked() {
+                checked = current_idx;
+                continue;
+            } else if self.frames[current_idx].is_dirty() {
+                if dirty_victim.is_none() {
+                    dirty_victim = Some(current_idx);
+                }
+                checked = current_idx;
+                continue;
+            } else {
+                return Some((current_idx, false));
+            }
         }
     }
 
+    #[cfg(test)]
+    pub fn print_doubly_linked_list(&self) -> String {
+        let mut current = *self.head.lock().unwrap();
+        let mut count = 0;
+        let mut res = String::new();
+        res.push_str("[");
+        loop {
+            res.push_str(&format!("{}->", current));
+            count += 1;
+            current = self.frames[current].get_next();
+            if current == *self.head.lock().unwrap() {
+                res.push_str(&format!("{}], count: {}", current, count));
+                break;
+            }
+        }
+        res
+    }
+
+    /*
     fn choose_victim_num_frames_large(&mut self) -> Option<(usize, bool)> {
         if !self.initial_free_frames.is_empty() {
             #[cfg(feature = "stat")]
@@ -308,6 +381,7 @@ impl<T: EvictionPolicy> Frames<T> {
             }
         }
     }
+    */
 }
 
 impl<T: EvictionPolicy> Deref for Frames<T> {
@@ -315,12 +389,6 @@ impl<T: EvictionPolicy> Deref for Frames<T> {
 
     fn deref(&self) -> &Self::Target {
         &self.frames
-    }
-}
-
-impl<T: EvictionPolicy> DerefMut for Frames<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.frames
     }
 }
 
@@ -456,11 +524,6 @@ where
 
         id_to_index.insert(key, index);
         *guard.key() = Some(key);
-        {
-            let mut evict_info = guard.evict_info().write().unwrap();
-            evict_info.reset();
-            evict_info.update();
-        }
 
         log_debug!("Page loaded: key: {}", key);
         Ok(guard)
@@ -515,13 +578,7 @@ where
             if let Some(&index) = id_to_index.get(&key) {
                 let guard = frames[index].try_write(true);
                 if guard.is_some() {
-                    guard
-                        .as_ref()
-                        .unwrap()
-                        .evict_info()
-                        .write()
-                        .unwrap()
-                        .update();
+                    frames.move_to_head(index);
                 }
                 self.release_shared();
                 return guard.ok_or(MemPoolStatus::FrameWriteLatchGrantFailed);
@@ -539,13 +596,7 @@ where
             Some(&index) => {
                 let guard = frames[index].try_write(true);
                 if guard.is_some() {
-                    guard
-                        .as_ref()
-                        .unwrap()
-                        .evict_info()
-                        .write()
-                        .unwrap()
-                        .update();
+                    frames.move_to_head(index);
                 }
                 guard.ok_or(MemPoolStatus::FrameWriteLatchGrantFailed)
             }
@@ -575,13 +626,7 @@ where
             if let Some(&index) = id_to_index.get(&key) {
                 let guard = frames[index].try_read();
                 if guard.is_some() {
-                    guard
-                        .as_ref()
-                        .unwrap()
-                        .evict_info()
-                        .write()
-                        .unwrap()
-                        .update();
+                    frames.move_to_head(index);
                 }
                 self.release_shared();
                 return guard.ok_or(MemPoolStatus::FrameReadLatchGrantFailed);
@@ -599,13 +644,7 @@ where
             Some(&index) => {
                 let guard = frames[index].try_read();
                 if guard.is_some() {
-                    guard
-                        .as_ref()
-                        .unwrap()
-                        .evict_info()
-                        .write()
-                        .unwrap()
-                        .update();
+                    frames.move_to_head(index);
                 }
                 guard.ok_or(MemPoolStatus::FrameReadLatchGrantFailed)
             }
@@ -658,7 +697,7 @@ where
 
         let frames = unsafe { &mut *self.frames.get() };
 
-        for frame in frames.iter_mut() {
+        for frame in frames.iter() {
             let frame = loop {
                 if let Some(guard) = frame.try_write(false) {
                     break guard;
@@ -668,8 +707,6 @@ where
             };
             frame.clear();
         }
-
-        frames.initial_free_frames = (0..frames.len()).collect();
 
         for entry in std::fs::read_dir(&self.path).unwrap() {
             let entry = entry.unwrap();

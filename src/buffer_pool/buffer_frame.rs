@@ -7,30 +7,32 @@ use std::{
     fmt::Debug,
     ops::{Deref, DerefMut},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         RwLock,
     },
 };
 
 pub struct BufferFrame<T: EvictionPolicy> {
+    next: AtomicUsize, // Can be updated when BufferPool latch is held
+    prev: AtomicUsize, // Can be updated when BufferPool latch is held
     latch: RwLatch,
     is_dirty: AtomicBool, // Can be updated even when ReadGuard is held (see flush_all() in buffer_pool.rs)
-    evict_info: RwLock<T>, // Can be updated even when ReadGuard is held (see get_page_for_read() in buffer_pool.rs)
-    pub key: UnsafeCell<Option<PageKey>>, // Can only be updated when WriteGuard is held
+    key: UnsafeCell<Option<PageKey>>, // Can only be updated when WriteGuard is held
     page: UnsafeCell<Page>, // Can only be updated when WriteGuard is held
     // phantom pinned to prevent moving out of the buffer frame
-    _phantom: std::marker::PhantomPinned,
+    _phantom: std::marker::PhantomData<T>,
 }
 
 impl<T: EvictionPolicy> Default for BufferFrame<T> {
     fn default() -> Self {
         BufferFrame {
+            next: AtomicUsize::new(0),
+            prev: AtomicUsize::new(0),
             latch: RwLatch::default(),
             is_dirty: AtomicBool::new(false),
             key: UnsafeCell::new(None),
-            evict_info: RwLock::new(T::new()),
             page: UnsafeCell::new(Page::new_empty()),
-            _phantom: std::marker::PhantomPinned,
+            _phantom: std::marker::PhantomData,
         }
     }
 }
@@ -38,6 +40,22 @@ impl<T: EvictionPolicy> Default for BufferFrame<T> {
 unsafe impl<T: EvictionPolicy> Sync for BufferFrame<T> {}
 
 impl<T: EvictionPolicy> BufferFrame<T> {
+    pub fn get_next(&self) -> usize {
+        self.next.load(Ordering::Acquire)
+    }
+
+    pub fn set_next(&self, next: usize) {
+        self.next.store(next, Ordering::Release);
+    }
+
+    pub fn get_prev(&self) -> usize {
+        self.prev.load(Ordering::Acquire)
+    }
+
+    pub fn set_prev(&self, prev: usize) {
+        self.prev.store(prev, Ordering::Release);
+    }
+
     pub fn is_locked(&self) -> bool {
         self.latch.is_locked()
     }
@@ -52,10 +70,6 @@ impl<T: EvictionPolicy> BufferFrame<T> {
 
     pub fn is_dirty(&self) -> bool {
         self.is_dirty.load(Ordering::Relaxed)
-    }
-
-    pub fn eviction_score(&self) -> u64 {
-        self.evict_info.read().unwrap().score(self)
     }
 
     pub fn read(&self) -> FrameReadGuard<T> {
@@ -125,10 +139,6 @@ impl<'a, T: EvictionPolicy> FrameReadGuard<'a, T> {
         &self.buffer_frame.is_dirty
     }
 
-    pub fn evict_info(&self) -> &RwLock<T> {
-        &self.buffer_frame.evict_info
-    }
-
     pub fn try_upgrade(
         self,
         make_dirty: bool,
@@ -189,10 +199,6 @@ impl<'a, T: EvictionPolicy> FrameWriteGuard<'a, T> {
         &self.buffer_frame.is_dirty
     }
 
-    pub fn evict_info(&self) -> &RwLock<T> {
-        &self.buffer_frame.evict_info
-    }
-
     pub fn downgrade(self) -> FrameReadGuard<'a, T> {
         self.buffer_frame.latch.downgrade();
         self.downgraded.store(true, Ordering::Relaxed);
@@ -204,7 +210,6 @@ impl<'a, T: EvictionPolicy> FrameWriteGuard<'a, T> {
 
     pub fn clear(&self) {
         self.buffer_frame.is_dirty.store(false, Ordering::Release);
-        self.buffer_frame.evict_info.write().unwrap().reset();
         self.key().take();
     }
 }

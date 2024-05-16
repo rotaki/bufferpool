@@ -14,18 +14,17 @@ pub use in_mem_pool::InMemPool;
 pub use mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, PageKey};
 pub use raw_buffer_pool::RAWBufferPool;
 use tempfile::TempDir;
-pub use war_buffer_pool::WARBufferPool;
 
 pub struct BufferPoolForTest<E: EvictionPolicy> {
     pub _temp_dir: TempDir,
-    pub bp: WARBufferPool<E>,
+    pub bp: RAWBufferPool<E>,
 }
 
 impl<E: EvictionPolicy> BufferPoolForTest<E> {
     pub fn new(num_frames: usize) -> Self {
         let temp_dir = TempDir::new().unwrap();
         std::fs::create_dir(temp_dir.path().join("0")).unwrap();
-        let bp = WARBufferPool::new(temp_dir.path(), num_frames).unwrap();
+        let bp = RAWBufferPool::new(temp_dir.path(), num_frames).unwrap();
         Self {
             _temp_dir: temp_dir,
             bp,
