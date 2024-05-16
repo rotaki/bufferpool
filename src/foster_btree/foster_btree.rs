@@ -1167,6 +1167,11 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
                 Err(MemPoolStatus::FrameWriteLatchGrantFailed) => {
                     std::hint::spin_loop();
                 }
+                Err(MemPoolStatus::CannotEvictPage) => {
+                    log_warn!("All frames are latched and cannot evict page to read the page: {:?}. Will retry", page_key);
+                    // sleep for a while
+                    std::thread::sleep(Duration::from_millis(1)); // Backoff because there is a lot of contention in the buffer pool
+                }
                 Err(e) => {
                     panic!("Unexpected error: {:?}", e);
                 }
