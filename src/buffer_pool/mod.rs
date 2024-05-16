@@ -1,9 +1,9 @@
 mod buffer_frame;
-// mod buffer_pool;
 mod eviction_policy;
 mod in_mem_pool;
 mod mem_pool_trait;
 mod raw_buffer_pool;
+mod war_buffer_pool;
 
 use std::sync::Arc;
 
@@ -14,17 +14,18 @@ pub use in_mem_pool::InMemPool;
 pub use mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, PageKey};
 pub use raw_buffer_pool::RAWBufferPool;
 use tempfile::TempDir;
+pub use war_buffer_pool::WARBufferPool;
 
 pub struct BufferPoolForTest<E: EvictionPolicy> {
     pub _temp_dir: TempDir,
-    pub bp: RAWBufferPool<E>,
+    pub bp: WARBufferPool<E>,
 }
 
 impl<E: EvictionPolicy> BufferPoolForTest<E> {
     pub fn new(num_frames: usize) -> Self {
         let temp_dir = TempDir::new().unwrap();
         std::fs::create_dir(temp_dir.path().join("0")).unwrap();
-        let bp = RAWBufferPool::new(temp_dir.path(), num_frames).unwrap();
+        let bp = WARBufferPool::new(temp_dir.path(), num_frames).unwrap();
         Self {
             _temp_dir: temp_dir,
             bp,
@@ -35,10 +36,10 @@ impl<E: EvictionPolicy> BufferPoolForTest<E> {
         self.bp.eviction_stats()
     }
 
-    #[cfg(test)]
-    pub fn choose_victim(&self) -> Option<(usize, bool)> {
-        self.bp.choose_victim()
-    }
+    // #[cfg(test)]
+    // pub fn choose_victim(&self) -> Option<(usize, bool)> {
+    //     self.bp.choose_victim()
+    // }
 }
 
 impl<E: EvictionPolicy> MemPool<E> for BufferPoolForTest<E> {
@@ -63,6 +64,11 @@ impl<E: EvictionPolicy> MemPool<E> for BufferPoolForTest<E> {
     #[inline]
     fn reset(&self) {
         self.bp.reset();
+    }
+
+    #[cfg(test)]
+    fn run_checks(&self) {
+        self.bp.run_checks();
     }
 }
 

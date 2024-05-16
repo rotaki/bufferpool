@@ -62,7 +62,12 @@ impl FileManager {
 
     pub fn read_page(&self, page_id: PageId, page: &mut Page) -> Result<(), FMStatus> {
         let mut file = self.file.lock().unwrap();
-        log_trace!("Reading page: {} from file: {:?}", page_id, self.path);
+        log_trace!(
+            "Reading page: {} from file: {:?} at offset: {}",
+            page_id,
+            self.path,
+            page_id * PAGE_SIZE as PageId
+        );
         file.seek(SeekFrom::Start((page_id * PAGE_SIZE as PageId) as u64))
             .map_err(|_| FMStatus::SeekError)?;
         file.read_exact(page.get_raw_bytes_mut())
@@ -73,7 +78,13 @@ impl FileManager {
 
     pub fn write_page(&self, page_id: PageId, page: &Page) -> Result<(), FMStatus> {
         let mut file = self.file.lock().unwrap();
-        log_trace!("Writing page: {} to file: {:?}", page_id, self.path);
+        log_trace!(
+            "Writing page: {} to file {:?} at offset: {}",
+            page_id,
+            self.path,
+            page_id * PAGE_SIZE as PageId
+        );
+        debug_assert!(page.get_id() == page_id, "Page id mismatch");
         file.seek(SeekFrom::Start((page_id * PAGE_SIZE as PageId) as u64))
             .map_err(|_| FMStatus::SeekError)?;
         file.write_all(page.get_raw_bytes())
@@ -81,7 +92,7 @@ impl FileManager {
         Ok(())
     }
 
-    pub fn flush(&mut self) -> Result<(), FMStatus> {
+    pub fn flush(&self) -> Result<(), FMStatus> {
         let mut file = self.file.lock().unwrap();
         log_trace!("Flushing file: {:?}", self.path);
         file.flush().map_err(|_| FMStatus::FlushError)

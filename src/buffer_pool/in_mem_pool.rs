@@ -146,6 +146,13 @@ impl<T: EvictionPolicy> MemPool<T> for InMemPool<T> {
         container_page_count.clear();
         self.release_exclusive();
     }
+
+    #[cfg(test)]
+    fn run_checks(&self) {
+        self.check_all_frames_unlatched();
+        self.check_id_to_index();
+        self.check_frame_id_and_page_id_match();
+    }
 }
 
 #[cfg(test)]

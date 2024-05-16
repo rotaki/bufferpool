@@ -16,7 +16,7 @@ pub struct BufferFrame<T: EvictionPolicy> {
     latch: RwLatch,
     is_dirty: AtomicBool, // Can be updated even when ReadGuard is held (see flush_all() in buffer_pool.rs)
     evict_info: RwLock<T>, // Can be updated even when ReadGuard is held (see get_page_for_read() in buffer_pool.rs)
-    key: UnsafeCell<Option<PageKey>>, // Can only be updated when WriteGuard is held
+    pub key: UnsafeCell<Option<PageKey>>, // Can only be updated when WriteGuard is held
     page: UnsafeCell<Page>, // Can only be updated when WriteGuard is held
     // phantom pinned to prevent moving out of the buffer frame
     _phantom: std::marker::PhantomPinned,
@@ -77,6 +77,10 @@ impl<T: EvictionPolicy> BufferFrame<T> {
         }
     }
 
+    /// Acquires an exclusive latch on the buffer frame.
+    /// If `make_dirty` is true, the dirty flag is set to true.
+    /// If `make_dirty` is false, the dirty flag is not modified. This
+    /// does not mean that this function will make the dirty flag false.
     pub fn write(&self, make_dirty: bool) -> FrameWriteGuard<T> {
         self.latch.exclusive();
         if make_dirty {

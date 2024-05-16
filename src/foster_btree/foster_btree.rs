@@ -1054,7 +1054,7 @@ fn ascend_root(root: &mut Page, child: &mut Page) {
     }
 }
 
-fn print_page(p: &Page) {
+pub fn print_page(p: &Page) {
     println!(
         "----------------- Page ID: {} -----------------",
         p.get_id()
@@ -1343,6 +1343,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
         loop {
             let this_page = current_page;
             log_trace!("Traversal for read, page: {}", this_page.get_id());
+            // print_page(&this_page);
             if this_page.is_leaf() {
                 if this_page.has_foster_child() && this_page.get_foster_key() <= key {
                     // Check whether the foster child should be traversed.
@@ -1439,8 +1440,8 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
                         attempts += 1;
                         log_trace!(
                             "Failed to acquire write lock (#attempt {}). Sleeping for {:?}",
-                            attmepts,
-                            base * attmepts
+                            attempts,
+                            base * attempts
                         );
                         std::thread::sleep(base * attempts);
                     }
@@ -2986,6 +2987,7 @@ mod tests {
             );
             let key = to_bytes(i);
             btree.insert(&key, &val).unwrap();
+            btree.mem_pool.run_checks()
         }
         for i in 0..10 {
             println!(

@@ -8,7 +8,6 @@ use std::{
 };
 
 use clap::Parser;
-use criterion::black_box;
 use serde::{Deserialize, Serialize};
 
 use crate::{

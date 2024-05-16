@@ -6,7 +6,7 @@ use crate::{file_manager::FMStatus, page::PageId};
 pub type DatabaseId = u16;
 pub type ContainerId = u16;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ContainerKey {
     pub db_id: DatabaseId,
     pub c_id: ContainerId,
@@ -24,7 +24,7 @@ impl std::fmt::Display for ContainerKey {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PageKey {
     pub c_key: ContainerKey,
     pub page_id: PageId,
@@ -50,6 +50,7 @@ pub enum MemPoolStatus {
     FrameReadLatchGrantFailed,
     FrameWriteLatchGrantFailed,
     CannotEvictPage,
+    WriteBufferFull,
 }
 
 impl From<FMStatus> for MemPoolStatus {
@@ -73,6 +74,7 @@ impl std::fmt::Display for MemPoolStatus {
             MemPoolStatus::CannotEvictPage => {
                 write!(f, "[MP] All frames are latched and cannot evict page")
             }
+            MemPoolStatus::WriteBufferFull => write!(f, "[MP] Write buffer is full"),
         }
     }
 }
@@ -101,4 +103,7 @@ pub trait MemPool<T: EvictionPolicy>: Sync + Send {
     /// This function will reset the memory pool to its initial state.
     /// This function is useful for testing purposes.
     fn reset(&self);
+
+    #[cfg(test)]
+    fn run_checks(&self);
 }
