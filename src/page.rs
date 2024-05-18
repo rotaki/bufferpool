@@ -25,7 +25,7 @@ impl Page {
         self.0.copy_from_slice(&other.0);
     }
 
-    pub fn copy_data(&mut self, other: &Page) {
+    pub fn copy_data_only(&mut self, other: &Page) {
         self.0[BASE_PAGE_HEADER_SIZE..].copy_from_slice(&other.0[BASE_PAGE_HEADER_SIZE..]);
     }
 

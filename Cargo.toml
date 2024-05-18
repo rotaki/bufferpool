@@ -29,6 +29,8 @@ criterion = { version = "0.5", features = ["html_reports"]}
 wasm-bindgen = "0.2"
 rstest = "0.19"
 clap = {version = "4.5", features = ["derive"]}
+io-uring = "0.6"
+libc = "0.2"
 
 # For perf
 [target.x86_64-unknown-linux-gnu]
