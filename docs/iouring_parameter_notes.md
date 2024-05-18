@@ -134,3 +134,34 @@ Found 2 outliers among 10 measurements (20.00%)
   1 (10.00%) high mild
   1 (10.00%) high severe
 ```
+
+
+## IO-Uring with Registering file and buffer (3-threads)
+
+```text
+Random Insertion/In memory Foster BTree Initial Allocation
+                        time:   [194.06 ns 194.51 ns 195.27 ns]
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) high mild
+  1 (10.00%) high severe
+Benchmarking Random Insertion/In memory Foster BTree Insertion: Warming up for 3.0000 s
+Warning: Unable to complete 10 samples in 5.0s. You may wish to increase target time to 5.4s.
+Random Insertion/In memory Foster BTree Insertion
+                        time:   [520.10 ms 523.73 ms 527.68 ms]
+Random Insertion/In memory Foster BTree Insertion Parallel
+                        time:   [295.38 ms 297.36 ms 299.65 ms]
+Random Insertion/On disk Foster BTree Initial Allocation
+                        time:   [15.419 ms 15.443 ms 15.491 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+Benchmarking Random Insertion/On disk Foster BTree Insertion: Warming up for 3.0000 s
+Warning: Unable to complete 10 samples in 5.0s. You may wish to increase target time to 12.0s.
+Random Insertion/On disk Foster BTree Insertion
+                        time:   [1.1960 s 1.2067 s 1.2174 s]
+Benchmarking Random Insertion/On disk Foster BTree Insertion Parallel: Warming up for 3.0000 s
+Warning: Unable to complete 10 samples in 5.0s. You may wish to increase target time to 9.5s.
+Random Insertion/On disk Foster BTree Insertion Parallel
+                        time:   [938.91 ms 946.70 ms 955.47 ms]
+Random Insertion/BTreeMap Insertion
+                        time:   [437.69 ms 439.52 ms 441.55 ms]
+```
