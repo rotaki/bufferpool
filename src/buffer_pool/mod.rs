@@ -35,6 +35,10 @@ impl<E: EvictionPolicy> BufferPoolForTest<E> {
         self.bp.eviction_stats()
     }
 
+    pub fn file_stats(&self) -> String {
+        self.bp.file_stats()
+    }
+
     #[cfg(test)]
     pub fn choose_victim(&self) -> Option<(usize, bool)> {
         self.bp.choose_victim()

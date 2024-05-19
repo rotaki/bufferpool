@@ -22,6 +22,8 @@ fn main() {
     {
         println!("BP stats: ");
         println!("{}", tree.mem_pool.eviction_stats());
+        println!("File stats: ");
+        println!("{}", tree.mem_pool.file_stats());
         println!("Btree op stats: ");
         println!("{}", tree.op_stats());
         println!("Btree page stats: ");

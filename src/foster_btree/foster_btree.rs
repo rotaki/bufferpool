@@ -129,7 +129,7 @@ impl OpByte {
 }
 
 #[cfg(any(feature = "stat"))]
-struct OpStat {
+struct FosterBTreeStat {
     sm_trigger: UnsafeCell<[usize; 7]>, // Number of times the structure modification is triggered
     sm_success: UnsafeCell<[usize; 7]>, // Number of times the structure modification is successful
     additional_traversals: UnsafeCell<[usize; 11]>, // Number of additional traversals for exclusive page latch
@@ -138,9 +138,9 @@ struct OpStat {
 }
 
 #[cfg(any(feature = "stat"))]
-impl OpStat {
+impl FosterBTreeStat {
     pub fn new() -> Self {
-        OpStat {
+        FosterBTreeStat {
             sm_trigger: UnsafeCell::new([0; 7]),
             sm_success: UnsafeCell::new([0; 7]),
             additional_traversals: UnsafeCell::new([0; 11]),
@@ -287,7 +287,7 @@ impl OpStat {
         result
     }
 
-    pub fn merge(&self, other: &OpStat) {
+    pub fn merge(&self, other: &FosterBTreeStat) {
         let sm_trigger = unsafe { &mut *self.sm_trigger.get() };
         let sm_success = unsafe { &mut *self.sm_success.get() };
         let other_sm_trigger = unsafe { &*other.sm_trigger.get() };
@@ -336,7 +336,7 @@ impl OpStat {
 
 #[cfg(any(feature = "stat"))]
 struct LocalStat {
-    pub stat: OpStat,
+    pub stat: FosterBTreeStat,
 }
 
 #[cfg(any(feature = "stat"))]
@@ -348,13 +348,13 @@ impl Drop for LocalStat {
 
 #[cfg(any(feature = "stat"))]
 lazy_static! {
-    static ref GLOBAL_STAT: Mutex<OpStat> = Mutex::new(OpStat::new());
+    static ref GLOBAL_STAT: Mutex<FosterBTreeStat> = Mutex::new(FosterBTreeStat::new());
 }
 
 #[cfg(any(feature = "stat"))]
 thread_local! {
     static LOCAL_STAT: LocalStat = LocalStat {
-        stat: OpStat::new(),
+        stat: FosterBTreeStat::new(),
     };
 }
 

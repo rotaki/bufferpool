@@ -371,6 +371,24 @@ where
         }
     }
 
+    pub fn file_stats(&self) -> String {
+        #[cfg(feature = "stat")]
+        {
+            let container_to_file = unsafe { &*self.container_to_file.get() };
+            let mut result = String::new();
+            for (c_key, file) in container_to_file.iter() {
+                result.push_str(&format!("Container: {:?}\n", c_key));
+                result.push_str(&file.get_stats());
+                result.push_str("\n");
+            }
+            result
+        }
+        #[cfg(not(feature = "stat"))]
+        {
+            "Stat is disabled".to_string()
+        }
+    }
+
     #[cfg(test)]
     pub fn choose_victim(&self) -> Option<(usize, bool)> {
         let frames = unsafe { &mut *self.frames.get() };

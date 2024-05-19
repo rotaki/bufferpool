@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
 
 use io_uring::{opcode, types, IoUring, Submitter};
+use lazy_static::lazy_static;
 use libc::iovec;
 use std::hash::{Hash, Hasher};
 use std::os::unix::io::AsRawFd;
@@ -75,6 +76,10 @@ impl FileManager {
 
     pub fn get_num_pages(&self) -> PageId {
         self.num_pages.load(Ordering::Acquire)
+    }
+
+    pub fn get_stats(&self) -> String {
+        "Stat is disabled".to_string()
     }
 
     pub fn read_page(&self, page_id: PageId, page: &mut Page) -> Result<(), FMStatus> {
@@ -146,6 +151,22 @@ impl FileManager {
         self.num_pages.load(Ordering::Acquire)
     }
 
+    pub fn get_stats(&self) -> String {
+        #[cfg(all(target_os = "linux", feature = "stat"))]
+        {
+            let stats = GLOBAL_FILE_STAT.lock().unwrap();
+            LOCAL_STAT.with(|local_stat| {
+                stats.merge(&local_stat.stat);
+                local_stat.stat.clear();
+            });
+            return stats.to_string();
+        }
+        #[cfg(any(target_os = "linux", not(feature = "stat")))]
+        {
+            "Stat is disabled".to_string()
+        }
+    }
+
     pub fn read_page(&self, page_id: PageId, page: &mut Page) -> Result<(), FMStatus> {
         log_trace!("Reading page: {} from file: {:?}", page_id, self.path);
         let mut file_inner = self.file_inner.lock().unwrap();
@@ -163,6 +184,153 @@ impl FileManager {
         let mut file_inner = self.file_inner.lock().unwrap();
         file_inner.flush_page()
     }
+}
+
+#[cfg(all(target_os = "linux", feature = "stat"))]
+struct FileStat {
+    read: UnsafeCell<[usize; 11]>, // Number of reads completed. The index is the wait count.
+    write: UnsafeCell<[usize; 11]>, // Number of writes completed. The index is the wait count.
+}
+
+#[cfg(all(target_os = "linux", feature = "stat"))]
+impl FileStat {
+    pub fn new() -> Self {
+        FileStat {
+            read: UnsafeCell::new([0; 11]),
+            write: UnsafeCell::new([0; 11]),
+        }
+    }
+
+    pub fn to_string(&self) -> String {
+        let read = unsafe { &*self.read.get() };
+        let write = unsafe { &*self.write.get() };
+        let mut result = String::new();
+        result.push_str("File page async read stats: \n");
+        let mut sep = "";
+        let total_count = read.iter().sum::<usize>();
+        let mut cumulative_count = 0;
+        for i in 0..11 {
+            result.push_str(sep);
+            cumulative_count += read[i];
+            if i == 10 {
+                result.push_str(&format!(
+                    "{:2}+: {:6} (p: {:6.2}%, c: {:6})",
+                    i,
+                    read[i],
+                    read[i] as f64 / total_count as f64 * 100.0,
+                    cumulative_count
+                ));
+            } else {
+                result.push_str(&format!(
+                    "{:3}: {:6} (p: {:6.2}%, c: {:6})",
+                    i,
+                    read[i],
+                    read[i] as f64 / total_count as f64 * 100.0,
+                    cumulative_count
+                ));
+            }
+            sep = "\n";
+        }
+        result.push_str("\n\n");
+        result.push_str("File page async write stats: \n");
+        sep = "";
+        let total_count = write.iter().sum::<usize>();
+        cumulative_count = 0;
+        for i in 0..11 {
+            result.push_str(sep);
+            cumulative_count += write[i];
+            if i == 10 {
+                result.push_str(&format!(
+                    "{:2}+: {:6} (p: {:6.2}%, c: {:6})",
+                    i,
+                    write[i],
+                    write[i] as f64 / total_count as f64 * 100.0,
+                    cumulative_count
+                ));
+            } else {
+                result.push_str(&format!(
+                    "{:3}: {:6} (p: {:6.2}%, c: {:6})",
+                    i,
+                    write[i],
+                    write[i] as f64 / total_count as f64 * 100.0,
+                    cumulative_count
+                ));
+            }
+            sep = "\n";
+        }
+        result
+    }
+
+    pub fn merge(&self, other: &FileStat) {
+        let read = unsafe { &mut *self.read.get() };
+        let other_read = unsafe { &*other.read.get() };
+        let write = unsafe { &mut *self.write.get() };
+        let other_write = unsafe { &*other.write.get() };
+        for i in 0..11 {
+            read[i] += other_read[i];
+            write[i] += other_write[i];
+        }
+    }
+
+    pub fn clear(&self) {
+        let read = unsafe { &mut *self.read.get() };
+        let write = unsafe { &mut *self.write.get() };
+        for i in 0..11 {
+            read[i] = 0;
+            write[i] = 0;
+        }
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "stat"))]
+struct LocalStat {
+    pub stat: FileStat,
+}
+
+#[cfg(all(target_os = "linux", feature = "stat"))]
+impl Drop for LocalStat {
+    fn drop(&mut self) {
+        let global_stat = GLOBAL_FILE_STAT.lock().unwrap();
+        global_stat.merge(&self.stat);
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "stat"))]
+lazy_static! {
+    static ref GLOBAL_FILE_STAT: Mutex<FileStat> = Mutex::new(FileStat::new());
+}
+
+#[cfg(all(target_os = "linux", feature = "stat"))]
+thread_local! {
+    static LOCAL_STAT: LocalStat = LocalStat {
+        stat: FileStat::new()
+    };
+}
+
+#[cfg(all(target_os = "linux", feature = "stat"))]
+fn inc_local_read_stat(wait_count: usize) {
+    LOCAL_STAT.with(|local_stat| {
+        let stat = &local_stat.stat;
+        let read = unsafe { &mut *stat.read.get() };
+        if wait_count >= 10 {
+            read[10] += 1;
+        } else {
+            read[wait_count] += 1;
+        }
+    });
+}
+
+#[cfg(all(target_os = "linux", feature = "stat"))]
+fn inc_local_write_stat(wait_count: usize) {
+    LOCAL_STAT.with(|local_stat| {
+        let stat = &local_stat.stat;
+        let write = unsafe { &mut *stat.write.get() };
+        if wait_count >= 10 {
+            write[10] += 1;
+        } else {
+            write[wait_count] += 1;
+        }
+    });
 }
 
 #[cfg(target_os = "linux")]
@@ -326,6 +494,7 @@ impl FileManagerInner {
             loop {
                 if let Some(entry) = self.ring.completion().next() {
                     let tag = IOOpTag::from(entry.user_data());
+                    count += 1;
                     match tag.get_op() {
                         IOOp::Read => {
                             // Reads are run in sequence, so this should be the page we are interested in.
@@ -341,7 +510,6 @@ impl FileManagerInner {
                             // Do nothing
                         }
                     }
-                    count += 1;
                 } else {
                     std::hint::spin_loop();
                 }
@@ -353,6 +521,8 @@ impl FileManagerInner {
             page_id,
             count
         );
+        #[cfg(feature = "stat")]
+        inc_local_read_stat(count);
         Ok(())
     }
 
@@ -390,6 +560,8 @@ impl FileManagerInner {
                     page_id,
                     count
                 );
+                #[cfg(feature = "stat")]
+                inc_local_write_stat(count);
                 return Ok(()); // This is the only return point.
             } else {
                 // If the page is not written, wait for the write to complete.
