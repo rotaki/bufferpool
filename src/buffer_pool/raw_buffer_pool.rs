@@ -26,8 +26,8 @@ use std::{
     },
 };
 
-const NUM_FRAMES_LARGE_THRESHOLD: usize = 100;
 const EVICTION_SCAN_DEPTH: usize = 10;
+const NUM_VICTIMS: usize = 3;
 
 #[cfg(feature = "stat")]
 /// Statistics #pages evicted from the buffer pool.
@@ -180,7 +180,7 @@ fn inc_local_bp_all_latched_victim() {
 
 pub struct Frames<T: EvictionPolicy> {
     num_frames: usize,
-    eviction_candidates: [usize; EVICTION_SCAN_DEPTH],
+    victim_candidates: [(u64, usize, bool); EVICTION_SCAN_DEPTH], // [score, index, is_dirty
     initial_free_frames: VecDeque<usize>, // Used for initial free frames only
     frames: Vec<BufferFrame<T>>, // The Vec<frames> is fixed size. If not fixed size, then Pin must be used to ensure that the frame does not move when the vector is resized.
 }
@@ -189,7 +189,7 @@ impl<T: EvictionPolicy> Frames<T> {
     pub fn new(num_frames: usize) -> Self {
         Frames {
             num_frames,
-            eviction_candidates: [0; EVICTION_SCAN_DEPTH],
+            victim_candidates: [(u64::MAX, usize::MAX, false); EVICTION_SCAN_DEPTH],
             initial_free_frames: (0..num_frames).collect(),
             frames: (0..num_frames).map(|_| BufferFrame::default()).collect(),
         }
@@ -203,91 +203,59 @@ impl<T: EvictionPolicy> Frames<T> {
         &mut self.frames[index]
     }
 
-    /// Choose a victim frame to be evicted.
-    /// Return the index of the frame and whether the frame is dirty (requires writing back to disk).
-    /// If all the frames are locked, then return None.
-    pub fn choose_victim(&mut self) -> Option<(usize, bool)> {
-        if self.num_frames > NUM_FRAMES_LARGE_THRESHOLD {
-            // self.choose_victim_num_frames_large()
-            self.choose_victim_simple_large()
-        } else {
-            self.choose_victim_simple_small()
+    fn clear_victim_buffer(&mut self) {
+        for i in 0..EVICTION_SCAN_DEPTH {
+            self.victim_candidates[i] = (u64::MAX, usize::MAX, false);
         }
     }
 
-    fn choose_victim_simple_large(&mut self) -> Option<(usize, bool)> {
+    /// Choose victim candidates based on the eviction score.
+    /// Return the eviction score, the index of the frame, and whether the frame is dirty.
+    /// The returned indices are **unique**.
+    /// If all the frames are latched, return an empty list.
+    ///
+    /// num_victims: The number of victims to choose.
+    /// This function guarantees that the returned list has **at most** num_victims.
+    pub fn choose_victim_candidates(&mut self, num_victims: usize) -> &[(u64, usize, bool)] {
+        self.clear_victim_buffer();
+
         if !self.initial_free_frames.is_empty() {
-            #[cfg(feature = "stat")]
-            inc_local_bp_free_victim();
             let idx = self.initial_free_frames.pop_front().unwrap();
-            Some((idx, false))
+            self.victim_candidates[0] = (0, idx, false);
+            &self.victim_candidates[..1]
         } else {
-            // Scan the frames to find the victim
-            for i in 0..EVICTION_SCAN_DEPTH {
-                let rand_idx = gen_random_int(0, self.num_frames - 1);
-                self.eviction_candidates[i] = rand_idx;
+            let mut eviction_scan = HashSet::new();
+            if self.num_frames < EVICTION_SCAN_DEPTH {
+                for i in 0..self.num_frames {
+                    eviction_scan.insert(i);
+                }
+            } else {
+                for _ in 0..EVICTION_SCAN_DEPTH {
+                    let idx = gen_random_int(0, self.num_frames - 1);
+                    eviction_scan.insert(idx);
+                }
             }
-            let mut frame_with_min_score = (0, u64::MAX, false);
-            for i in self.eviction_candidates.iter() {
-                let frame = &self.frames[*i];
+
+            for (i, idx) in eviction_scan.iter().enumerate() {
+                let frame = &self.frames[*idx];
                 if frame.is_locked() {
                     continue;
                 }
                 let score = frame.eviction_score();
-                if score < frame_with_min_score.1 {
-                    frame_with_min_score = (*i, score, frame.is_dirty());
-                }
+                self.victim_candidates[i] = (score, *idx, frame.is_dirty());
             }
 
-            if frame_with_min_score.1 != u64::MAX {
-                if frame_with_min_score.2 {
-                    #[cfg(feature = "stat")]
-                    inc_local_bp_dirty_victim();
-                } else {
-                    #[cfg(feature = "stat")]
-                    inc_local_bp_clean_victim();
-                }
-                Some((frame_with_min_score.0, frame_with_min_score.2))
-            } else {
-                #[cfg(feature = "stat")]
-                inc_local_bp_all_latched_victim();
-                None
-            }
-        }
-    }
+            // Sort the victim candidates
+            self.victim_candidates.sort_by(|a, b| a.0.cmp(&b.0));
+            log_debug!("Victim candidates: {:?}", &self.victim_candidates);
 
-    fn choose_victim_simple_small(&mut self) -> Option<(usize, bool)> {
-        if !self.initial_free_frames.is_empty() {
-            #[cfg(feature = "stat")]
-            inc_local_bp_free_victim();
-            let idx = self.initial_free_frames.pop_front().unwrap();
-            Some((idx, false))
-        } else {
-            // Scan the frames to find the victom
-            let mut frame_with_min_score = (0, u64::MAX, false);
-            for (i, frame) in self.frames.iter().enumerate() {
-                if frame.is_locked() {
-                    continue;
-                }
-                let score = frame.eviction_score();
-                if score < frame_with_min_score.1 {
-                    frame_with_min_score = (i, score, frame.is_dirty());
-                }
-            }
-            if frame_with_min_score.1 != u64::MAX {
-                if frame_with_min_score.2 {
-                    #[cfg(feature = "stat")]
-                    inc_local_bp_dirty_victim();
-                } else {
-                    #[cfg(feature = "stat")]
-                    inc_local_bp_clean_victim();
-                }
-                Some((frame_with_min_score.0, frame_with_min_score.2))
-            } else {
-                #[cfg(feature = "stat")]
-                inc_local_bp_all_latched_victim();
-                None
-            }
+            // Find the position of the first u64::MAX
+            let idx = self
+                .victim_candidates
+                .iter()
+                .position(|(score, _, _)| *score == u64::MAX)
+                .unwrap_or(EVICTION_SCAN_DEPTH);
+            &self.victim_candidates[..num_victims.min(idx)]
         }
     }
 }
@@ -371,12 +339,6 @@ where
         }
     }
 
-    #[cfg(test)]
-    pub fn choose_victim(&self) -> Option<(usize, bool)> {
-        let frames = unsafe { &mut *self.frames.get() };
-        frames.choose_victim()
-    }
-
     fn shared(&self) {
         self.latch.shared();
     }
@@ -406,23 +368,40 @@ where
         let id_to_index = unsafe { &mut *self.id_to_index.get() };
         let container_to_file = unsafe { &mut *self.container_to_file.get() };
 
-        let (index, is_dirty) = if let Some((index, is_dirty)) = frames.choose_victim() {
-            (index, is_dirty)
-        } else {
-            return Err(MemPoolStatus::CannotEvictPage);
-        };
-        let mut guard = frames[index].try_write(false).unwrap(); // We have already checked that the frame is not locked
+        let victim_candidates = frames.choose_victim_candidates(NUM_VICTIMS).to_vec();
 
-        // Evict old page if necessary
-        if let Some(old_key) = guard.key() {
-            if is_dirty {
+        // For all the dirty pages, we issue a write to the disk and make it clean.
+        // For all the clean pages, we don't do anything.
+        // For all the free pages, we don't do anything.
+
+        // We use the first victim as the victim to evict from the cache. We remove the victim from the id_to_index.
+        // If the frame is empty, we don't need to evict the page (no need to remove from id_to_index).
+
+        if victim_candidates.is_empty() {
+            return Err(MemPoolStatus::CannotEvictPage);
+        }
+
+        for (_, index, is_dirty) in &victim_candidates {
+            if *is_dirty {
+                // Issue a write to the disk
+                let guard = frames.get_mut(*index).try_write(false).unwrap(); // We have already checked that the frame is not locked
                 guard.dirty().store(false, Ordering::Relaxed);
+                let old_key = guard.key().unwrap(); // Key must exist because the frame is dirty
                 let file = container_to_file
                     .get(&old_key.c_key)
                     .ok_or(MemPoolStatus::FileManagerNotFound)?;
                 file.write_page(old_key.page_id, &*guard)?;
             }
-            id_to_index.remove(&old_key);
+        }
+
+        // The first victim is the one to evict
+        let (_, index, _) = victim_candidates.get(0).unwrap();
+        let mut guard = frames[*index].try_write(false).unwrap(); // We have already checked that the frame is not locked
+
+        // Evict old page if necessary
+        if let Some(old_key) = guard.key() {
+            // This condition is needed to check if the frame is empty
+            id_to_index.remove(&old_key).unwrap();
             log_debug!("Page evicted: {}", old_key);
         }
 
@@ -436,7 +415,8 @@ where
             file.read_page(key.page_id, &mut *guard)?;
         };
 
-        id_to_index.insert(key, index);
+        let res = id_to_index.insert(key, *index);
+        assert!(res.is_none());
         *guard.key() = Some(key);
         {
             let mut evict_info = guard.evict_info().write().unwrap();

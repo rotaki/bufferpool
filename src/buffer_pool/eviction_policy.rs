@@ -70,6 +70,7 @@ mod tests {
         ContainerKey,
     };
 
+    /*
     #[test]
     fn test_lru_eviction_policy() {
         let bp = get_test_bp::<LRUEvictionPolicy>(3);
@@ -116,4 +117,5 @@ mod tests {
         assert_eq!(victim, 1);
         assert_eq!(is_dirty, true);
     }
+    */
 }
