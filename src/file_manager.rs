@@ -36,17 +36,18 @@ pub type FileManager = linux::FileManager;
 
 #[cfg(any(not(target_os = "linux"), target_arch = "wasm32"))]
 pub mod not_linux {
-    use super::FMStatus;
+    use super::FMError;
     use crate::page::{Page, PageId, PAGE_SIZE};
-    use crate::{log, log_debug, log_trace};
-    use std::cell::UnsafeCell;
+    #[allow(unused_imports)]
+    use crate::log;
+    use crate::log_trace;
     use std::fs::{File, OpenOptions};
     use std::io::{Read, Seek, SeekFrom, Write};
-    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Mutex;
 
     pub struct FileManager {
-        path: String,
+        _path: String,
         file: Mutex<File>,
         num_pages: AtomicU32,
     }
@@ -61,7 +62,7 @@ pub mod not_linux {
                 .map_err(|_| FMError::Open)?;
             let num_pages = file.metadata().unwrap().len() as usize / PAGE_SIZE;
             Ok(FileManager {
-                path: path.as_ref().to_str().unwrap().to_string(),
+                _path: path.as_ref().to_str().unwrap().to_string(),
                 file: Mutex::new(file),
                 num_pages: AtomicU32::new(num_pages as PageId),
             })
@@ -75,10 +76,7 @@ pub mod not_linux {
             self.num_pages.fetch_sub(1, Ordering::AcqRel)
         }
 
-        pub fn get_num_pages(&self) -> PageId {
-            self.num_pages.load(Ordering::Acquire)
-        }
-
+        #[allow(dead_code)]
         pub fn get_stats(&self) -> String {
             "Stat is disabled".to_string()
         }
@@ -105,7 +103,7 @@ pub mod not_linux {
             Ok(())
         }
 
-        pub fn flush(&mut self) -> Result<(), FMError> {
+        pub fn flush(&self) -> Result<(), FMError> {
             let mut file = self.file.lock().unwrap();
             log_trace!("Flushing file: {:?}", self.path);
             file.flush().map_err(|_| FMError::Flush)
