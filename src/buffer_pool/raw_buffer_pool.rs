@@ -30,153 +30,149 @@ const NUM_FRAMES_LARGE_THRESHOLD: usize = 100;
 const EVICTION_SCAN_DEPTH: usize = 10;
 
 #[cfg(feature = "stat")]
-/// Statistics #pages evicted from the buffer pool.
-struct BPStats {
-    hit_rate: UnsafeCell<[usize; 2]>, // [faults, total]
-    victim_status: UnsafeCell<[usize; 4]>,
-}
-
-#[cfg(feature = "stat")]
-impl BPStats {
-    fn new() -> Self {
-        BPStats {
-            hit_rate: UnsafeCell::new([0, 0]),            // [faults, total]
-            victim_status: UnsafeCell::new([0, 0, 0, 0]), // [free, clean, dirty, all_latched]
-        }
+mod stat {
+    use super::*;
+    use lazy_static::lazy_static;
+    /// Statistics #pages evicted from the buffer pool.
+    pub struct BPStats {
+        hit_rate: UnsafeCell<[usize; 2]>, // [faults, total]
+        victim_status: UnsafeCell<[usize; 4]>,
     }
 
-    fn to_string(&self) -> String {
-        let hit_rate = unsafe { &*self.hit_rate.get() };
-        let victim_status = unsafe { &*self.victim_status.get() };
-        let mut result = String::new();
-        result.push_str("Buffer Pool Statistics\n");
-        result.push_str("Hit Rate\n");
-        result.push_str(&format!(
-            "Hits  :  {:8} ({:.2}%)\n",
-            hit_rate[1] - hit_rate[0],
-            (hit_rate[1] - hit_rate[0]) as f64 / hit_rate[1] as f64 * 100.0
-        ));
-        result.push_str(&format!(
-            "Faults:  {:8} ({:.2}%)\n",
-            hit_rate[0],
-            hit_rate[0] as f64 / hit_rate[1] as f64 * 100.0
-        ));
-        result.push_str(&format!("Total :  {:8} ({:.2}%)\n", hit_rate[1], 100.0));
-        result.push_str("\n");
-        result.push_str("Eviction Statistics\n");
-        let op_types = ["Free", "Clean", "Dirty", "All Latched", "Total"];
-        let total = victim_status.iter().sum::<usize>();
-        for i in 0..4 {
+    impl BPStats {
+        pub fn new() -> Self {
+            BPStats {
+                hit_rate: UnsafeCell::new([0, 0]),            // [faults, total]
+                victim_status: UnsafeCell::new([0, 0, 0, 0]), // [free, clean, dirty, all_latched]
+            }
+        }
+
+        pub fn to_string(&self) -> String {
+            let hit_rate = unsafe { &*self.hit_rate.get() };
+            let victim_status = unsafe { &*self.victim_status.get() };
+            let mut result = String::new();
+            result.push_str("Buffer Pool Statistics\n");
+            result.push_str("Hit Rate\n");
+            result.push_str(&format!(
+                "Hits  :  {:8} ({:.2}%)\n",
+                hit_rate[1] - hit_rate[0],
+                (hit_rate[1] - hit_rate[0]) as f64 / hit_rate[1] as f64 * 100.0
+            ));
+            result.push_str(&format!(
+                "Faults:  {:8} ({:.2}%)\n",
+                hit_rate[0],
+                hit_rate[0] as f64 / hit_rate[1] as f64 * 100.0
+            ));
+            result.push_str(&format!("Total :  {:8} ({:.2}%)\n", hit_rate[1], 100.0));
+            result.push_str("\n");
+            result.push_str("Eviction Statistics\n");
+            let op_types = ["Free", "Clean", "Dirty", "All Latched", "Total"];
+            let total = victim_status.iter().sum::<usize>();
+            for i in 0..4 {
+                result.push_str(&format!(
+                    "{:12}: {:8} ({:.2}%)\n",
+                    op_types[i],
+                    victim_status[i],
+                    (victim_status[i] as f64 / total as f64) * 100.0
+                ));
+            }
             result.push_str(&format!(
                 "{:12}: {:8} ({:.2}%)\n",
-                op_types[i],
-                victim_status[i],
-                (victim_status[i] as f64 / total as f64) * 100.0
+                op_types[4], total, 100.0
             ));
+            result
         }
-        result.push_str(&format!(
-            "{:12}: {:8} ({:.2}%)\n",
-            op_types[4], total, 100.0
-        ));
-        result
-    }
 
-    fn merge(&self, other: &BPStats) {
-        let hit_rate = unsafe { &mut *self.hit_rate.get() };
-        let other_hit_rate = unsafe { &*other.hit_rate.get() };
-        for i in 0..2 {
-            hit_rate[i] += other_hit_rate[i];
+        pub fn merge(&self, other: &BPStats) {
+            let hit_rate = unsafe { &mut *self.hit_rate.get() };
+            let other_hit_rate = unsafe { &*other.hit_rate.get() };
+            for i in 0..2 {
+                hit_rate[i] += other_hit_rate[i];
+            }
+            let victim_status = unsafe { &mut *self.victim_status.get() };
+            let other_victim_status = unsafe { &*other.victim_status.get() };
+            for i in 0..4 {
+                victim_status[i] += other_victim_status[i];
+            }
         }
-        let victim_status = unsafe { &mut *self.victim_status.get() };
-        let other_victim_status = unsafe { &*other.victim_status.get() };
-        for i in 0..4 {
-            victim_status[i] += other_victim_status[i];
-        }
-    }
 
-    fn clear(&self) {
-        let hit_rate = unsafe { &mut *self.hit_rate.get() };
-        for i in 0..2 {
-            hit_rate[i] = 0;
-        }
-        let victim_status = unsafe { &mut *self.victim_status.get() };
-        for i in 0..4 {
-            victim_status[i] = 0;
+        pub fn clear(&self) {
+            let hit_rate = unsafe { &mut *self.hit_rate.get() };
+            for i in 0..2 {
+                hit_rate[i] = 0;
+            }
+            let victim_status = unsafe { &mut *self.victim_status.get() };
+            for i in 0..4 {
+                victim_status[i] = 0;
+            }
         }
     }
-}
 
-#[cfg(feature = "stat")]
-struct LocalBPStat {
-    pub stat: BPStats,
-}
+    pub struct LocalBPStat {
+        pub stat: BPStats,
+    }
 
-#[cfg(feature = "stat")]
-impl Drop for LocalBPStat {
-    fn drop(&mut self) {
-        GLOBAL_BP_STAT.lock().unwrap().merge(&self.stat);
+    impl Drop for LocalBPStat {
+        fn drop(&mut self) {
+            GLOBAL_BP_STAT.lock().unwrap().merge(&self.stat);
+        }
+    }
+
+    lazy_static! {
+        pub static ref GLOBAL_BP_STAT: Mutex<BPStats> = Mutex::new(BPStats::new());
+    }
+
+    thread_local! {
+        pub static LOCAL_BP_STAT: LocalBPStat = LocalBPStat {
+            stat: BPStats::new(),
+        };
+    }
+
+    pub fn inc_local_bp_lookup() {
+        LOCAL_BP_STAT.with(|stat| {
+            let hit_rate = unsafe { &mut *stat.stat.hit_rate.get() };
+            hit_rate[1] += 1;
+        });
+    }
+
+    pub fn inc_local_bp_faults() {
+        LOCAL_BP_STAT.with(|stat| {
+            let hit_rate = unsafe { &mut *stat.stat.hit_rate.get() };
+            hit_rate[0] += 1;
+        });
+    }
+
+    pub fn inc_local_bp_free_victim() {
+        LOCAL_BP_STAT.with(|stat| {
+            let victim_status = unsafe { &mut *stat.stat.victim_status.get() };
+            victim_status[0] += 1;
+        });
+    }
+
+    pub fn inc_local_bp_clean_victim() {
+        LOCAL_BP_STAT.with(|stat| {
+            let victim_status = unsafe { &mut *stat.stat.victim_status.get() };
+            victim_status[1] += 1;
+        });
+    }
+
+    pub fn inc_local_bp_dirty_victim() {
+        LOCAL_BP_STAT.with(|stat| {
+            let victim_status = unsafe { &mut *stat.stat.victim_status.get() };
+            victim_status[2] += 1;
+        });
+    }
+
+    pub fn inc_local_bp_all_latched_victim() {
+        LOCAL_BP_STAT.with(|stat| {
+            let victim_status = unsafe { &mut *stat.stat.victim_status.get() };
+            victim_status[3] += 1;
+        });
     }
 }
 
 #[cfg(feature = "stat")]
-lazy_static! {
-    static ref GLOBAL_BP_STAT: Mutex<BPStats> = Mutex::new(BPStats::new());
-}
-
-#[cfg(feature = "stat")]
-thread_local! {
-    static LOCAL_BP_STAT: LocalBPStat = LocalBPStat {
-        stat: BPStats::new(),
-    };
-}
-
-#[cfg(feature = "stat")]
-fn inc_local_bp_lookup() {
-    LOCAL_BP_STAT.with(|stat| {
-        let hit_rate = unsafe { &mut *stat.stat.hit_rate.get() };
-        hit_rate[1] += 1;
-    });
-}
-
-#[cfg(feature = "stat")]
-fn inc_local_bp_faults() {
-    LOCAL_BP_STAT.with(|stat| {
-        let hit_rate = unsafe { &mut *stat.stat.hit_rate.get() };
-        hit_rate[0] += 1;
-    });
-}
-
-#[cfg(feature = "stat")]
-fn inc_local_bp_free_victim() {
-    LOCAL_BP_STAT.with(|stat| {
-        let victim_status = unsafe { &mut *stat.stat.victim_status.get() };
-        victim_status[0] += 1;
-    });
-}
-
-#[cfg(feature = "stat")]
-fn inc_local_bp_clean_victim() {
-    LOCAL_BP_STAT.with(|stat| {
-        let victim_status = unsafe { &mut *stat.stat.victim_status.get() };
-        victim_status[1] += 1;
-    });
-}
-
-#[cfg(feature = "stat")]
-fn inc_local_bp_dirty_victim() {
-    LOCAL_BP_STAT.with(|stat| {
-        let victim_status = unsafe { &mut *stat.stat.victim_status.get() };
-        victim_status[2] += 1;
-    });
-}
-
-#[cfg(feature = "stat")]
-fn inc_local_bp_all_latched_victim() {
-    LOCAL_BP_STAT.with(|stat| {
-        let victim_status = unsafe { &mut *stat.stat.victim_status.get() };
-        victim_status[3] += 1;
-    });
-}
+use stat::*;
 
 pub struct Frames<T: EvictionPolicy> {
     num_frames: usize,

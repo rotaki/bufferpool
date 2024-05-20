@@ -10,7 +10,6 @@ use std::{
     time::Duration,
 };
 
-use lazy_static::lazy_static;
 use tempfile::TempDir;
 
 use crate::{
@@ -129,304 +128,302 @@ impl OpByte {
 }
 
 #[cfg(any(feature = "stat"))]
-struct FosterBTreeStat {
-    sm_trigger: UnsafeCell<[usize; 7]>, // Number of times the structure modification is triggered
-    sm_success: UnsafeCell<[usize; 7]>, // Number of times the structure modification is successful
-    additional_traversals: UnsafeCell<[usize; 11]>, // Number of additional traversals for exclusive page latch
-    shared_page_latch_failures: UnsafeCell<[usize; 3]>, // Number of times the read page fails [0] leaf failure, [1] inner failure, [2] total(#attempt \neq leaf + inner)
-    exclusive_page_latch_failures: UnsafeCell<[usize; 3]>, // Number of times the exclusive page latch fails [0] leaf failure, [1] inner failure, [2] total(#attempt \neq leaf + inner)
-}
+mod stat {
+    use super::*;
+    use lazy_static::lazy_static;
 
-#[cfg(any(feature = "stat"))]
-impl FosterBTreeStat {
-    pub fn new() -> Self {
-        FosterBTreeStat {
-            sm_trigger: UnsafeCell::new([0; 7]),
-            sm_success: UnsafeCell::new([0; 7]),
-            additional_traversals: UnsafeCell::new([0; 11]),
-            shared_page_latch_failures: UnsafeCell::new([0; 3]),
-            exclusive_page_latch_failures: UnsafeCell::new([0; 3]),
+    pub struct FosterBTreeStat {
+        sm_trigger: UnsafeCell<[usize; 7]>, // Number of times the structure modification is triggered
+        sm_success: UnsafeCell<[usize; 7]>, // Number of times the structure modification is successful
+        additional_traversals: UnsafeCell<[usize; 11]>, // Number of additional traversals for exclusive page latch
+        shared_page_latch_failures: UnsafeCell<[usize; 3]>, // Number of times the read page fails [0] leaf failure, [1] inner failure, [2] total(#attempt \neq leaf + inner)
+        exclusive_page_latch_failures: UnsafeCell<[usize; 3]>, // Number of times the exclusive page latch fails [0] leaf failure, [1] inner failure, [2] total(#attempt \neq leaf + inner)
+    }
+
+    impl FosterBTreeStat {
+        pub fn new() -> Self {
+            FosterBTreeStat {
+                sm_trigger: UnsafeCell::new([0; 7]),
+                sm_success: UnsafeCell::new([0; 7]),
+                additional_traversals: UnsafeCell::new([0; 11]),
+                shared_page_latch_failures: UnsafeCell::new([0; 3]),
+                exclusive_page_latch_failures: UnsafeCell::new([0; 3]),
+            }
         }
-    }
 
-    pub fn inc_trigger(&self, op_type: OpType) {
-        (unsafe { &mut *self.sm_trigger.get() })[op_type as usize] += 1;
-    }
+        pub fn inc_trigger(&self, op_type: OpType) {
+            (unsafe { &mut *self.sm_trigger.get() })[op_type as usize] += 1;
+        }
 
-    pub fn inc_success(&self, op_type: OpType) {
-        (unsafe { &mut *self.sm_success.get() })[op_type as usize] += 1;
-    }
+        pub fn inc_success(&self, op_type: OpType) {
+            (unsafe { &mut *self.sm_success.get() })[op_type as usize] += 1;
+        }
 
-    pub fn to_string(&self) -> String {
-        let mut result = String::new();
-        let sm_trigger = unsafe { &*self.sm_trigger.get() };
-        let sm_success = unsafe { &*self.sm_success.get() };
-        result.push_str("Structure Modification Statistics\n");
-        let mut sep = "";
-        for i in 0..7 {
-            result.push_str(sep);
-            let op_type = match i {
-                0 => "SPLIT",
-                1 => "MERGE",
-                2 => "LOADBALANCE",
-                3 => "ADOPT",
-                4 => "ANTIADOPT",
-                5 => "ASCENDROOT",
-                6 => "DESCENDROOT",
-                _ => unreachable!(),
-            };
-            let success = sm_success[i];
-            let trigger = sm_trigger[i];
-            let rate = if trigger == 0 {
-                "N/A".to_owned()
-            } else {
-                format!("{:.2}%", (success as f64) / (trigger as f64) * 100.0)
-            };
+        pub fn to_string(&self) -> String {
+            let mut result = String::new();
+            let sm_trigger = unsafe { &*self.sm_trigger.get() };
+            let sm_success = unsafe { &*self.sm_success.get() };
+            result.push_str("Structure Modification Statistics\n");
+            let mut sep = "";
+            for i in 0..7 {
+                result.push_str(sep);
+                let op_type = match i {
+                    0 => "SPLIT",
+                    1 => "MERGE",
+                    2 => "LOADBALANCE",
+                    3 => "ADOPT",
+                    4 => "ANTIADOPT",
+                    5 => "ASCENDROOT",
+                    6 => "DESCENDROOT",
+                    _ => unreachable!(),
+                };
+                let success = sm_success[i];
+                let trigger = sm_trigger[i];
+                let rate = if trigger == 0 {
+                    "N/A".to_owned()
+                } else {
+                    format!("{:.2}%", (success as f64) / (trigger as f64) * 100.0)
+                };
+                result.push_str(&format!(
+                    "{:12}: {:6} / {:6} ({:6})",
+                    op_type, success, trigger, rate
+                ));
+                sep = "\n";
+            }
+            result.push_str("\n\n");
+            let mut sep = "";
+            result.push_str("Additional Traversal For Exclusive Page Latch\n");
+            let mut cumulative_count = 0;
+            for i in 0..11 {
+                result.push_str(sep);
+                let count = unsafe { &*self.additional_traversals.get() }[i];
+                cumulative_count += count;
+                if i == 10 {
+                    result.push_str(&format!("{:2}+: {:6} ({:6})", i, count, cumulative_count));
+                } else {
+                    result.push_str(&format!("{:3}: {:6} ({:6})", i, count, cumulative_count));
+                }
+                sep = "\n";
+            }
+            result.push_str("\n\n");
+            let shared_page_latch_failures = unsafe { &*self.shared_page_latch_failures.get() };
+
+            result.push_str("Shared Page Latch Failure by Node Type\n");
+            let leaf_failure = shared_page_latch_failures[0];
+            let inner_failure = shared_page_latch_failures[1];
+            let total_failure = leaf_failure + inner_failure;
+            let total = shared_page_latch_failures[2];
             result.push_str(&format!(
-                "{:12}: {:6} / {:6} ({:6})",
-                op_type, success, trigger, rate
+                "Leaf : {:6} / {:6} ({:6})",
+                leaf_failure,
+                total,
+                if total == 0 {
+                    "N/A".to_owned()
+                } else {
+                    format!("{:.2}%", (leaf_failure as f64) / (total as f64) * 100.0)
+                }
             ));
-            sep = "\n";
-        }
-        result.push_str("\n\n");
-        let mut sep = "";
-        result.push_str("Additional Traversal For Exclusive Page Latch\n");
-        let mut cumulative_count = 0;
-        for i in 0..11 {
-            result.push_str(sep);
-            let count = unsafe { &*self.additional_traversals.get() }[i];
-            cumulative_count += count;
-            if i == 10 {
-                result.push_str(&format!("{:2}+: {:6} ({:6})", i, count, cumulative_count));
-            } else {
-                result.push_str(&format!("{:3}: {:6} ({:6})", i, count, cumulative_count));
-            }
-            sep = "\n";
-        }
-        result.push_str("\n\n");
-        let shared_page_latch_failures = unsafe { &*self.shared_page_latch_failures.get() };
+            result.push_str("\n");
+            result.push_str(&format!(
+                "Inner: {:6} / {:6} ({:6})",
+                inner_failure,
+                total,
+                if total == 0 {
+                    "N/A".to_owned()
+                } else {
+                    format!("{:.2}%", (inner_failure as f64) / (total as f64) * 100.0)
+                }
+            ));
+            result.push_str("\n");
+            result.push_str(&format!(
+                "Total: {:6} / {:6} ({:6})",
+                total_failure,
+                total,
+                if total == 0 {
+                    "N/A".to_owned()
+                } else {
+                    format!("{:.2}%", (total_failure as f64) / (total as f64) * 100.0)
+                }
+            ));
 
-        result.push_str("Shared Page Latch Failure by Node Type\n");
-        let leaf_failure = shared_page_latch_failures[0];
-        let inner_failure = shared_page_latch_failures[1];
-        let total_failure = leaf_failure + inner_failure;
-        let total = shared_page_latch_failures[2];
-        result.push_str(&format!(
-            "Leaf : {:6} / {:6} ({:6})",
-            leaf_failure,
-            total,
-            if total == 0 {
-                "N/A".to_owned()
-            } else {
-                format!("{:.2}%", (leaf_failure as f64) / (total as f64) * 100.0)
-            }
-        ));
-        result.push_str("\n");
-        result.push_str(&format!(
-            "Inner: {:6} / {:6} ({:6})",
-            inner_failure,
-            total,
-            if total == 0 {
-                "N/A".to_owned()
-            } else {
-                format!("{:.2}%", (inner_failure as f64) / (total as f64) * 100.0)
-            }
-        ));
-        result.push_str("\n");
-        result.push_str(&format!(
-            "Total: {:6} / {:6} ({:6})",
-            total_failure,
-            total,
-            if total == 0 {
-                "N/A".to_owned()
-            } else {
-                format!("{:.2}%", (total_failure as f64) / (total as f64) * 100.0)
-            }
-        ));
+            result.push_str("\n\n");
+            let exclusive_page_latch_failures =
+                unsafe { &*self.exclusive_page_latch_failures.get() };
+            result.push_str("Exclusive Page Latch Failure by Node Type\n");
+            let leaf_failure = exclusive_page_latch_failures[0];
+            let inner_failure = exclusive_page_latch_failures[1];
+            let total_failure = leaf_failure + inner_failure;
+            let total = exclusive_page_latch_failures[2];
+            result.push_str(&format!(
+                "Leaf : {:6} / {:6} ({:6})",
+                leaf_failure,
+                total,
+                if total == 0 {
+                    "N/A".to_owned()
+                } else {
+                    format!("{:.2}%", (leaf_failure as f64) / (total as f64) * 100.0)
+                }
+            ));
+            result.push_str("\n");
+            result.push_str(&format!(
+                "Inner: {:6} / {:6} ({:6})",
+                inner_failure,
+                total,
+                if total == 0 {
+                    "N/A".to_owned()
+                } else {
+                    format!("{:.2}%", (inner_failure as f64) / (total as f64) * 100.0)
+                }
+            ));
+            result.push_str("\n");
+            result.push_str(&format!(
+                "Total: {:6} / {:6} ({:6})",
+                total_failure,
+                total,
+                if total == 0 {
+                    "N/A".to_owned()
+                } else {
+                    format!("{:.2}%", (total_failure as f64) / (total as f64) * 100.0)
+                }
+            ));
 
-        result.push_str("\n\n");
-        let exclusive_page_latch_failures = unsafe { &*self.exclusive_page_latch_failures.get() };
-        result.push_str("Exclusive Page Latch Failure by Node Type\n");
-        let leaf_failure = exclusive_page_latch_failures[0];
-        let inner_failure = exclusive_page_latch_failures[1];
-        let total_failure = leaf_failure + inner_failure;
-        let total = exclusive_page_latch_failures[2];
-        result.push_str(&format!(
-            "Leaf : {:6} / {:6} ({:6})",
-            leaf_failure,
-            total,
-            if total == 0 {
-                "N/A".to_owned()
-            } else {
-                format!("{:.2}%", (leaf_failure as f64) / (total as f64) * 100.0)
-            }
-        ));
-        result.push_str("\n");
-        result.push_str(&format!(
-            "Inner: {:6} / {:6} ({:6})",
-            inner_failure,
-            total,
-            if total == 0 {
-                "N/A".to_owned()
-            } else {
-                format!("{:.2}%", (inner_failure as f64) / (total as f64) * 100.0)
-            }
-        ));
-        result.push_str("\n");
-        result.push_str(&format!(
-            "Total: {:6} / {:6} ({:6})",
-            total_failure,
-            total,
-            if total == 0 {
-                "N/A".to_owned()
-            } else {
-                format!("{:.2}%", (total_failure as f64) / (total as f64) * 100.0)
-            }
-        ));
-
-        result
-    }
-
-    pub fn merge(&self, other: &FosterBTreeStat) {
-        let sm_trigger = unsafe { &mut *self.sm_trigger.get() };
-        let sm_success = unsafe { &mut *self.sm_success.get() };
-        let other_sm_trigger = unsafe { &*other.sm_trigger.get() };
-        let other_sm_success = unsafe { &*other.sm_success.get() };
-        for i in 0..7 {
-            sm_trigger[i] += other_sm_trigger[i];
-            sm_success[i] += other_sm_success[i];
+            result
         }
-        let additional_traversals = unsafe { &mut *self.additional_traversals.get() };
-        let other_additional_traversals = unsafe { &*other.additional_traversals.get() };
-        for i in 0..11 {
-            additional_traversals[i] += other_additional_traversals[i];
+
+        pub fn merge(&self, other: &FosterBTreeStat) {
+            let sm_trigger = unsafe { &mut *self.sm_trigger.get() };
+            let sm_success = unsafe { &mut *self.sm_success.get() };
+            let other_sm_trigger = unsafe { &*other.sm_trigger.get() };
+            let other_sm_success = unsafe { &*other.sm_success.get() };
+            for i in 0..7 {
+                sm_trigger[i] += other_sm_trigger[i];
+                sm_success[i] += other_sm_success[i];
+            }
+            let additional_traversals = unsafe { &mut *self.additional_traversals.get() };
+            let other_additional_traversals = unsafe { &*other.additional_traversals.get() };
+            for i in 0..11 {
+                additional_traversals[i] += other_additional_traversals[i];
+            }
+            let shared_page_latch_failures = unsafe { &mut *self.shared_page_latch_failures.get() };
+            let other_shared_page_latch_failures =
+                unsafe { &*other.shared_page_latch_failures.get() };
+            let exclusive_page_latch_failures =
+                unsafe { &mut *self.exclusive_page_latch_failures.get() };
+            let other_exclusive_page_latch_failures =
+                unsafe { &*other.exclusive_page_latch_failures.get() };
+            for i in 0..3 {
+                shared_page_latch_failures[i] += other_shared_page_latch_failures[i];
+                exclusive_page_latch_failures[i] += other_exclusive_page_latch_failures[i];
+            }
         }
-        let shared_page_latch_failures = unsafe { &mut *self.shared_page_latch_failures.get() };
-        let other_shared_page_latch_failures = unsafe { &*other.shared_page_latch_failures.get() };
-        let exclusive_page_latch_failures =
-            unsafe { &mut *self.exclusive_page_latch_failures.get() };
-        let other_exclusive_page_latch_failures =
-            unsafe { &*other.exclusive_page_latch_failures.get() };
-        for i in 0..3 {
-            shared_page_latch_failures[i] += other_shared_page_latch_failures[i];
-            exclusive_page_latch_failures[i] += other_exclusive_page_latch_failures[i];
+
+        pub fn clear(&self) {
+            let sm_trigger = unsafe { &mut *self.sm_trigger.get() };
+            let sm_success = unsafe { &mut *self.sm_success.get() };
+            let additional_traversals = unsafe { &mut *self.additional_traversals.get() };
+            let shared_page_latch_failures = unsafe { &mut *self.shared_page_latch_failures.get() };
+            let exclusive_page_latch_failures =
+                unsafe { &mut *self.exclusive_page_latch_failures.get() };
+            for i in 0..7 {
+                sm_trigger[i] = 0;
+                sm_success[i] = 0;
+            }
+            for i in 0..11 {
+                additional_traversals[i] = 0;
+            }
+            for i in 0..3 {
+                shared_page_latch_failures[i] = 0;
+                exclusive_page_latch_failures[i] = 0;
+            }
         }
     }
 
-    pub fn clear(&self) {
-        let sm_trigger = unsafe { &mut *self.sm_trigger.get() };
-        let sm_success = unsafe { &mut *self.sm_success.get() };
-        let additional_traversals = unsafe { &mut *self.additional_traversals.get() };
-        let shared_page_latch_failures = unsafe { &mut *self.shared_page_latch_failures.get() };
-        let exclusive_page_latch_failures =
-            unsafe { &mut *self.exclusive_page_latch_failures.get() };
-        for i in 0..7 {
-            sm_trigger[i] = 0;
-            sm_success[i] = 0;
+    pub struct LocalStat {
+        pub stat: FosterBTreeStat,
+    }
+
+    impl Drop for LocalStat {
+        fn drop(&mut self) {
+            GLOBAL_STAT.lock().unwrap().merge(&self.stat);
         }
-        for i in 0..11 {
-            additional_traversals[i] = 0;
-        }
-        for i in 0..3 {
-            shared_page_latch_failures[i] = 0;
-            exclusive_page_latch_failures[i] = 0;
-        }
+    }
+
+    lazy_static! {
+        pub static ref GLOBAL_STAT: Mutex<FosterBTreeStat> = Mutex::new(FosterBTreeStat::new());
+    }
+
+    thread_local! {
+        pub static LOCAL_STAT: LocalStat = LocalStat {
+            stat: FosterBTreeStat::new(),
+        };
+    }
+
+    pub fn inc_local_stat_trigger(op_type: OpType) {
+        LOCAL_STAT.with(|stat| {
+            stat.stat.inc_trigger(op_type);
+        });
+    }
+
+    pub fn inc_local_stat_success(op_type: OpType) {
+        LOCAL_STAT.with(|stat| {
+            stat.stat.inc_success(op_type);
+        });
+    }
+
+    pub fn inc_local_additional_traversals(attempts: u32) {
+        LOCAL_STAT.with(|stat| {
+            let additional_traversals = unsafe { &mut *stat.stat.additional_traversals.get() };
+            if attempts >= 10 {
+                additional_traversals[10] += 1;
+            } else {
+                additional_traversals[attempts as usize] += 1;
+            }
+        });
+    }
+
+    pub fn inc_shared_page_latch_failures(is_leaf: bool, attempts: usize) {
+        LOCAL_STAT.with(|stat| {
+            let shared_page_latch_failures =
+                unsafe { &mut *stat.stat.shared_page_latch_failures.get() };
+            if is_leaf {
+                shared_page_latch_failures[0] += attempts;
+            } else {
+                shared_page_latch_failures[1] += attempts;
+            }
+        });
+    }
+
+    pub fn inc_shared_page_latch_count() {
+        LOCAL_STAT.with(|stat| {
+            let shared_page_latch_failures =
+                unsafe { &mut *stat.stat.shared_page_latch_failures.get() };
+            shared_page_latch_failures[2] += 1;
+        });
+    }
+
+    pub fn inc_exclusive_page_latch_failures(is_leaf: bool) {
+        LOCAL_STAT.with(|stat| {
+            let exclusive_page_latch_failures =
+                unsafe { &mut *stat.stat.exclusive_page_latch_failures.get() };
+            if is_leaf {
+                exclusive_page_latch_failures[0] += 1;
+            } else {
+                exclusive_page_latch_failures[1] += 1;
+            }
+        });
+    }
+
+    pub fn inc_exclusive_page_latch_count() {
+        LOCAL_STAT.with(|stat| {
+            let exclusive_page_latch_failures =
+                unsafe { &mut *stat.stat.exclusive_page_latch_failures.get() };
+            exclusive_page_latch_failures[2] += 1;
+        });
     }
 }
 
 #[cfg(any(feature = "stat"))]
-struct LocalStat {
-    pub stat: FosterBTreeStat,
-}
-
-#[cfg(any(feature = "stat"))]
-impl Drop for LocalStat {
-    fn drop(&mut self) {
-        GLOBAL_STAT.lock().unwrap().merge(&self.stat);
-    }
-}
-
-#[cfg(any(feature = "stat"))]
-lazy_static! {
-    static ref GLOBAL_STAT: Mutex<FosterBTreeStat> = Mutex::new(FosterBTreeStat::new());
-}
-
-#[cfg(any(feature = "stat"))]
-thread_local! {
-    static LOCAL_STAT: LocalStat = LocalStat {
-        stat: FosterBTreeStat::new(),
-    };
-}
-
-#[cfg(any(feature = "stat"))]
-fn inc_local_stat_trigger(op_type: OpType) {
-    LOCAL_STAT.with(|stat| {
-        stat.stat.inc_trigger(op_type);
-    });
-}
-
-#[cfg(any(feature = "stat"))]
-fn inc_local_stat_success(op_type: OpType) {
-    LOCAL_STAT.with(|stat| {
-        stat.stat.inc_success(op_type);
-    });
-}
-
-#[cfg(any(feature = "stat"))]
-fn inc_local_additional_traversals(attempts: u32) {
-    LOCAL_STAT.with(|stat| {
-        let additional_traversals = unsafe { &mut *stat.stat.additional_traversals.get() };
-        if attempts >= 10 {
-            additional_traversals[10] += 1;
-        } else {
-            additional_traversals[attempts as usize] += 1;
-        }
-    });
-}
-
-#[cfg(any(feature = "stat"))]
-fn inc_shared_page_latch_failures(is_leaf: bool, attempts: usize) {
-    LOCAL_STAT.with(|stat| {
-        let shared_page_latch_failures =
-            unsafe { &mut *stat.stat.shared_page_latch_failures.get() };
-        if is_leaf {
-            shared_page_latch_failures[0] += attempts;
-        } else {
-            shared_page_latch_failures[1] += attempts;
-        }
-    });
-}
-
-#[cfg(any(feature = "stat"))]
-fn inc_shared_page_latch_count() {
-    LOCAL_STAT.with(|stat| {
-        let shared_page_latch_failures =
-            unsafe { &mut *stat.stat.shared_page_latch_failures.get() };
-        shared_page_latch_failures[2] += 1;
-    });
-}
-
-#[cfg(any(feature = "stat"))]
-fn inc_exclusive_page_latch_failures(is_leaf: bool) {
-    LOCAL_STAT.with(|stat| {
-        let exclusive_page_latch_failures =
-            unsafe { &mut *stat.stat.exclusive_page_latch_failures.get() };
-        if is_leaf {
-            exclusive_page_latch_failures[0] += 1;
-        } else {
-            exclusive_page_latch_failures[1] += 1;
-        }
-    });
-}
-
-#[cfg(any(feature = "stat"))]
-fn inc_exclusive_page_latch_count() {
-    LOCAL_STAT.with(|stat| {
-        let exclusive_page_latch_failures =
-            unsafe { &mut *stat.stat.exclusive_page_latch_failures.get() };
-        exclusive_page_latch_failures[2] += 1;
-    });
-}
+use stat::*;
 
 // The threshold for page modification.
 // [0, MIN_BYTES_USED) is small.

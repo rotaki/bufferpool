@@ -1,5 +1,5 @@
 use clap::Parser;
-use foster_btree::{bench_utils::*, random::RandomKVs};
+use fbtree::{bench_utils::*, random::RandomKVs};
 fn main() {
     let bench_params = BenchParams::parse();
     println!("{}", bench_params.to_string());

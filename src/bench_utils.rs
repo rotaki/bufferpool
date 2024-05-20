@@ -8,8 +8,6 @@ use std::{
 };
 
 use clap::Parser;
-use criterion::black_box;
-use serde::{Deserialize, Serialize};
 
 use crate::{
     buffer_pool::{
@@ -25,7 +23,7 @@ use crate::{
     random::{RandomKVs, RandomOp},
 };
 
-#[derive(Serialize, Deserialize, Debug, Parser)]
+#[derive(Debug, Parser)]
 pub struct BenchParams {
     /// Number of threads.
     #[clap(short = 't', long = "num_threads", default_value = "1")]
@@ -107,7 +105,16 @@ impl BenchParams {
     }
 
     pub fn to_string(&self) -> String {
-        serde_json::to_string_pretty(&self).unwrap()
+        let mut result = String::new();
+        result.push_str(&format!("{:<20}: {}\n", "num_threads", self.num_threads));
+        result.push_str(&format!("{:<20}: {}\n", "unique_keys", self.unique_keys));
+        result.push_str(&format!("{:<20}: {}\n", "num_keys", self.num_keys));
+        result.push_str(&format!("{:<20}: {}\n", "key_size", self.key_size));
+        result.push_str(&format!("{:<20}: {}\n", "val_min_size", self.val_min_size));
+        result.push_str(&format!("{:<20}: {}\n", "val_max_size", self.val_max_size));
+        result.push_str(&format!("{:<20}: {}\n", "bp_size", self.bp_size));
+        result.push_str(&format!("{:<20}: {}\n", "ops_ratio", self.ops_ratio));
+        result
     }
 }
 
