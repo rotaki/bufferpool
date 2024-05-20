@@ -8,7 +8,7 @@ pub struct Lsn {
     pub slot_id: u16,
 }
 
-pub const LsnSize: usize = 6;
+pub const LSN_SIZE: usize = 6;
 
 impl Lsn {
     pub fn new(page_id: u32, slot_id: u16) -> Self {
@@ -43,7 +43,7 @@ impl LogBufferInner {
             let page_id = file_manager.fetch_add_page_id();
             let mut page = Page::new_empty();
             HeapPage::init(&mut page);
-            page.set_id(page_id as u32);
+            page.set_id(page_id);
             buffer.push(page);
         }
 
@@ -73,24 +73,23 @@ impl LogBufferInner {
     /// Ensure all logs less than or equal to `lsn` are flushed to disk.
     /// Currently, we just flush all logs to disk if `lsn` is greater or equal
     /// to the first log in the buffer.
+    #[allow(dead_code)]
     fn flush_to(&mut self, lsn: &Lsn) {
         // Check if the log is in the range of the buffer
         let min_page_id = self.buffer[0].get_id();
-        if lsn.page_id < min_page_id {
-            return;
-        } else {
+        if lsn.page_id >= min_page_id {
             self.flush_all();
         }
     }
 
     fn flush_all(&mut self) {
         for page in &mut self.buffer {
-            self.file_manager.write_page(page.get_id(), page);
+            self.file_manager.write_page(page.get_id(), page).unwrap();
             HeapPage::init(page);
             let new_page_id = self.file_manager.fetch_add_page_id();
             page.set_id(new_page_id);
         }
-        self.file_manager.flush();
+        self.file_manager.flush().unwrap();
     }
 }
 

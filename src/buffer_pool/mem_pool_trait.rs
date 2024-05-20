@@ -1,7 +1,7 @@
 use super::buffer_frame::{FrameReadGuard, FrameWriteGuard};
 use super::eviction_policy::EvictionPolicy;
 
-use crate::{file_manager::FMStatus, page::PageId};
+use crate::{file_manager::FMError, page::PageId};
 
 pub type DatabaseId = u16;
 pub type ContainerId = u16;
@@ -45,15 +45,15 @@ impl std::fmt::Display for PageKey {
 #[derive(Debug, PartialEq)]
 pub enum MemPoolStatus {
     FileManagerNotFound,
-    FileManagerError(FMStatus),
+    FileManagerError(FMError),
     PageNotFound,
     FrameReadLatchGrantFailed,
     FrameWriteLatchGrantFailed,
     CannotEvictPage,
 }
 
-impl From<FMStatus> for MemPoolStatus {
-    fn from(s: FMStatus) -> Self {
+impl From<FMError> for MemPoolStatus {
+    fn from(s: FMError) -> Self {
         MemPoolStatus::FileManagerError(s)
     }
 }

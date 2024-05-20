@@ -1,11 +1,4 @@
-use std::{
-    collections::{BTreeMap, VecDeque},
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
-    thread,
-};
+use std::{collections::BTreeMap, sync::Arc, thread};
 
 use clap::Parser;
 
@@ -18,8 +11,7 @@ use crate::{
         },
         BufferPoolForTest,
     },
-    foster_btree::{FosterBtree, FosterBtreePage},
-    log, log_trace,
+    foster_btree::FosterBtree,
     random::{RandomKVs, RandomOp},
 };
 
@@ -82,6 +74,7 @@ impl BenchParams {
         ratio
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         num_threads: usize,
         unique_keys: bool,
@@ -103,8 +96,10 @@ impl BenchParams {
             ops_ratio,
         }
     }
+}
 
-    pub fn to_string(&self) -> String {
+impl std::fmt::Display for BenchParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut result = String::new();
         result.push_str(&format!("{:<20}: {}\n", "num_threads", self.num_threads));
         result.push_str(&format!("{:<20}: {}\n", "unique_keys", self.unique_keys));
@@ -114,7 +109,7 @@ impl BenchParams {
         result.push_str(&format!("{:<20}: {}\n", "val_max_size", self.val_max_size));
         result.push_str(&format!("{:<20}: {}\n", "bp_size", self.bp_size));
         result.push_str(&format!("{:<20}: {}\n", "ops_ratio", self.ops_ratio));
-        result
+        write!(f, "{}", result)
     }
 }
 
@@ -137,7 +132,7 @@ pub fn gen_foster_btree_on_disk(
 
 pub fn insert_into_foster_tree<E: EvictionPolicy, M: MemPool<E>>(
     btree: Arc<FosterBtree<E, M>>,
-    kvs: &Vec<RandomKVs>,
+    kvs: &[RandomKVs],
 ) {
     for partition in kvs.iter() {
         for (k, v) in partition.iter() {
@@ -148,7 +143,7 @@ pub fn insert_into_foster_tree<E: EvictionPolicy, M: MemPool<E>>(
 
 pub fn insert_into_foster_tree_parallel<E: EvictionPolicy, M: MemPool<E>>(
     btree: Arc<FosterBtree<E, M>>,
-    kvs: &Vec<RandomKVs>,
+    kvs: &[RandomKVs],
 ) {
     // Scopeed threads
     thread::scope(|s| {
@@ -163,7 +158,7 @@ pub fn insert_into_foster_tree_parallel<E: EvictionPolicy, M: MemPool<E>>(
     })
 }
 
-pub fn insert_into_btree_map(mut btree: BTreeMap<Vec<u8>, Vec<u8>>, kvs: &Vec<RandomKVs>) {
+pub fn insert_into_btree_map(mut btree: BTreeMap<Vec<u8>, Vec<u8>>, kvs: &[RandomKVs]) {
     for partition in kvs.iter() {
         for (k, v) in partition.iter() {
             btree.insert(k.clone(), v.clone());
@@ -186,16 +181,16 @@ pub fn run_bench<E: EvictionPolicy, M: MemPool<E>>(
                     let op = rand.get();
                     match op {
                         TreeOperation::Insert => {
-                            let _ = btree.insert(&k, v);
+                            let _ = btree.insert(k, v);
                         }
                         TreeOperation::Update => {
-                            let _ = btree.update(&k, v);
+                            let _ = btree.update(k, v);
                         }
                         TreeOperation::Delete => {
-                            let _ = btree.delete(&k);
+                            let _ = btree.delete(k);
                         }
                         TreeOperation::Get => {
-                            let _ = btree.get(&k);
+                            let _ = btree.get(k);
                         }
                     };
                 }

@@ -2,7 +2,7 @@ use clap::Parser;
 use fbtree::{bench_utils::*, random::RandomKVs};
 fn main() {
     let bench_params = BenchParams::parse();
-    println!("{}", bench_params.to_string());
+    println!("{}", bench_params);
 
     let tree = gen_foster_btree_in_mem();
 
@@ -19,8 +19,6 @@ fn main() {
 
     #[cfg(feature = "stat")]
     {
-        println!("BP stats: ");
-        println!("{}", tree.mem_pool.eviction_stats());
         println!("Btree op stats: ");
         println!("{}", tree.op_stats());
         println!("Btree page stats: ");

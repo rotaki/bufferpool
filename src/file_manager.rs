@@ -1,31 +1,31 @@
 use std::io;
 
 #[derive(Debug, PartialEq)]
-pub enum FMStatus {
-    OpenError,
-    SeekError,
-    ReadError,
-    WriteError,
-    FlushError,
-    OtherIOError(String),
+pub enum FMError {
+    Open,
+    Seek,
+    Read,
+    Write,
+    Flush,
+    Other(String),
 }
 
-impl std::fmt::Display for FMStatus {
+impl std::fmt::Display for FMError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            FMStatus::OpenError => write!(f, "[FM] Error opening file"),
-            FMStatus::SeekError => write!(f, "[FM] Error seeking in file"),
-            FMStatus::ReadError => write!(f, "[FM] Error reading from file"),
-            FMStatus::WriteError => write!(f, "[FM] Error writing to file"),
-            FMStatus::FlushError => write!(f, "[FM] Error flushing file"),
-            FMStatus::OtherIOError(e) => write!(f, "[FM] Other IO error: {}", e),
+            FMError::Open => write!(f, "[FM] Error opening file"),
+            FMError::Seek => write!(f, "[FM] Error seeking in file"),
+            FMError::Read => write!(f, "[FM] Error reading from file"),
+            FMError::Write => write!(f, "[FM] Error writing to file"),
+            FMError::Flush => write!(f, "[FM] Error flushing file"),
+            FMError::Other(e) => write!(f, "[FM] Other IO error: {}", e),
         }
     }
 }
 
-impl From<io::Error> for FMStatus {
+impl From<io::Error> for FMError {
     fn from(err: io::Error) -> Self {
-        FMStatus::OtherIOError(err.to_string())
+        FMError::Other(err.to_string())
     }
 }
 
@@ -52,13 +52,13 @@ pub mod not_linux {
     }
 
     impl FileManager {
-        pub fn new<P: AsRef<std::path::Path>>(path: P) -> Result<Self, FMStatus> {
+        pub fn new<P: AsRef<std::path::Path>>(path: P) -> Result<Self, FMError> {
             let file = OpenOptions::new()
                 .read(true)
                 .write(true)
                 .create(true)
                 .open(&path)
-                .map_err(|_| FMStatus::OpenError)?;
+                .map_err(|_| FMError::Open)?;
             let num_pages = file.metadata().unwrap().len() as usize / PAGE_SIZE;
             Ok(FileManager {
                 path: path.as_ref().to_str().unwrap().to_string(),
@@ -83,68 +83,71 @@ pub mod not_linux {
             "Stat is disabled".to_string()
         }
 
-        pub fn read_page(&self, page_id: PageId, page: &mut Page) -> Result<(), FMStatus> {
+        pub fn read_page(&self, page_id: PageId, page: &mut Page) -> Result<(), FMError> {
             let mut file = self.file.lock().unwrap();
             log_trace!("Reading page: {} from file: {:?}", page_id, self.path);
             file.seek(SeekFrom::Start((page_id * PAGE_SIZE as PageId) as u64))
-                .map_err(|_| FMStatus::SeekError)?;
+                .map_err(|_| FMError::Seek)?;
             file.read_exact(page.get_raw_bytes_mut())
-                .map_err(|_| FMStatus::ReadError)?;
+                .map_err(|_| FMError::Read)?;
             debug_assert!(page.get_id() == page_id, "Page id mismatch");
             Ok(())
         }
 
-        pub fn write_page(&self, page_id: PageId, page: &Page) -> Result<(), FMStatus> {
+        pub fn write_page(&self, page_id: PageId, page: &Page) -> Result<(), FMError> {
             let mut file = self.file.lock().unwrap();
             log_trace!("Writing page: {} to file: {:?}", page_id, self.path);
             debug_assert!(page.get_id() == page_id, "Page id mismatch");
             file.seek(SeekFrom::Start((page_id * PAGE_SIZE as PageId) as u64))
-                .map_err(|_| FMStatus::SeekError)?;
+                .map_err(|_| FMError::Seek)?;
             file.write_all(page.get_raw_bytes())
-                .map_err(|_| FMStatus::WriteError)?;
+                .map_err(|_| FMError::Write)?;
             Ok(())
         }
 
-        pub fn flush(&mut self) -> Result<(), FMStatus> {
+        pub fn flush(&mut self) -> Result<(), FMError> {
             let mut file = self.file.lock().unwrap();
             log_trace!("Flushing file: {:?}", self.path);
-            file.flush().map_err(|_| FMStatus::FlushError)
+            file.flush().map_err(|_| FMError::Flush)
         }
     }
 }
 
 #[cfg(all(target_os = "linux", not(target_arch = "wasm32")))]
 pub mod linux {
-    use super::FMStatus;
+    use super::FMError;
+    #[allow(unused_imports)]
+    use crate::log;
     use crate::page::{Page, PageId, PAGE_SIZE};
-    use crate::{log, log_debug, log_trace};
+    use crate::{log_debug, log_trace};
     use std::cell::UnsafeCell;
     use std::fs::{File, OpenOptions};
-    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Mutex;
 
-    use io_uring::{opcode, types, IoUring, Submitter};
+    use io_uring::{opcode, types, IoUring};
     use libc::iovec;
     use std::hash::{Hash, Hasher};
     use std::os::unix::io::AsRawFd;
-    use std::{fs, io};
 
     const PAGE_BUFFER_SIZE: usize = 128;
 
     pub struct FileManager {
+        #[allow(dead_code)]
         path: String,
         num_pages: AtomicU32,
         file_inner: Mutex<FileManagerInner>,
     }
 
     impl FileManager {
-        pub fn new<P: AsRef<std::path::Path>>(path: P) -> Result<Self, FMStatus> {
+        pub fn new<P: AsRef<std::path::Path>>(path: P) -> Result<Self, FMError> {
             let file = OpenOptions::new()
                 .read(true)
                 .write(true)
                 .create(true)
+                .truncate(false)
                 .open(&path)
-                .map_err(|_| FMStatus::OpenError)?;
+                .map_err(|_| FMError::Open)?;
             let num_pages = file.metadata().unwrap().len() as usize / PAGE_SIZE;
             let file_inner = FileManagerInner::new(file)?;
             Ok(FileManager {
@@ -162,10 +165,7 @@ pub mod linux {
             self.num_pages.fetch_sub(1, Ordering::AcqRel)
         }
 
-        pub fn get_num_pages(&self) -> PageId {
-            self.num_pages.load(Ordering::Acquire)
-        }
-
+        #[allow(dead_code)]
         pub fn get_stats(&self) -> String {
             #[cfg(feature = "stat")]
             {
@@ -182,19 +182,19 @@ pub mod linux {
             }
         }
 
-        pub fn read_page(&self, page_id: PageId, page: &mut Page) -> Result<(), FMStatus> {
+        pub fn read_page(&self, page_id: PageId, page: &mut Page) -> Result<(), FMError> {
             log_trace!("Reading page: {} from file: {:?}", page_id, self.path);
             let mut file_inner = self.file_inner.lock().unwrap();
             file_inner.read_page(page_id, page)
         }
 
-        pub fn write_page(&self, page_id: PageId, page: &Page) -> Result<(), FMStatus> {
+        pub fn write_page(&self, page_id: PageId, page: &Page) -> Result<(), FMError> {
             log_trace!("Writing page: {} to file: {:?}", page_id, self.path);
             let mut file_inner = self.file_inner.lock().unwrap();
             file_inner.write_page(page_id, page)
         }
 
-        pub fn flush(&self) -> Result<(), FMStatus> {
+        pub fn flush(&self) -> Result<(), FMError> {
             log_trace!("Flushing file: {:?}", self.path);
             let mut file_inner = self.file_inner.lock().unwrap();
             file_inner.flush_page()
@@ -436,11 +436,11 @@ pub mod linux {
         ring: IoUring,
         page_buffer_status: Vec<bool>, // Written = true, Not written = false
         page_buffer: Vec<Page>,
-        io_vec: UnsafeCell<Vec<iovec>>, // We have to keep this in-memory for the lifetime of the io_uring.
+        _io_vec: UnsafeCell<Vec<iovec>>, // We have to keep this in-memory for the lifetime of the io_uring.
     }
 
     impl FileManagerInner {
-        fn new(file: File) -> Result<Self, FMStatus> {
+        fn new(file: File) -> Result<Self, FMError> {
             let ring = IoUring::builder()
                 .setup_sqpoll(1)
                 .build(PAGE_BUFFER_SIZE as _)?;
@@ -464,7 +464,7 @@ pub mod linux {
                 ring,
                 page_buffer_status: (0..PAGE_BUFFER_SIZE).map(|_| true).collect(),
                 page_buffer,
-                io_vec: UnsafeCell::new(io_vec),
+                _io_vec: UnsafeCell::new(io_vec),
             })
         }
 
@@ -476,10 +476,10 @@ pub mod linux {
             hasher.finish() as usize % PAGE_BUFFER_SIZE
         }
 
-        fn read_page(&mut self, page_id: PageId, page: &mut Page) -> Result<(), FMStatus> {
+        fn read_page(&mut self, page_id: PageId, page: &mut Page) -> Result<(), FMError> {
             // Check the entry in the page_buffer
             let hash = FileManagerInner::compute_hash(page_id);
-            let mut count = 0;
+            let mut _count = 0;
             if page_id == self.page_buffer[hash].get_id() {
                 page.copy(&self.page_buffer[hash]);
             } else {
@@ -490,19 +490,15 @@ pub mod linux {
                     .build()
                     .user_data(IOOpTag::new_read(page_id).as_u64());
                 unsafe {
-                    self.ring
-                        .submission()
-                        .push(&entry)
-                        .ok()
-                        .expect("queue is full");
+                    self.ring.submission().push(&entry).expect("queue is full");
                 }
-                let res = self.ring.submit()?;
+                let _res = self.ring.submit()?;
                 // assert_eq!(res, 1); // This is true if SQPOLL is disabled.
 
                 loop {
                     if let Some(entry) = self.ring.completion().next() {
                         let tag = IOOpTag::from(entry.user_data());
-                        count += 1;
+                        _count += 1;
                         match tag.get_op() {
                             IOOp::Read => {
                                 // Reads are run in sequence, so this should be the page we are interested in.
@@ -527,17 +523,17 @@ pub mod linux {
             log_debug!(
                 "Read completed for page: {} with wait count: {}",
                 page_id,
-                count
+                _count
             );
             #[cfg(feature = "stat")]
-            inc_local_read_stat(count);
+            inc_local_read_stat(_count);
             Ok(())
         }
 
-        fn write_page(&mut self, page_id: PageId, page: &Page) -> Result<(), FMStatus> {
+        fn write_page(&mut self, page_id: PageId, page: &Page) -> Result<(), FMError> {
             // Check the entry in the page_buffer
             let hash = FileManagerInner::compute_hash(page_id);
-            let mut count = 0;
+            let mut _count = 0;
             loop {
                 // Check the status of the page buffer.
                 if self.page_buffer_status[hash] {
@@ -555,27 +551,23 @@ pub mod linux {
                     .build()
                     .user_data(IOOpTag::new_write(page_id).as_u64());
                     unsafe {
-                        self.ring
-                            .submission()
-                            .push(&entry)
-                            .ok()
-                            .expect("queue is full");
+                        self.ring.submission().push(&entry).expect("queue is full");
                     }
-                    let res = self.ring.submit()?;
+                    let _res = self.ring.submit()?;
                     // assert_eq!(res, 1); // This is true if SQPOLL is disabled.
                     log_debug!(
                         "Write completed for page: {} with wait count: {}",
                         page_id,
-                        count
+                        _count
                     );
                     #[cfg(feature = "stat")]
-                    inc_local_write_stat(count);
+                    inc_local_write_stat(_count);
                     return Ok(()); // This is the only return point.
                 } else {
                     // If the page is not written, wait for the write to complete.
                     loop {
                         if let Some(entry) = self.ring.completion().next() {
-                            count += 1;
+                            _count += 1;
                             let tag = IOOpTag::from(entry.user_data());
                             match tag.get_op() {
                                 IOOp::Write => {
@@ -602,14 +594,14 @@ pub mod linux {
             }
         }
 
-        fn flush_page(&mut self) -> Result<(), FMStatus> {
+        fn flush_page(&mut self) -> Result<(), FMError> {
             // Find the first entry in the page_buffer that is not written. Wait for it to be written.
             for i in 0..PAGE_BUFFER_SIZE {
                 if !self.page_buffer_status[i] {
-                    let mut count = 0;
+                    let mut _count = 0;
                     loop {
                         if let Some(entry) = self.ring.completion().next() {
-                            count += 1;
+                            _count += 1;
                             let tag = IOOpTag::from(entry.user_data());
                             match tag.get_op() {
                                 IOOp::Write => {
@@ -640,11 +632,7 @@ pub mod linux {
                 .build()
                 .user_data(IOOpTag::new_flush().as_u64());
             unsafe {
-                self.ring
-                    .submission()
-                    .push(&entry)
-                    .ok()
-                    .expect("queue is full");
+                self.ring.submission().push(&entry).expect("queue is full");
             }
             let res = self.ring.submit_and_wait(1)?;
             assert_eq!(res, 1);

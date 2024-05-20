@@ -121,6 +121,10 @@ impl RandomKVs {
         self.kvs.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.kvs.is_empty()
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (&Vec<u8>, &Vec<u8>)> {
         self.kvs.iter().map(|(k, v)| (k, v))
     }
@@ -146,7 +150,7 @@ pub struct RandomOp<T> {
 impl<T> RandomOp<T> {
     pub fn new(weighted_choices: Vec<(T, f64)>) -> Self {
         let weights: Vec<f64> = weighted_choices.iter().map(|&(_, weight)| weight).collect();
-        let distribution = WeightedIndex::new(&weights).expect("WeightedIndex creation failed");
+        let distribution = WeightedIndex::new(weights).expect("WeightedIndex creation failed");
 
         RandomOp {
             weighted_choices,

@@ -1,5 +1,5 @@
 use super::buffer_frame::BufferFrame;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 // Static atomic counter for LRU timestamp
 pub const INITIAL_COUNTER: u64 = 1;
@@ -64,9 +64,9 @@ impl EvictionPolicy for LRUEvictionPolicy {
 
 #[cfg(test)]
 mod tests {
-    use super::{DummyEvictionPolicy, EvictionPolicy, LRUEvictionPolicy};
+    use super::LRUEvictionPolicy;
     use crate::buffer_pool::{
-        prelude::{get_test_bp, BufferPoolForTest, MemPool},
+        prelude::{get_test_bp, MemPool},
         ContainerKey,
     };
 

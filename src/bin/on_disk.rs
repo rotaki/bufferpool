@@ -3,7 +3,7 @@ use fbtree::{bench_utils::*, random::RandomKVs};
 
 fn main() {
     let bench_params = BenchParams::parse();
-    println!("{}", bench_params.to_string());
+    println!("{}", bench_params);
 
     let bp_size = bench_params.bp_size;
     let tree = gen_foster_btree_on_disk(bp_size);

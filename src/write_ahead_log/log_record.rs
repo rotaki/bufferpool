@@ -153,7 +153,7 @@ impl LogRecord<'_> {
         }
     }
 
-    pub fn from_bytes<'a>(bytes: &'a [u8]) -> LogRecord<'a> {
+    pub fn from_bytes(bytes: &[u8]) -> LogRecord {
         let mut bytes = bytes;
         let record_type = bytes[0];
         bytes = &bytes[1..];

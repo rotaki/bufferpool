@@ -176,7 +176,12 @@ pub struct FrameWriteGuard<'a, T: EvictionPolicy> {
 }
 
 impl<'a, T: EvictionPolicy> FrameWriteGuard<'a, T> {
-    pub fn key(&self) -> &mut Option<PageKey> {
+    pub fn key(&self) -> &Option<PageKey> {
+        // SAFETY: This is safe because the latch is held exclusively.
+        unsafe { &*self.buffer_frame.key.get() }
+    }
+
+    pub fn key_mut(&mut self) -> &mut Option<PageKey> {
         // SAFETY: This is safe because the latch is held exclusively.
         unsafe { &mut *self.buffer_frame.key.get() }
     }
@@ -198,10 +203,10 @@ impl<'a, T: EvictionPolicy> FrameWriteGuard<'a, T> {
         }
     }
 
-    pub fn clear(&self) {
+    pub fn clear(&mut self) {
         self.buffer_frame.is_dirty.store(false, Ordering::Release);
         self.buffer_frame.evict_info.write().unwrap().reset();
-        self.key().take();
+        self.key_mut().take();
     }
 }
 
@@ -383,7 +388,7 @@ mod tests {
     fn test_concurrent_upgrade_failure() {
         let buffer_frame = TestBufferFrame::default();
         let guard1 = buffer_frame.read();
-        let guard2 = buffer_frame.read();
+        let _guard2 = buffer_frame.read();
         assert!(guard1.try_upgrade(true).is_err());
     }
 }

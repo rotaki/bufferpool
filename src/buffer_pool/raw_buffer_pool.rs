@@ -1,7 +1,7 @@
-use lazy_static::lazy_static;
-use tempfile::TempDir;
+#[allow(unused_imports)]
+use crate::log;
 
-use crate::{log, log_debug, random::gen_random_int, rwlatch::RwLatch};
+use crate::{log_debug, random::gen_random_int, rwlatch::RwLatch};
 
 use super::{
     buffer_frame::{BufferFrame, FrameReadGuard, FrameWriteGuard},
@@ -9,21 +9,14 @@ use super::{
     mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, PageKey},
 };
 
-use crate::{
-    file_manager::{FMStatus, FileManager},
-    page::{Page, PageId},
-};
+use crate::file_manager::FileManager;
 
 use std::{
     cell::UnsafeCell,
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     ops::{Deref, DerefMut},
     path::PathBuf,
-    result,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
-    },
+    sync::atomic::Ordering,
 };
 
 const NUM_FRAMES_LARGE_THRESHOLD: usize = 100;
@@ -31,8 +24,9 @@ const EVICTION_SCAN_DEPTH: usize = 10;
 
 #[cfg(feature = "stat")]
 mod stat {
-    use super::*;
     use lazy_static::lazy_static;
+
+    use std::{cell::UnsafeCell, sync::Mutex};
     /// Statistics #pages evicted from the buffer pool.
     pub struct BPStats {
         hit_rate: UnsafeCell<[usize; 2]>, // [faults, total]
@@ -189,14 +183,6 @@ impl<T: EvictionPolicy> Frames<T> {
             initial_free_frames: (0..num_frames).collect(),
             frames: (0..num_frames).map(|_| BufferFrame::default()).collect(),
         }
-    }
-
-    pub fn get(&self, index: usize) -> &BufferFrame<T> {
-        &self.frames[index]
-    }
-
-    pub fn get_mut(&mut self, index: usize) -> &mut BufferFrame<T> {
-        &mut self.frames[index]
     }
 
     /// Choose a victim frame to be evicted.
@@ -434,9 +420,9 @@ where
                 let file = container_to_file
                     .get(&old_key.c_key)
                     .ok_or(MemPoolStatus::FileManagerNotFound)?;
-                file.write_page(old_key.page_id, &*guard)?;
+                file.write_page(old_key.page_id, &guard)?;
             }
-            id_to_index.remove(&old_key);
+            id_to_index.remove(old_key);
             log_debug!("Page evicted: {}", old_key);
         }
 
@@ -447,11 +433,11 @@ where
             let file = container_to_file
                 .get(&key.c_key)
                 .ok_or(MemPoolStatus::FileManagerNotFound)?;
-            file.read_page(key.page_id, &mut *guard)?;
+            file.read_page(key.page_id, &mut guard)?;
         };
 
         id_to_index.insert(key, index);
-        *guard.key() = Some(key);
+        *guard.key_mut() = Some(key);
         {
             let mut evict_info = guard.evict_info().write().unwrap();
             evict_info.reset();
@@ -477,8 +463,7 @@ where
 
         let fm = container_to_file.entry(c_key).or_insert_with(|| {
             FileManager::new(
-                &self
-                    .path
+                self.path
                     .join(c_key.db_id.to_string())
                     .join(c_key.c_id.to_string()),
             )
@@ -510,14 +495,8 @@ where
 
             if let Some(&index) = id_to_index.get(&key) {
                 let guard = frames[index].try_write(true);
-                if guard.is_some() {
-                    guard
-                        .as_ref()
-                        .unwrap()
-                        .evict_info()
-                        .write()
-                        .unwrap()
-                        .update();
+                if let Some(g) = &guard {
+                    g.evict_info().write().unwrap().update();
                 }
                 self.release_shared();
                 return guard.ok_or(MemPoolStatus::FrameWriteLatchGrantFailed);
@@ -534,14 +513,8 @@ where
         let result = match id_to_index.get(&key) {
             Some(&index) => {
                 let guard = frames[index].try_write(true);
-                if guard.is_some() {
-                    guard
-                        .as_ref()
-                        .unwrap()
-                        .evict_info()
-                        .write()
-                        .unwrap()
-                        .update();
+                if let Some(g) = &guard {
+                    g.evict_info().write().unwrap().update();
                 }
                 guard.ok_or(MemPoolStatus::FrameWriteLatchGrantFailed)
             }
@@ -570,14 +543,8 @@ where
 
             if let Some(&index) = id_to_index.get(&key) {
                 let guard = frames[index].try_read();
-                if guard.is_some() {
-                    guard
-                        .as_ref()
-                        .unwrap()
-                        .evict_info()
-                        .write()
-                        .unwrap()
-                        .update();
+                if let Some(g) = &guard {
+                    g.evict_info().write().unwrap().update();
                 }
                 self.release_shared();
                 return guard.ok_or(MemPoolStatus::FrameReadLatchGrantFailed);
@@ -594,14 +561,8 @@ where
         let result = match id_to_index.get(&key) {
             Some(&index) => {
                 let guard = frames[index].try_read();
-                if guard.is_some() {
-                    guard
-                        .as_ref()
-                        .unwrap()
-                        .evict_info()
-                        .write()
-                        .unwrap()
-                        .update();
+                if let Some(g) = &guard {
+                    g.evict_info().write().unwrap().update();
                 }
                 guard.ok_or(MemPoolStatus::FrameReadLatchGrantFailed)
             }
@@ -631,7 +592,7 @@ where
                 // swap is required to avoid concurrent flushes
                 let key = frame.key().unwrap();
                 if let Some(file) = container_to_file.get(&key.c_key) {
-                    file.write_page(key.page_id, &*frame)?;
+                    file.write_page(key.page_id, &frame)?;
                 } else {
                     self.release_shared();
                     return Err(MemPoolStatus::FileManagerNotFound);
@@ -655,7 +616,7 @@ where
         let frames = unsafe { &mut *self.frames.get() };
 
         for frame in frames.iter_mut() {
-            let frame = loop {
+            let mut frame = loop {
                 if let Some(guard) = frame.try_write(false) {
                     break guard;
                 }
@@ -758,7 +719,9 @@ unsafe impl<T: EvictionPolicy> Sync for RAWBufferPool<T> {}
 #[cfg(test)]
 mod tests {
     use crate::buffer_pool::eviction_policy::LRUEvictionPolicy;
-    use crate::{log, log_trace};
+    #[allow(unused_imports)]
+    use crate::log;
+    use crate::log_trace;
 
     use super::*;
     use std::thread;

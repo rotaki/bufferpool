@@ -95,6 +95,7 @@ impl RwLatch {
         }
     }
 
+    #[allow(dead_code)]
     pub fn upgrade(&self) {
         let mut expected: i16;
         loop {

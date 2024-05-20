@@ -1,3 +1,4 @@
+#[allow(clippy::module_inception)]
 mod foster_btree;
 mod foster_btree_page;
 mod foster_btree_visualizer_wasm;

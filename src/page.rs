@@ -1,10 +1,10 @@
 use std::ops::{Deref, DerefMut};
 
-use crate::write_ahead_log::prelude::{Lsn, LsnSize};
+use crate::write_ahead_log::prelude::{Lsn, LSN_SIZE};
 
 pub const PAGE_SIZE: usize = 4096;
 pub type PageId = u32;
-const BASE_PAGE_HEADER_SIZE: usize = 4 + LsnSize;
+const BASE_PAGE_HEADER_SIZE: usize = 4 + LSN_SIZE;
 pub const AVAILABLE_PAGE_SIZE: usize = PAGE_SIZE - BASE_PAGE_HEADER_SIZE;
 
 pub struct Page([u8; PAGE_SIZE]);
@@ -70,7 +70,7 @@ struct BasePageHeader {
 impl BasePageHeader {
     fn from_bytes(bytes: &[u8; BASE_PAGE_HEADER_SIZE]) -> Self {
         let id = u32::from_be_bytes(bytes[0..4].try_into().unwrap());
-        let lsn = Lsn::from_bytes(&bytes[4..4 + LsnSize].try_into().unwrap());
+        let lsn = Lsn::from_bytes(&bytes[4..4 + LSN_SIZE].try_into().unwrap());
         BasePageHeader { id, lsn }
     }
 
@@ -79,7 +79,7 @@ impl BasePageHeader {
         let lsn_bytes = self.lsn.to_bytes();
         let mut bytes = [0; BASE_PAGE_HEADER_SIZE];
         bytes[0..4].copy_from_slice(&id_bytes);
-        bytes[4..4 + LsnSize].copy_from_slice(&lsn_bytes);
+        bytes[4..4 + LSN_SIZE].copy_from_slice(&lsn_bytes);
         bytes
     }
 }

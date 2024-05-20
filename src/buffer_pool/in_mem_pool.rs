@@ -1,11 +1,6 @@
 use std::{
     cell::UnsafeCell,
     collections::{hash_map::Entry, HashMap},
-    pin::Pin,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        RwLock,
-    },
 };
 
 use crate::{page::Page, rwlatch::RwLatch};
@@ -28,6 +23,12 @@ pub struct InMemPool<T: EvictionPolicy> {
     frames: UnsafeCell<Vec<Box<BufferFrame<T>>>>, // Box is required to ensure that the frame does not move when the vector is resized
     id_to_index: UnsafeCell<HashMap<PageKey, usize>>,
     container_page_count: UnsafeCell<HashMap<ContainerKey, u32>>,
+}
+
+impl<T: EvictionPolicy> Default for InMemPool<T> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<T: EvictionPolicy> InMemPool<T> {
@@ -89,7 +90,7 @@ impl<T: EvictionPolicy> MemPool<T> for InMemPool<T> {
         self.release_exclusive();
 
         guard.copy(&page);
-        *guard.key() = Some(page_key);
+        *guard.key_mut() = Some(page_key);
         Ok(guard)
     }
 

@@ -7,7 +7,7 @@ mod raw_buffer_pool;
 
 use std::sync::Arc;
 
-use eviction_policy::{DummyEvictionPolicy, EvictionPolicy, LRUEvictionPolicy};
+use eviction_policy::{DummyEvictionPolicy, EvictionPolicy};
 
 pub use buffer_frame::{FrameReadGuard, FrameWriteGuard};
 pub use in_mem_pool::InMemPool;

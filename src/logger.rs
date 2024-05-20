@@ -1,13 +1,14 @@
 use chrono::Local;
 use lazy_static::lazy_static;
-use std::cell::RefCell;
-use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::sync::Mutex;
 use std::thread;
 
 /*
 // Multi-buffer logger
+use std::cell::RefCell;
+use std::fs::{File, OpenOptions};
+
 // This will print logs to a separate file for each thread
 thread_local! {
     static LOG_FILE: RefCell<io::Result<File>> = RefCell::new(

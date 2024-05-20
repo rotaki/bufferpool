@@ -1,5 +1,7 @@
+#[allow(unused_imports)]
+use crate::log;
+use crate::log_trace;
 use crate::page::Page;
-use crate::{log, log_trace};
 
 mod page_header {
     pub const PAGE_HEADER_SIZE: usize = 4;
@@ -95,6 +97,7 @@ mod slot {
             self.offset = (self.offset & 0b1000_0000_0000_0000) | (offset & 0b0111_1111_1111_1111);
         }
 
+        #[allow(dead_code)]
         pub fn size(&self) -> u16 {
             self.size
         }
@@ -225,7 +228,7 @@ impl<'a> HeapPage<'a> {
         for slot_id in 0..self.header().active_slot_count() {
             if let Some(mut slot) = self.slot(slot_id) {
                 let current_offset = slot.offset();
-                if current_offset < shift_start_offset as u16 && slot.is_valid() {
+                if current_offset < shift_start_offset && slot.is_valid() {
                     // Update slot
                     let new_offset = current_offset + shift_size;
                     slot.set_offset(new_offset);
@@ -298,6 +301,7 @@ impl<'a> HeapPage<'a> {
         }
     }
 
+    #[allow(dead_code)]
     pub fn get_value(&self, slot_id: u16) -> Option<&[u8]> {
         if let Some(slot) = self.slot(slot_id) {
             if slot.is_valid() {
@@ -318,6 +322,7 @@ impl<'a> HeapPage<'a> {
         }
     }
 
+    #[allow(dead_code)]
     pub fn delete_value(&mut self, slot_id: u16) -> Option<()> {
         if let Some(mut slot) = self.slot(slot_id) {
             if slot.is_valid() {
@@ -355,6 +360,7 @@ impl<'a> HeapPage<'a> {
 
 #[cfg(any(test, debug_assertions))]
 impl HeapPage<'_> {
+    #[allow(dead_code)]
     pub fn check_slot_offset_and_rec_start_offset(&self) {
         let slot_offset = HeapPage::slot_offset(self.header().active_slot_count());
         let rec_start_offset = self.header().rec_start_offset();
