@@ -247,7 +247,7 @@ impl<T: EvictionPolicy> Debug for FrameWriteGuard<'_, T> {
 mod tests {
     use std::{sync::Arc, thread};
 
-    use crate::buffer_pool::eviction_policy::DummyEvictionPolicy;
+    use crate::bp::eviction_policy::DummyEvictionPolicy;
 
     use super::*;
 

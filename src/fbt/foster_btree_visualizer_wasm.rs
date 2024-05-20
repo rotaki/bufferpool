@@ -2,9 +2,9 @@
 pub mod inner {
     use wasm_bindgen::prelude::*;
 
-    use crate::buffer_pool::prelude::*;
-    use crate::foster_btree::foster_btree::{FosterBtree, PageVisitor, MAX_BYTES_USED};
-    use crate::foster_btree::FosterBtreePage;
+    use crate::bp::prelude::*;
+    use crate::fbt::foster_btree::{FosterBtree, PageVisitor, MAX_BYTES_USED};
+    use crate::fbt::FosterBtreePage;
     use crate::page::{Page, PageId};
 
     use std::collections::{HashMap, HashSet};

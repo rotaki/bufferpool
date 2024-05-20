@@ -289,7 +289,7 @@ impl<T: EvictionPolicy> DerefMut for Frames<T> {
 }
 
 /// Read-after-write buffer pool.
-pub struct RAWBufferPool<T: EvictionPolicy> {
+pub struct BufferPool<T: EvictionPolicy> {
     path: PathBuf,
     latch: RwLatch,
     frames: UnsafeCell<Frames<T>>,
@@ -297,7 +297,7 @@ pub struct RAWBufferPool<T: EvictionPolicy> {
     container_to_file: UnsafeCell<HashMap<ContainerKey, FileManager>>,
 }
 
-impl<T> RAWBufferPool<T>
+impl<T> BufferPool<T>
 where
     T: EvictionPolicy,
 {
@@ -328,7 +328,7 @@ where
             }
         }
 
-        Ok(RAWBufferPool {
+        Ok(BufferPool {
             path: path.as_ref().to_path_buf(),
             latch: RwLatch::default(),
             id_to_index: UnsafeCell::new(HashMap::new()),
@@ -638,7 +638,7 @@ where
     }
 }
 
-impl<T> MemPool<T> for RAWBufferPool<T>
+impl<T> MemPool<T> for BufferPool<T>
 where
     T: EvictionPolicy,
 {
@@ -646,24 +646,24 @@ where
         &self,
         c_key: ContainerKey,
     ) -> Result<FrameWriteGuard<T>, MemPoolStatus> {
-        RAWBufferPool::create_new_page_for_write(self, c_key)
+        BufferPool::create_new_page_for_write(self, c_key)
     }
 
     fn get_page_for_write(&self, key: PageKey) -> Result<FrameWriteGuard<T>, MemPoolStatus> {
-        RAWBufferPool::get_page_for_write(self, key)
+        BufferPool::get_page_for_write(self, key)
     }
 
     fn get_page_for_read(&self, key: PageKey) -> Result<FrameReadGuard<T>, MemPoolStatus> {
-        RAWBufferPool::get_page_for_read(self, key)
+        BufferPool::get_page_for_read(self, key)
     }
 
     fn reset(&self) {
-        RAWBufferPool::reset(self);
+        BufferPool::reset(self);
     }
 }
 
 #[cfg(test)]
-impl<T: EvictionPolicy> RAWBufferPool<T> {
+impl<T: EvictionPolicy> BufferPool<T> {
     pub fn run_checks(&self) {
         self.check_all_frames_unlatched();
         self.check_id_to_index();
@@ -714,11 +714,11 @@ impl<T: EvictionPolicy> RAWBufferPool<T> {
     }
 }
 
-unsafe impl<T: EvictionPolicy> Sync for RAWBufferPool<T> {}
+unsafe impl<T: EvictionPolicy> Sync for BufferPool<T> {}
 
 #[cfg(test)]
 mod tests {
-    use crate::buffer_pool::eviction_policy::LRUEvictionPolicy;
+    use crate::bp::eviction_policy::LRUEvictionPolicy;
     #[allow(unused_imports)]
     use crate::log;
     use crate::log_trace;
@@ -727,7 +727,7 @@ mod tests {
     use std::thread;
     use tempfile::TempDir;
 
-    pub type TestRAWBufferPool = RAWBufferPool<LRUEvictionPolicy>;
+    pub type TestRAWBufferPool = BufferPool<LRUEvictionPolicy>;
 
     #[test]
     fn test_bp_and_frame_latch() {

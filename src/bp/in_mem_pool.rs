@@ -185,7 +185,7 @@ unsafe impl<T: EvictionPolicy> Sync for InMemPool<T> {}
 
 #[cfg(test)]
 mod tests {
-    use crate::buffer_pool::prelude::DummyEvictionPolicy;
+    use crate::bp::prelude::DummyEvictionPolicy;
 
     use super::*;
     use std::thread;

@@ -3,7 +3,7 @@ mod buffer_frame;
 mod eviction_policy;
 mod in_mem_pool;
 mod mem_pool_trait;
-mod raw_buffer_pool;
+mod buffer_pool;
 
 use std::sync::Arc;
 
@@ -12,19 +12,19 @@ use eviction_policy::{DummyEvictionPolicy, EvictionPolicy};
 pub use buffer_frame::{FrameReadGuard, FrameWriteGuard};
 pub use in_mem_pool::InMemPool;
 pub use mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, PageKey};
-pub use raw_buffer_pool::RAWBufferPool;
+pub use buffer_pool::BufferPool;
 use tempfile::TempDir;
 
 pub struct BufferPoolForTest<E: EvictionPolicy> {
     pub _temp_dir: TempDir,
-    pub bp: RAWBufferPool<E>,
+    pub bp: BufferPool<E>,
 }
 
 impl<E: EvictionPolicy> BufferPoolForTest<E> {
     pub fn new(num_frames: usize) -> Self {
         let temp_dir = TempDir::new().unwrap();
         std::fs::create_dir(temp_dir.path().join("0")).unwrap();
-        let bp = RAWBufferPool::new(temp_dir.path(), num_frames).unwrap();
+        let bp = BufferPool::new(temp_dir.path(), num_frames).unwrap();
         Self {
             _temp_dir: temp_dir,
             bp,
@@ -82,5 +82,5 @@ pub mod prelude {
     pub use super::eviction_policy::{DummyEvictionPolicy, EvictionPolicy, LRUEvictionPolicy};
     pub use super::mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, PageKey};
     pub use super::{get_in_mem_pool, get_test_bp, BufferPoolForTest};
-    pub use super::{InMemPool, RAWBufferPool};
+    pub use super::{InMemPool, BufferPool};
 }

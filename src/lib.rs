@@ -1,6 +1,6 @@
 pub mod bench_utils;
-pub mod buffer_pool;
-pub mod foster_btree;
+pub mod bp;
+pub mod fbt;
 pub mod write_ahead_log;
 
 mod file_manager;

@@ -65,7 +65,7 @@ impl EvictionPolicy for LRUEvictionPolicy {
 #[cfg(test)]
 mod tests {
     use super::LRUEvictionPolicy;
-    use crate::buffer_pool::{
+    use crate::bp::{
         prelude::{get_test_bp, MemPool},
         ContainerKey,
     };

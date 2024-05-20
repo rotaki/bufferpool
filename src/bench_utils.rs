@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, sync::Arc, thread};
 use clap::Parser;
 
 use crate::{
-    buffer_pool::{
+    bp::{
         get_in_mem_pool, get_test_bp,
         prelude::{
             ContainerKey, DummyEvictionPolicy, EvictionPolicy, InMemPool, LRUEvictionPolicy,
@@ -11,7 +11,7 @@ use crate::{
         },
         BufferPoolForTest,
     },
-    foster_btree::FosterBtree,
+    fbt::FosterBtree,
     random::{RandomKVs, RandomOp},
 };
 

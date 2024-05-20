@@ -9,7 +9,7 @@ use std::{
 };
 
 use crate::{
-    buffer_pool::prelude::*,
+    bp::prelude::*,
     log_trace, log_warn,
     page::{Page, PageId, AVAILABLE_PAGE_SIZE},
 };
@@ -1948,8 +1948,8 @@ mod tests {
     use crate::log_trace;
 
     use crate::{
-        buffer_pool::{get_in_mem_pool, get_test_bp},
-        foster_btree::foster_btree::{
+        bp::{get_in_mem_pool, get_test_bp},
+        fbt::foster_btree::{
             adopt, anti_adopt, ascend_root, balance, descend_root, is_large, is_small, merge,
             should_adopt, should_antiadopt, should_load_balance, should_merge, should_root_ascend,
             should_root_descend, TreeStatus, MIN_BYTES_USED,
