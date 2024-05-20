@@ -1,18 +1,18 @@
 mod buffer_frame;
 // mod buffer_pool;
+mod buffer_pool;
 mod eviction_policy;
 mod in_mem_pool;
 mod mem_pool_trait;
-mod buffer_pool;
 
 use std::sync::Arc;
 
 use eviction_policy::{DummyEvictionPolicy, EvictionPolicy};
 
 pub use buffer_frame::{FrameReadGuard, FrameWriteGuard};
+pub use buffer_pool::BufferPool;
 pub use in_mem_pool::InMemPool;
 pub use mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, PageKey};
-pub use buffer_pool::BufferPool;
 use tempfile::TempDir;
 
 pub struct BufferPoolForTest<E: EvictionPolicy> {
@@ -82,5 +82,5 @@ pub mod prelude {
     pub use super::eviction_policy::{DummyEvictionPolicy, EvictionPolicy, LRUEvictionPolicy};
     pub use super::mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, PageKey};
     pub use super::{get_in_mem_pool, get_test_bp, BufferPoolForTest};
-    pub use super::{InMemPool, BufferPool};
+    pub use super::{BufferPool, InMemPool};
 }

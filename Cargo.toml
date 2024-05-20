@@ -26,11 +26,6 @@ criterion = { version = "0.5", features = ["html_reports"]}
 serde_cbor = "0.11"
 rstest = "0.19"
 
-# For perf
-# [target.x86_64-unknown-linux-gnu]
-# linker = "/usr/bin/clang"
-# rustflags = ["-Clink-arg=-fuse-ld=lld", "-Clink-arg=-Wl,--no-rosegment"]
-
 # For linux, we use io-uring
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = "0.6"
@@ -46,7 +41,7 @@ wasm-bindgen = "0.2"
 lto = true
 panic = "abort"
 codegen-units = 1
-# debug = true # For perf
+debug = true # For perf
 
 [[bench]]
 name = "random_insert"

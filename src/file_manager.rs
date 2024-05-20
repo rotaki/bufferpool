@@ -433,6 +433,7 @@ pub mod linux {
     unsafe impl Send for FileManagerInner {} // Send is needed for io_vec
 
     struct FileManagerInner {
+        _file: File,
         ring: IoUring,
         page_buffer_status: Vec<bool>, // Written = true, Not written = false
         page_buffer: Vec<Page>,
@@ -461,6 +462,7 @@ pub mod linux {
                 submitter.register_buffers(&io_vec)?;
             }
             Ok(FileManagerInner {
+                _file: file,
                 ring,
                 page_buffer_status: (0..PAGE_BUFFER_SIZE).map(|_| true).collect(),
                 page_buffer,
