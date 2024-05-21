@@ -455,7 +455,7 @@ fn is_parent_and_child(parent: &Page, child: &Page) -> bool {
     // Find the slot id of the child page in the parent page.
     let slot_id = parent.upper_bound_slot_id(&low_key) - 1;
     // Check if the value of the slot id is the same as the child page id.
-    parent.get_val(slot_id) == child.get_id().to_be_bytes()
+    deserialize_page_id(parent.get_val(slot_id)) == Some(child.get_id())
 }
 
 /// Check if the parent page is the foster parent of the child page.
@@ -640,7 +640,10 @@ fn should_root_descend(this: &Page, child: &Page) -> bool {
 /// Split this page into two pages.
 /// The foster child will be the right page of this page after the split.
 /// Returns the foster key
-fn split(this: &mut Page, foster_child: &mut Page) -> Vec<u8> {
+fn split<E: EvictionPolicy>(
+    this: &mut FrameWriteGuard<E>,
+    foster_child: &mut FrameWriteGuard<E>,
+) -> Vec<u8> {
     #[cfg(feature = "stat")]
     inc_local_stat_success(OpType::Split);
 
@@ -681,7 +684,8 @@ fn split(this: &mut Page, foster_child: &mut Page) -> Vec<u8> {
     assert!(res);
     foster_child.set_has_foster_child(this.has_foster_child());
     // Remove the moved slots from this
-    this.remove_range(moving_slot_ids[0], this.high_fence_slot_id());
+    let high_fence_slot_id = this.high_fence_slot_id();
+    this.remove_range(moving_slot_ids[0], high_fence_slot_id);
     let res = this.insert(&foster_key, &foster_child.get_id().to_be_bytes(), false);
     assert!(res);
     this.set_has_foster_child(true);
@@ -697,7 +701,12 @@ fn split(this: &mut Page, foster_child: &mut Page) -> Vec<u8> {
 /// Some assumptions:
 /// 1. Key must be in the range of the page.
 /// 2. The foster child is a unused page. It will be initialized in this function.
-fn split_insert(this: &mut Page, foster_child: &mut Page, key: &[u8], value: &[u8]) {
+fn split_insert<E: EvictionPolicy>(
+    this: &mut FrameWriteGuard<E>,
+    foster_child: &mut FrameWriteGuard<E>,
+    key: &[u8],
+    value: &[u8],
+) {
     let foster_key = split(this, foster_child);
 
     // Now, we have two pages: this and foster_child.
@@ -729,12 +738,12 @@ fn split_insert(this: &mut Page, foster_child: &mut Page, key: &[u8], value: &[u
 }
 /// Merge the foster child page into this page.
 /// The foster child page will be deleted.
-// Before:
-//   this [k0, k2) --> sibling [k1, k2)
-//
-// After:
-//   this [k0, k2)
-fn merge(this: &mut Page, foster_child: &mut Page) {
+/// Before:
+///   this [k0, k2) --> sibling [k1, k2)
+///
+/// After:
+///   this [k0, k2)
+fn merge<E: EvictionPolicy>(this: &mut FrameWriteGuard<E>, foster_child: &mut FrameWriteGuard<E>) {
     #[cfg(feature = "stat")]
     inc_local_stat_success(OpType::Merge);
 
@@ -747,11 +756,13 @@ fn merge(this: &mut Page, foster_child: &mut Page) {
         let val = foster_child.get_val(i);
         kvs.push((key, val));
     }
-    this.remove_at(this.foster_child_slot_id());
+    let foster_child_slot_id = this.foster_child_slot_id();
+    this.remove_at(foster_child_slot_id);
     let res = this.append_sorted(&kvs);
     assert!(res);
     this.set_has_foster_child(foster_child.has_foster_child());
-    foster_child.remove_range(1, foster_child.high_fence_slot_id());
+    let high_fence_slot_id = foster_child.high_fence_slot_id();
+    foster_child.remove_range(1, high_fence_slot_id);
     foster_child.set_has_foster_child(false);
 
     #[cfg(debug_assertions)]
@@ -768,7 +779,10 @@ fn merge(this: &mut Page, foster_child: &mut Page) {
 /// 2. The two pages are initialized. (have low fence and high fence)
 /// 3. Balancing does not move the foster key from one page to another.
 /// 4. Balancing does not move the low fence and high fence.
-fn balance(this: &mut Page, foster_child: &mut Page) {
+fn balance<E: EvictionPolicy>(
+    this: &mut FrameWriteGuard<E>,
+    foster_child: &mut FrameWriteGuard<E>,
+) {
     #[cfg(feature = "stat")]
     inc_local_stat_success(OpType::LoadBalance);
 
@@ -816,7 +830,8 @@ fn balance(this: &mut Page, foster_child: &mut Page) {
                 assert!(res);
             }
             // Remove the moved slots from this
-            this.remove_range(moving_slot_ids[0], this.high_fence_slot_id());
+            let high_fence_slot_id = this.high_fence_slot_id();
+            this.remove_range(moving_slot_ids[0], high_fence_slot_id);
             let res = this.insert(
                 foster_child.get_raw_key(0),
                 &foster_child.get_id().to_be_bytes(),
@@ -855,7 +870,8 @@ fn balance(this: &mut Page, foster_child: &mut Page) {
             // this [l, k0, k1, k2, ..., f(kN), h) --> foster_child [l(kN), kN, kN+1, ..., h)
             // After:
             // this [l, k0, k1, ..., f(kN+m), h) --> foster_child [l(kN+m), kN+m, kN+m+1, ..., h)
-            this.remove_at(this.foster_child_slot_id());
+            let foster_child_slot_id = this.foster_child_slot_id();
+            this.remove_at(foster_child_slot_id);
             for (key, val) in moving_kvs {
                 let res = this.insert(key, val, false);
                 assert!(res);
@@ -895,7 +911,7 @@ fn balance(this: &mut Page, foster_child: &mut Page) {
 ///    |                   |
 ///    v                   v
 ///   child0 [k0, k1)    child1 [k1, k2)
-fn adopt(parent: &mut Page, child: &mut Page) {
+fn adopt<E: EvictionPolicy>(parent: &mut FrameWriteGuard<E>, child: &mut FrameWriteGuard<E>) {
     #[cfg(feature = "stat")]
     inc_local_stat_success(OpType::Adopt);
 
@@ -911,7 +927,8 @@ fn adopt(parent: &mut Page, child: &mut Page) {
     );
     assert!(res);
     // Make the foster key the high fence of the child page.
-    child.remove_at(child.high_fence_slot_id()); // Remove the high fence to make the foster key the high fence.
+    let high_fence_slot_id = child.high_fence_slot_id();
+    child.remove_at(high_fence_slot_id); // Remove the high fence to make the foster key the high fence.
     child.set_has_foster_child(false);
 }
 
@@ -930,7 +947,7 @@ fn adopt(parent: &mut Page, child: &mut Page) {
 ///  |
 ///  v
 /// child1 [k0, k2) --> foster_child [k1, k2)
-fn anti_adopt(parent: &mut Page, child1: &mut Page) {
+fn anti_adopt<E: EvictionPolicy>(parent: &mut FrameWriteGuard<E>, child1: &mut FrameWriteGuard<E>) {
     #[cfg(feature = "stat")]
     inc_local_stat_success(OpType::AntiAdopt);
 
@@ -971,7 +988,7 @@ fn anti_adopt(parent: &mut Page, child1: &mut Page) {
 ///
 /// After:
 /// root [-inf, +inf)
-fn descend_root(root: &mut Page, child: &mut Page) {
+fn descend_root<E: EvictionPolicy>(root: &mut FrameWriteGuard<E>, child: &mut FrameWriteGuard<E>) {
     #[cfg(feature = "stat")]
     inc_local_stat_success(OpType::DescendRoot);
 
@@ -995,8 +1012,8 @@ fn descend_root(root: &mut Page, child: &mut Page) {
     }
     let res = root.append_sorted(&kvs);
     assert!(res);
-
-    child.remove_range(1, child.high_fence_slot_id());
+    let high_fence_slot_id = child.high_fence_slot_id();
+    child.remove_range(1, high_fence_slot_id);
 }
 
 /// Ascend the root page to the parent page if the root page
@@ -1013,7 +1030,7 @@ fn descend_root(root: &mut Page, child: &mut Page) {
 ///  |                   |
 ///  v                   v
 /// child [-inf, k0)    foster_child [k0, +inf)
-fn ascend_root(root: &mut Page, child: &mut Page) {
+fn ascend_root<E: EvictionPolicy>(root: &mut FrameWriteGuard<E>, child: &mut FrameWriteGuard<E>) {
     #[cfg(feature = "stat")]
     inc_local_stat_success(OpType::AscendRoot);
 
@@ -1045,7 +1062,8 @@ fn ascend_root(root: &mut Page, child: &mut Page) {
     assert!(res);
 
     // Remove the moved slots from the root
-    root.remove_range(1, root.foster_child_slot_id());
+    let foster_child_slot_id = root.foster_child_slot_id();
+    root.remove_range(1, foster_child_slot_id);
     root.insert(&[], &child.get_id().to_be_bytes(), false);
 
     #[cfg(debug_assertions)]
@@ -1217,7 +1235,13 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
         }
     }
 
-    fn insert_at_slot_or_split(&self, this: &mut Page, slot: u16, key: &[u8], value: &[u8]) {
+    fn insert_at_slot_or_split(
+        &self,
+        this: &mut FrameWriteGuard<E>,
+        slot: u16,
+        key: &[u8],
+        value: &[u8],
+    ) {
         if !this.insert_at(slot, key, value) {
             #[cfg(feature = "stat")]
             inc_local_stat_trigger(OpType::Split);
@@ -1227,7 +1251,13 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
         }
     }
 
-    fn update_at_slot_or_split(&self, this: &mut Page, slot: u16, key: &[u8], value: &[u8]) {
+    fn update_at_slot_or_split(
+        &self,
+        this: &mut FrameWriteGuard<E>,
+        slot: u16,
+        key: &[u8],
+        value: &[u8],
+    ) {
         if !this.update_at(slot, key, value) {
             #[cfg(feature = "stat")]
             inc_local_stat_trigger(OpType::Split);
@@ -1304,7 +1334,12 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
         }
     }
 
-    fn modify_structure(&self, op: OpType, this: &mut Page, child: &mut Page) {
+    fn modify_structure(
+        &self,
+        op: OpType,
+        this: &mut FrameWriteGuard<E>,
+        child: &mut FrameWriteGuard<E>,
+    ) {
         match op {
             OpType::Merge => {
                 // Merge the foster child into this page
