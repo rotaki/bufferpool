@@ -36,10 +36,9 @@ pub type FileManager = linux::FileManager;
 
 #[cfg(any(not(target_os = "linux"), target_arch = "wasm32"))]
 pub mod not_linux {
-    use super::FMStatus;
+    use super::FMError;
     use crate::page::{Page, PageId, PAGE_SIZE};
     use crate::{log, log_debug, log_trace};
-    use std::cell::UnsafeCell;
     use std::fs::{File, OpenOptions};
     use std::io::{Read, Seek, SeekFrom, Write};
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};

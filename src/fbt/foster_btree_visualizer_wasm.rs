@@ -3,7 +3,7 @@ pub mod inner {
     use wasm_bindgen::prelude::*;
 
     use crate::bp::prelude::*;
-    use crate::fbt::foster_btree::{FosterBtree, PageVisitor, MAX_BYTES_USED};
+    use crate::fbt::foster_btree::{deserialize_page_id, FosterBtree, PageVisitor, MAX_BYTES_USED};
     use crate::fbt::FosterBtreePage;
     use crate::page::{Page, PageId};
 
@@ -169,13 +169,15 @@ pub mod inner {
 
             if page.is_leaf() {
                 if page.has_foster_child() {
-                    let foster_child_page_id = page.get_foster_page_id();
+                    let foster_child_page_id =
+                        deserialize_page_id(page.get_foster_val().try_into().unwrap()).unwrap();
                     self.dot
                         .push_str(&format!("\t{} -> {};\n", id, foster_child_page_id));
                 }
             } else {
                 for i in 1..=page.active_slot_count() {
-                    let child_page_id = PageId::from_be_bytes(page.get_val(i).try_into().unwrap());
+                    let child_page_id =
+                        deserialize_page_id(page.get_val(i).try_into().unwrap()).unwrap();
                     self.dot
                         .push_str(&format!("\t{} -> {};\n", id, child_page_id));
                 }
