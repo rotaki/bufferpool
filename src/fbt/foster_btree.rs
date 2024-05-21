@@ -2694,7 +2694,7 @@ mod tests {
     }
 
     // Foster relationship between two pages.
-    // Returns (temp_dir, bp, this_page_id, foster_page_id)
+    // Returns (this_page_key, foster_page_key)
     // If is_root is true, then this_page is a root page.
     fn build_foster_relationship<E: EvictionPolicy, T: MemPool<E>>(
         bp: Arc<T>,
@@ -2752,10 +2752,10 @@ mod tests {
         this.run_consistency_checks(true);
         foster.run_consistency_checks(true);
 
-        let this_id = this.page_frame_key().unwrap();
-        let foster_id = foster.page_frame_key().unwrap();
+        let this_key = this.page_frame_key().unwrap();
+        let foster_key = foster.page_frame_key().unwrap();
 
-        (this_id, foster_id)
+        (this_key, foster_key)
     }
 
     // In a foster relationship, MERGE, BALANCE, ROOT_ASCEND is allowed.
@@ -2933,10 +2933,10 @@ mod tests {
         child0.run_consistency_checks(true);
         child1.run_consistency_checks(true);
 
-        let parent_id = parent.page_frame_key().unwrap();
-        let child0_id = child0.page_frame_key().unwrap();
+        let parent_key = parent.page_frame_key().unwrap();
+        let child0_key = child0.page_frame_key().unwrap();
 
-        (parent_id, child0_id)
+        (parent_key, child0_key)
     }
 
     fn build_single_child_with_foster_child_tree<E: EvictionPolicy, T: MemPool<E>>(
@@ -2993,10 +2993,10 @@ mod tests {
         child0.run_consistency_checks(true);
         child1.run_consistency_checks(true);
 
-        let parent_id = parent.page_frame_key().unwrap();
-        let child0_id = child0.page_frame_key().unwrap();
+        let parent_key = parent.page_frame_key().unwrap();
+        let child0_key = child0.page_frame_key().unwrap();
 
-        (parent_id, child0_id)
+        (parent_key, child0_key)
     }
 
     fn build_single_child_tree<E: EvictionPolicy, T: MemPool<E>>(
@@ -3045,10 +3045,10 @@ mod tests {
         parent.run_consistency_checks(true);
         child0.run_consistency_checks(true);
 
-        let parent_id = parent.page_frame_key().unwrap();
-        let child0_id = child0.page_frame_key().unwrap();
+        let parent_key = parent.page_frame_key().unwrap();
+        let child0_key = child0.page_frame_key().unwrap();
 
-        (parent_id, child0_id)
+        (parent_key, child0_key)
     }
 
     // In a parent-child relationship, ADOPT, ANTI_ADOPT, ROOT_DESCEND is allowed.
