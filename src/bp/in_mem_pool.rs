@@ -154,8 +154,7 @@ impl<T: EvictionPolicy> InMemPool<T> {
     pub fn check_all_frames_unlatched(&self) {
         let frames = unsafe { &*self.frames.get() };
         for frame in frames.iter() {
-            assert!(!frame.is_shared());
-            assert!(!frame.is_exclusive());
+            frame.try_write(false).unwrap();
         }
     }
 

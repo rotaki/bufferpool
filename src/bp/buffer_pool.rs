@@ -19,7 +19,6 @@ use std::{
     sync::atomic::Ordering,
 };
 
-const NUM_FRAMES_LARGE_THRESHOLD: usize = 100;
 const EVICTION_SCAN_DEPTH: usize = 10;
 
 #[cfg(feature = "stat")]
@@ -171,7 +170,6 @@ use stat::*;
 pub struct Frames<T: EvictionPolicy> {
     num_frames: usize,
     eviction_candidates: [usize; EVICTION_SCAN_DEPTH],
-    initial_free_frames: VecDeque<usize>, // Used for initial free frames only
     frames: Vec<BufferFrame<T>>, // The Vec<frames> is fixed size. If not fixed size, then Pin must be used to ensure that the frame does not move when the vector is resized.
 }
 
@@ -180,7 +178,6 @@ impl<T: EvictionPolicy> Frames<T> {
         Frames {
             num_frames,
             eviction_candidates: [0; EVICTION_SCAN_DEPTH],
-            initial_free_frames: (0..num_frames).collect(),
             frames: (0..num_frames)
                 .map(|i| BufferFrame::new(i as u32))
                 .collect(),
@@ -190,88 +187,68 @@ impl<T: EvictionPolicy> Frames<T> {
     /// Choose a victim frame to be evicted.
     /// Return the index of the frame and whether the frame is dirty (requires writing back to disk).
     /// If all the frames are locked, then return None.
-    pub fn choose_victim(&mut self) -> Option<(usize, bool)> {
-        if self.num_frames > NUM_FRAMES_LARGE_THRESHOLD {
-            // self.choose_victim_num_frames_large()
-            self.choose_victim_simple_large()
-        } else {
-            self.choose_victim_simple_small()
+    pub fn choose_victim(&mut self) -> Option<FrameWriteGuard<T>> {
+        log_debug!("Choosing victim");
+        // Initialize the eviction candidates with max
+        for i in 0..EVICTION_SCAN_DEPTH {
+            self.eviction_candidates[i] = usize::MAX;
         }
-    }
-
-    fn choose_victim_simple_large(&mut self) -> Option<(usize, bool)> {
-        if !self.initial_free_frames.is_empty() {
-            #[cfg(feature = "stat")]
-            inc_local_bp_free_victim();
-            let idx = self.initial_free_frames.pop_front().unwrap();
-            Some((idx, false))
-        } else {
-            // Scan the frames to find the victim
-            for i in 0..EVICTION_SCAN_DEPTH {
+        if self.num_frames > EVICTION_SCAN_DEPTH {
+            // Generate **distinct** random numbers.
+            for _ in 0..2 * EVICTION_SCAN_DEPTH {
                 let rand_idx = gen_random_int(0, self.num_frames - 1);
-                self.eviction_candidates[i] = rand_idx;
+                self.eviction_candidates[rand_idx % EVICTION_SCAN_DEPTH] = rand_idx;
+                // Use mod to avoid duplicates
             }
-            let mut frame_with_min_score = (0, u64::MAX, false);
-            for i in self.eviction_candidates.iter() {
-                let frame = &self.frames[*i];
-                if frame.is_locked() {
-                    continue;
-                }
-                let score = frame.eviction_score();
-                if score < frame_with_min_score.1 {
-                    frame_with_min_score = (*i, score, frame.is_dirty());
-                }
-            }
-
-            if frame_with_min_score.1 != u64::MAX {
-                if frame_with_min_score.2 {
-                    #[cfg(feature = "stat")]
-                    inc_local_bp_dirty_victim();
-                } else {
-                    #[cfg(feature = "stat")]
-                    inc_local_bp_clean_victim();
-                }
-                Some((frame_with_min_score.0, frame_with_min_score.2))
-            } else {
-                #[cfg(feature = "stat")]
-                inc_local_bp_all_latched_victim();
-                None
+        } else {
+            // Use all the frames as candidates
+            for i in 0..self.num_frames {
+                self.eviction_candidates[i] = i;
             }
         }
-    }
+        // Remove duplicates
+        log_debug!("Eviction candidates: {:?}", self.eviction_candidates);
 
-    fn choose_victim_simple_small(&mut self) -> Option<(usize, bool)> {
-        if !self.initial_free_frames.is_empty() {
-            #[cfg(feature = "stat")]
-            inc_local_bp_free_victim();
-            let idx = self.initial_free_frames.pop_front().unwrap();
-            Some((idx, false))
-        } else {
-            // Scan the frames to find the victom
-            let mut frame_with_min_score = (0, u64::MAX, false);
-            for (i, frame) in self.frames.iter().enumerate() {
-                if frame.is_locked() {
-                    continue;
-                }
-                let score = frame.eviction_score();
-                if score < frame_with_min_score.1 {
-                    frame_with_min_score = (i, score, frame.is_dirty());
-                }
+        let mut frame_with_min_score: Option<FrameWriteGuard<T>> = None;
+        for i in self.eviction_candidates.iter() {
+            if i == &usize::MAX {
+                // Skip the invalid index
+                continue;
             }
-            if frame_with_min_score.1 != u64::MAX {
-                if frame_with_min_score.2 {
-                    #[cfg(feature = "stat")]
+            let frame = self.frames[*i].try_write(false);
+            if let Some(guard) = frame {
+                if let Some(current_min_score) = frame_with_min_score.as_ref() {
+                    if guard.eviction_score() < current_min_score.eviction_score() {
+                        frame_with_min_score = Some(guard);
+                    } else {
+                        // No need to update the min frame
+                    }
+                } else {
+                    frame_with_min_score = Some(guard);
+                }
+            } else {
+                // Could not acquire the lock. Do not consider this frame.
+            }
+        }
+
+        log_debug!("Frame with min score: {:?}", frame_with_min_score);
+
+        if let Some(guard) = frame_with_min_score {
+            #[cfg(feature = "stat")]
+            {
+                if guard.is_dirty() {
                     inc_local_bp_dirty_victim();
                 } else {
-                    #[cfg(feature = "stat")]
                     inc_local_bp_clean_victim();
                 }
-                Some((frame_with_min_score.0, frame_with_min_score.2))
-            } else {
-                #[cfg(feature = "stat")]
-                inc_local_bp_all_latched_victim();
-                None
             }
+            log_debug!("Victim found: {}", guard.frame_id());
+            Some(guard)
+        } else {
+            #[cfg(feature = "stat")]
+            inc_local_bp_all_latched_victim();
+            log_debug!("All latched");
+            None
         }
     }
 }
@@ -373,12 +350,6 @@ where
         }
     }
 
-    #[cfg(test)]
-    pub fn choose_victim(&self) -> Option<(usize, bool)> {
-        let frames = unsafe { &mut *self.frames.get() };
-        frames.choose_victim()
-    }
-
     fn shared(&self) {
         self.latch.shared();
     }
@@ -408,46 +379,46 @@ where
         let id_to_index = unsafe { &mut *self.id_to_index.get() };
         let container_to_file = unsafe { &mut *self.container_to_file.get() };
 
-        let (index, is_dirty) = if let Some((index, is_dirty)) = frames.choose_victim() {
-            (index, is_dirty)
+        if let Some(mut guard) = frames.choose_victim() {
+            let index = guard.frame_id();
+            let is_dirty = guard.dirty().load(Ordering::Acquire);
+
+            // Evict old page if necessary
+            if let Some(old_key) = guard.page_key() {
+                if is_dirty {
+                    guard.dirty().store(false, Ordering::Release);
+                    let file = container_to_file
+                        .get(&old_key.c_key)
+                        .ok_or(MemPoolStatus::FileManagerNotFound)?;
+                    file.write_page(old_key.page_id, &guard)?;
+                }
+                id_to_index.remove(old_key);
+                log_debug!("Page evicted: {}", old_key);
+            }
+
+            // Create a new page or read from disk
+            if new_page {
+                guard.set_id(key.page_id);
+            } else {
+                let file = container_to_file
+                    .get(&key.c_key)
+                    .ok_or(MemPoolStatus::FileManagerNotFound)?;
+                file.read_page(key.page_id, &mut guard)?;
+            };
+
+            id_to_index.insert(key, index as usize);
+            *guard.page_key_mut() = Some(key);
+            {
+                let mut evict_info = guard.evict_info().write().unwrap();
+                evict_info.reset();
+                evict_info.update();
+            }
+
+            log_debug!("Page loaded: key: {}", key);
+            Ok(guard)
         } else {
             return Err(MemPoolStatus::CannotEvictPage);
-        };
-        let mut guard = frames[index].try_write(false).unwrap(); // We have already checked that the frame is not locked
-
-        // Evict old page if necessary
-        if let Some(old_key) = guard.page_key() {
-            if is_dirty {
-                guard.dirty().store(false, Ordering::Relaxed);
-                let file = container_to_file
-                    .get(&old_key.c_key)
-                    .ok_or(MemPoolStatus::FileManagerNotFound)?;
-                file.write_page(old_key.page_id, &guard)?;
-            }
-            id_to_index.remove(old_key);
-            log_debug!("Page evicted: {}", old_key);
         }
-
-        // Create a new page or read from disk
-        if new_page {
-            guard.set_id(key.page_id);
-        } else {
-            let file = container_to_file
-                .get(&key.c_key)
-                .ok_or(MemPoolStatus::FileManagerNotFound)?;
-            file.read_page(key.page_id, &mut guard)?;
-        };
-
-        id_to_index.insert(key, index);
-        *guard.page_key_mut() = Some(key);
-        {
-            let mut evict_info = guard.evict_info().write().unwrap();
-            evict_info.reset();
-            evict_info.update();
-        }
-
-        log_debug!("Page loaded: key: {}", key);
-        Ok(guard)
     }
 
     /// Create a new page for write in memory.
@@ -512,19 +483,23 @@ where
                         } else {
                             // The page key does not match.
                             // Go to the slow path.
+                            log_debug!("Page fast path write key mismatch: {}", key);
                         }
                     } else {
                         // The frame is empty.
                         // Go to the slow path.
+                        log_debug!("Page fast path write empty frame: {}", key);
                     }
                 } else {
                     // The frame is latched.
                     // Need to retry.
+                    log_debug!("Page fast path write latch failed: {}", key);
                     return Err(MemPoolStatus::FrameWriteLatchGrantFailed);
                 }
             } else {
                 // The frame id is out of bounds.
                 // Go to the slow path.
+                log_debug!("Page fast path write frame id out of bounds: {}", key);
             }
         }
 
@@ -539,7 +514,13 @@ where
                     g.evict_info().write().unwrap().update();
                 }
                 self.release_shared();
-                return guard.ok_or(MemPoolStatus::FrameWriteLatchGrantFailed);
+                match guard {
+                    Some(g) => {
+                        log_debug!("Page slow path(shared bp latch) write: {}", key);
+                        return Ok(g);
+                    }
+                    None => return Err(MemPoolStatus::FrameWriteLatchGrantFailed),
+                }
             }
             self.release_shared();
         }
@@ -593,19 +574,23 @@ where
                         } else {
                             // The page key does not match.
                             // Go to the slow path.
+                            log_debug!("Page fast path read key mismatch: {}", key);
                         }
                     } else {
                         // The frame is empty.
                         // Go to the slow path.
+                        log_debug!("Page fast path read empty frame: {}", key);
                     }
                 } else {
                     // The frame is latched.
                     // Need to retry.
+                    log_debug!("Page fast path read latch failed: {}", key);
                     return Err(MemPoolStatus::FrameReadLatchGrantFailed);
                 }
             } else {
                 // The frame id is out of bounds.
                 // Go to the slow path.
+                log_debug!("Page fast path read frame id out of bounds: {}", key);
             }
         }
 
@@ -620,9 +605,14 @@ where
                     g.evict_info().write().unwrap().update();
                 }
                 self.release_shared();
-                return guard.ok_or(MemPoolStatus::FrameReadLatchGrantFailed);
+                match guard {
+                    Some(g) => {
+                        log_debug!("Page slow path(shared bp latch) read: {}", key);
+                        return Ok(g);
+                    }
+                    None => return Err(MemPoolStatus::FrameReadLatchGrantFailed),
+                }
             }
-
             self.release_shared();
         }
 
@@ -699,8 +689,6 @@ where
             frame.clear();
         }
 
-        frames.initial_free_frames = (0..frames.len()).collect();
-
         for entry in std::fs::read_dir(&self.path).unwrap() {
             let entry = entry.unwrap();
             let path = entry.path();
@@ -746,8 +734,7 @@ impl<T: EvictionPolicy> BufferPool<T> {
     pub fn check_all_frames_unlatched(&self) {
         let frames = unsafe { &*self.frames.get() };
         for frame in frames.iter() {
-            assert!(!frame.is_exclusive());
-            assert!(!frame.is_shared());
+            frame.try_write(false).unwrap();
         }
     }
 

@@ -39,26 +39,6 @@ impl<T: EvictionPolicy> BufferFrame<T> {
         self.frame_id
     }
 
-    pub fn is_locked(&self) -> bool {
-        self.latch.is_locked()
-    }
-
-    pub fn is_shared(&self) -> bool {
-        self.latch.is_shared()
-    }
-
-    pub fn is_exclusive(&self) -> bool {
-        self.latch.is_exclusive()
-    }
-
-    pub fn is_dirty(&self) -> bool {
-        self.is_dirty.load(Ordering::Relaxed)
-    }
-
-    pub fn eviction_score(&self) -> u64 {
-        self.evict_info.read().unwrap().score(self)
-    }
-
     pub fn read(&self) -> FrameReadGuard<T> {
         self.latch.shared();
         FrameReadGuard {
@@ -213,6 +193,14 @@ impl<'a, T: EvictionPolicy> FrameWriteGuard<'a, T> {
 
     pub fn evict_info(&self) -> &RwLock<T> {
         &self.buffer_frame.evict_info
+    }
+
+    pub fn eviction_score(&self) -> u64 {
+        self.buffer_frame
+            .evict_info
+            .read()
+            .unwrap()
+            .score(&self.buffer_frame)
     }
 
     pub fn downgrade(self) -> FrameReadGuard<'a, T> {

@@ -14,7 +14,7 @@ thread_local! {
         OpenOptions::new()
             .write(true)
             .create(true)
-            .append(true)
+            .truncate(true)
             .open(format!("log-{:?}.txt", std::thread::current().id()))
     );
 }

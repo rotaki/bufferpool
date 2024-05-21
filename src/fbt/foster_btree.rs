@@ -694,10 +694,15 @@ fn fix_frame_id<'a, E: EvictionPolicy>(
                 new_frame_key.p_key().page_id,
                 new_frame_key.frame_id(),
             );
-            write_guard.update_at(slot_id, None, &val.to_bytes());
+            let res = write_guard.update_at(slot_id, None, &val.to_bytes());
+            assert!(res);
+            log_debug!("Fixed frame id of the child page");
             write_guard.downgrade()
         }
-        Err(read_guard) => read_guard,
+        Err(read_guard) => {
+            log_debug!("Failed to fix frame id of the child page");
+            read_guard
+        }
     }
 }
 
