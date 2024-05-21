@@ -13,14 +13,17 @@ impl Default for RwLatch {
 }
 
 impl RwLatch {
+    #[allow(dead_code)]
     pub fn is_locked(&self) -> bool {
         self.cnt.load(Ordering::Acquire) != 0
     }
 
+    #[allow(dead_code)]
     pub fn is_shared(&self) -> bool {
         self.cnt.load(Ordering::Acquire) > 0
     }
 
+    #[allow(dead_code)]
     pub fn is_exclusive(&self) -> bool {
         self.cnt.load(Ordering::Acquire) < 0
     }

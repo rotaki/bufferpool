@@ -941,8 +941,7 @@ impl FosterBtreePage for Page {
             self[offset as usize + key.len()..offset as usize + new_rec_size]
                 .copy_from_slice(value);
             // Update the slot
-            let new_slot = Slot::new(offset, key.len() as u16, value.len() as u16);
-            new_slot
+            Slot::new(offset, key.len() as u16, value.len() as u16)
         } else {
             // Key is the same
             self.copy_within(
@@ -952,8 +951,7 @@ impl FosterBtreePage for Page {
             self[offset as usize + slot.key_size() as usize..offset as usize + new_rec_size]
                 .copy_from_slice(value);
             // Update the slot
-            let new_slot = Slot::new(offset, slot.key_size(), value.len() as u16);
-            new_slot
+            Slot::new(offset, slot.key_size(), value.len() as u16)
         };
         self.update_slot(slot_id, &new_slot);
         self.set_total_bytes_used(

@@ -446,13 +446,6 @@ pub(crate) struct InnerVal {
 }
 
 impl InnerVal {
-    pub fn new(page_id: PageId) -> Self {
-        InnerVal {
-            page_id,
-            frame_id: u32::MAX,
-        }
-    }
-
     pub fn new_with_frame_id(page_id: PageId, frame_id: u32) -> Self {
         InnerVal { page_id, frame_id }
     }
@@ -1852,7 +1845,7 @@ impl<'a, E: EvictionPolicy, T: MemPool<E>> Iterator for FosterBtreeRangeScanner<
                 // If the current slot is the foster child slot, move to the foster child.
                 // Before releasing the current page, we need to get the read-latch of the foster child.
                 let current_page = self.current_leaf_page.take().unwrap();
-                let val = InnerVal::from_bytes(&current_page.get_foster_val());
+                let val = InnerVal::from_bytes(current_page.get_foster_val());
                 let foster_page_key =
                     PageFrameKey::new_with_frame_id(self.btree.c_key, val.page_id, val.frame_id);
                 let foster_page = self

@@ -1,8 +1,5 @@
 use chrono::Local;
-use lazy_static::lazy_static;
 use std::io::{self, Write};
-use std::sync::Mutex;
-use std::thread;
 
 // Multi-buffer logger
 use std::cell::RefCell;
@@ -37,6 +34,9 @@ pub fn log(level: &str, file: &str, line: u32, message: &str) {
 }
 
 /*
+use lazy_static::lazy_static;
+use std::sync::Mutex;
+use std::thread;
 // Single-buffer logger
 // This will print logs to a single file
 lazy_static! {

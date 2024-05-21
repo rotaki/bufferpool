@@ -200,7 +200,7 @@ impl<'a, T: EvictionPolicy> FrameWriteGuard<'a, T> {
             .evict_info
             .read()
             .unwrap()
-            .score(&self.buffer_frame)
+            .score(self.buffer_frame)
     }
 
     pub fn downgrade(self) -> FrameReadGuard<'a, T> {

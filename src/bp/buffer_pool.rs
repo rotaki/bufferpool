@@ -13,7 +13,7 @@ use crate::file_manager::FileManager;
 
 use std::{
     cell::UnsafeCell,
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     ops::{Deref, DerefMut},
     path::PathBuf,
     sync::atomic::Ordering,
@@ -262,6 +262,7 @@ impl<T: EvictionPolicy> Frames<T> {
 
         log_debug!("Frame with min score: {:?}", frame_with_min_score);
 
+        #[allow(clippy::manual_map)]
         if let Some(guard) = frame_with_min_score {
             log_debug!("Victim found @ frame({})", guard.frame_id());
             Some(guard)
@@ -443,7 +444,7 @@ where
         } else {
             #[cfg(feature = "stat")]
             inc_local_bp_all_latched_victim();
-            return Err(MemPoolStatus::CannotEvictPage);
+            Err(MemPoolStatus::CannotEvictPage)
         }
     }
 
