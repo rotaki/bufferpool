@@ -181,7 +181,9 @@ impl<T: EvictionPolicy> Frames<T> {
             num_frames,
             eviction_candidates: [0; EVICTION_SCAN_DEPTH],
             initial_free_frames: (0..num_frames).collect(),
-            frames: (0..num_frames).map(|_| BufferFrame::default()).collect(),
+            frames: (0..num_frames)
+                .map(|i| BufferFrame::new(i as u32))
+                .collect(),
         }
     }
 

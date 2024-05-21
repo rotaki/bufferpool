@@ -13,31 +13,32 @@ use std::{
 };
 
 pub struct BufferFrame<T: EvictionPolicy> {
+    frame_id: u32, // An index of the frame in the buffer pool. This is a constant value.
     latch: RwLatch,
     is_dirty: AtomicBool, // Can be updated even when ReadGuard is held (see flush_all() in buffer_pool.rs)
     evict_info: RwLock<T>, // Can be updated even when ReadGuard is held (see get_page_for_read() in buffer_pool.rs)
     key: UnsafeCell<Option<PageKey>>, // Can only be updated when WriteGuard is held
     page: UnsafeCell<Page>, // Can only be updated when WriteGuard is held
-    // phantom pinned to prevent moving out of the buffer frame
-    _phantom: std::marker::PhantomPinned,
-}
-
-impl<T: EvictionPolicy> Default for BufferFrame<T> {
-    fn default() -> Self {
-        BufferFrame {
-            latch: RwLatch::default(),
-            is_dirty: AtomicBool::new(false),
-            key: UnsafeCell::new(None),
-            evict_info: RwLock::new(T::new()),
-            page: UnsafeCell::new(Page::new_empty()),
-            _phantom: std::marker::PhantomPinned,
-        }
-    }
 }
 
 unsafe impl<T: EvictionPolicy> Sync for BufferFrame<T> {}
 
 impl<T: EvictionPolicy> BufferFrame<T> {
+    pub fn new(frame_id: u32) -> Self {
+        BufferFrame {
+            frame_id,
+            latch: RwLatch::default(),
+            is_dirty: AtomicBool::new(false),
+            key: UnsafeCell::new(None),
+            evict_info: RwLock::new(T::new()),
+            page: UnsafeCell::new(Page::new_empty()),
+        }
+    }
+
+    pub fn frame_id(&self) -> u32 {
+        self.frame_id
+    }
+
     pub fn is_locked(&self) -> bool {
         self.latch.is_locked()
     }
@@ -104,11 +105,15 @@ impl<T: EvictionPolicy> BufferFrame<T> {
 }
 
 pub struct FrameReadGuard<'a, T: EvictionPolicy> {
-    pub upgraded: AtomicBool,
-    pub buffer_frame: &'a BufferFrame<T>,
+    upgraded: AtomicBool,
+    buffer_frame: &'a BufferFrame<T>,
 }
 
 impl<'a, T: EvictionPolicy> FrameReadGuard<'a, T> {
+    pub fn frame_id(&self) -> u32 {
+        self.buffer_frame.frame_id
+    }
+
     pub fn key(&self) -> &Option<PageKey> {
         // SAFETY: This is safe because the latch is held shared.
         unsafe { &*self.buffer_frame.key.get() }
@@ -176,6 +181,10 @@ pub struct FrameWriteGuard<'a, T: EvictionPolicy> {
 }
 
 impl<'a, T: EvictionPolicy> FrameWriteGuard<'a, T> {
+    pub fn frame_id(&self) -> u32 {
+        self.buffer_frame.frame_id
+    }
+
     pub fn key(&self) -> &Option<PageKey> {
         // SAFETY: This is safe because the latch is held exclusively.
         unsafe { &*self.buffer_frame.key.get() }
@@ -255,14 +264,14 @@ mod tests {
 
     #[test]
     fn test_default_buffer_frame() {
-        let buffer_frame = TestBufferFrame::default();
+        let buffer_frame = TestBufferFrame::new(0);
         assert_eq!(buffer_frame.is_dirty.load(Ordering::Relaxed), false);
         assert!(unsafe { &*buffer_frame.key.get() }.is_none());
     }
 
     #[test]
     fn test_read_access() {
-        let buffer_frame = TestBufferFrame::default();
+        let buffer_frame = TestBufferFrame::new(0);
         let guard = buffer_frame.read();
         assert_eq!(guard.key(), &None);
         assert_eq!(guard.dirty().load(Ordering::Relaxed), false);
@@ -272,7 +281,7 @@ mod tests {
 
     #[test]
     fn test_write_access() {
-        let buffer_frame = TestBufferFrame::default();
+        let buffer_frame = TestBufferFrame::new(0);
         let mut guard = buffer_frame.write(true);
         assert_eq!(guard.key(), &None);
         assert_eq!(guard.dirty().load(Ordering::Relaxed), true);
@@ -284,7 +293,7 @@ mod tests {
 
     #[test]
     fn test_concurrent_read_access() {
-        let buffer_frame = TestBufferFrame::default();
+        let buffer_frame = TestBufferFrame::new(0);
         let guard1 = buffer_frame.read();
         let guard2 = buffer_frame.read();
         assert_eq!(guard1.key(), &None);
@@ -299,7 +308,7 @@ mod tests {
 
     #[test]
     fn test_concurrent_write_access() {
-        let buffer_frame = Arc::new(TestBufferFrame::default());
+        let buffer_frame = Arc::new(TestBufferFrame::new(0));
         // Instantiate three threads, each increments the first element of the page by 1 for 80 times.
         // (80 * 3 < 255 so that the first element does not overflow)
 
@@ -338,7 +347,7 @@ mod tests {
 
     #[test]
     fn test_upgrade_access() {
-        let buffer_frame = TestBufferFrame::default();
+        let buffer_frame = TestBufferFrame::new(0);
         {
             // Upgrade read guard to write guard and modify the first element
             let guard = buffer_frame.read();
@@ -357,7 +366,7 @@ mod tests {
 
     #[test]
     fn test_downgrade_access() {
-        let buffer_frame = TestBufferFrame::default();
+        let buffer_frame = TestBufferFrame::new(0);
         let mut guard = buffer_frame.write(true);
         guard[0] = 1;
         let guard = guard.downgrade();
@@ -367,7 +376,7 @@ mod tests {
 
     #[test]
     fn test_upgrade_and_downgrade_access() {
-        let buffer_frame = TestBufferFrame::default();
+        let buffer_frame = TestBufferFrame::new(0);
         // read -> write(dirty=false) -> read -> write(dirty=true) -> read
         let guard = buffer_frame.read();
         assert_eq!(guard.dirty().load(Ordering::Relaxed), false);
@@ -386,7 +395,7 @@ mod tests {
 
     #[test]
     fn test_concurrent_upgrade_failure() {
-        let buffer_frame = TestBufferFrame::default();
+        let buffer_frame = TestBufferFrame::new(0);
         let guard1 = buffer_frame.read();
         let _guard2 = buffer_frame.read();
         assert!(guard1.try_upgrade(true).is_err());

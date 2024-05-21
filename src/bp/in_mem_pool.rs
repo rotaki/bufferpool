@@ -82,8 +82,8 @@ impl<T: EvictionPolicy> MemPool<T> for InMemPool<T> {
         let page = Page::new(page_id);
 
         let page_key = PageKey::new(c_key, page_id);
-        let frame = Box::new(BufferFrame::default());
         let frame_index = frames.len();
+        let frame = Box::new(BufferFrame::new(frame_index as u32));
         frames.push(frame);
         id_to_index.insert(page_key, frame_index);
         let mut guard = (frames.get(frame_index).unwrap()).write(true);
