@@ -439,6 +439,15 @@ fn is_large(page: &Page) -> bool {
     (page.total_bytes_used() as usize) >= MAX_BYTES_USED
 }
 
+pub(crate) fn deserialize_page_id(bytes: &[u8]) -> Option<PageId> {
+    if bytes.len() < 4 {
+        return None;
+    }
+    let mut id_bytes = [0; 4];
+    id_bytes.copy_from_slice(&bytes[0..4]);
+    Some(u32::from_be_bytes(id_bytes))
+}
+
 /// Check if the parent page is the parent of the child page.
 /// This includes the foster child relationship.
 fn is_parent_and_child(parent: &Page, child: &Page) -> bool {
@@ -453,7 +462,7 @@ fn is_parent_and_child(parent: &Page, child: &Page) -> bool {
 fn is_foster_relationship(parent: &Page, child: &Page) -> bool {
     parent.level() == child.level()
         && parent.has_foster_child()
-        && parent.get_foster_page_id() == child.get_id()
+        && deserialize_page_id(parent.get_foster_val()) == Some(child.get_id())
 }
 
 fn should_split_this(this: &Page, op_byte: &mut OpByte) -> bool {
@@ -1338,7 +1347,10 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
             if this_page.is_leaf() {
                 if this_page.has_foster_child() && this_page.get_foster_key() <= key {
                     // Check whether the foster child should be traversed.
-                    let foster_page_key = PageKey::new(self.c_key, this_page.get_foster_page_id());
+                    let foster_page_key = PageKey::new(
+                        self.c_key,
+                        deserialize_page_id(this_page.get_foster_val()).unwrap(),
+                    );
                     let foster_page = self.read_page(foster_page_key);
                     // Now we have two locks. We need to release the lock of the current page.
                     let (op, this_page, foster_page) = self.modify_structure_if_needed_for_read(
@@ -1706,8 +1718,10 @@ impl<'a, E: EvictionPolicy, T: MemPool<E>> Iterator for FosterBtreeRangeScanner<
                 // If the current slot is the foster child slot, move to the foster child.
                 // Before releasing the current page, we need to get the read-latch of the foster child.
                 let current_page = self.current_leaf_page.take().unwrap();
-                let foster_page_key =
-                    PageKey::new(self.btree.c_key, current_page.get_foster_page_id());
+                let foster_page_key = PageKey::new(
+                    self.btree.c_key,
+                    deserialize_page_id(current_page.get_foster_val()).unwrap(),
+                );
                 let foster_page = self
                     .btree
                     .mem_pool
@@ -1755,7 +1769,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBTreePageTraversal<E, T> {
         let mut children = Vec::new();
         if page.is_leaf() {
             if page.has_foster_child() {
-                let foster_child_page_id = page.get_foster_page_id();
+                let foster_child_page_id = deserialize_page_id(page.get_foster_val()).unwrap();
                 children.push(foster_child_page_id);
             }
             children
@@ -1943,6 +1957,7 @@ impl PageVisitor for PageStatsGenerator {
 mod tests {
     use std::{fs::File, sync::Arc, thread};
 
+    use crate::fbt::foster_btree::deserialize_page_id;
     #[allow(unused_imports)]
     use crate::log;
     use crate::log_trace;
@@ -2166,7 +2181,10 @@ mod tests {
         assert_eq!(p0.get_low_fence().as_ref(), k0);
         assert_eq!(p0.get_high_fence().as_ref(), k2);
         assert!(p0.has_foster_child());
-        assert_eq!(p0.get_foster_page_id(), p1.get_id());
+        assert_eq!(
+            deserialize_page_id(p0.get_foster_val()).unwrap(),
+            p1.get_id()
+        );
         assert_eq!(p0.get_foster_key(), p1.get_raw_key(0));
         assert_eq!(p1.get_high_fence().as_ref(), k2);
 
@@ -2262,7 +2280,10 @@ mod tests {
         assert_eq!(parent.get_val(1), child0.get_id().to_be_bytes());
         assert!(child0.has_foster_child());
         assert_eq!(child0.get_foster_key(), child1.get_raw_key(0));
-        assert_eq!(child0.get_foster_page_id(), child1.get_id());
+        assert_eq!(
+            deserialize_page_id(child0.get_foster_val()).unwrap(),
+            child1.get_id()
+        );
 
         // Adopt
         adopt(&mut parent, &mut child0);
@@ -2388,7 +2409,10 @@ mod tests {
         assert_eq!(child0.get_high_fence().as_ref(), k2);
         assert!(child0.has_foster_child());
         assert_eq!(child0.get_foster_key(), child1.get_raw_key(0));
-        assert_eq!(child0.get_foster_page_id(), child1.get_id());
+        assert_eq!(
+            deserialize_page_id(child0.get_foster_val()).unwrap(),
+            child1.get_id()
+        );
         for i in 0..left.len() {
             let key = child0.get_raw_key((i + 1) as u16);
             assert_eq!(key, to_bytes(left[i]));
