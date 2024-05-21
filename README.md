@@ -9,7 +9,7 @@
 * [x] Add cache replacement implementations
   * [x] Add more eviction algo (SIEVE)
 * [x] Add write-ahead log, page lsn
-* [] Add pointer swizzling
+* [x] Add pointer swizzling
 
 ## Foster B-Tree
 
@@ -31,7 +31,7 @@
   * [] Improve page binary search
   * [] Add prefix compression in pages
   * [] Asynchronous page read/write
-  * [] Add page split into three pages
+  * [x] Add page split into three pages
   * [] Add better latch for bp
   * [] Add transactional support
   * [] Optimistic lock coupling with hybrid latches with page versioning.
@@ -87,51 +87,51 @@ bp_size: 10000 (when run on-disk)
 
 ```text
 Random Insertion/In memory Foster BTree Initial Allocation
-                        time:   [204.43 ns 205.03 ns 206.00 ns]
-                        change: [-0.1509% +2.1046% +4.0774%] (p = 0.09 > 0.05)
-                        No change in performance detected.
-Found 1 outliers among 10 measurements (10.00%)
+                        time:   [206.71 ns 207.27 ns 208.37 ns]
+                        change: [+2.9012% +5.2609% +7.6219%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) high mild
   1 (10.00%) high severe
 Benchmarking Random Insertion/In memory Foster BTree Insertion: Warming up for 3.0000 s
 Warning: Unable to complete 10 samples in 5.0s. You may wish to increase target time to 5.3s.
 Random Insertion/In memory Foster BTree Insertion
-                        time:   [526.55 ms 530.25 ms 534.95 ms]
-                        change: [-0.8147% +0.7642% +2.1429%] (p = 0.35 > 0.05)
-                        No change in performance detected.
-Found 1 outliers among 10 measurements (10.00%)
-  1 (10.00%) high mild
-Random Insertion/In memory Foster BTree Insertion Parallel
-                        time:   [297.13 ms 299.73 ms 302.44 ms]
-                        change: [+1.9298% +3.0824% +4.2221%] (p = 0.00 < 0.05)
-                        Performance has regressed.
-Random Insertion/On disk Foster BTree Initial Allocation
-                        time:   [15.292 ms 15.340 ms 15.392 ms]
-                        change: [-4.3608% -0.8736% +2.9321%] (p = 0.71 > 0.05)
+                        time:   [526.47 ms 529.48 ms 533.39 ms]
+                        change: [-0.0672% +0.5119% +1.3174%] (p = 0.22 > 0.05)
                         No change in performance detected.
 Found 2 outliers among 10 measurements (20.00%)
   1 (10.00%) high mild
   1 (10.00%) high severe
+Random Insertion/In memory Foster BTree Insertion Parallel
+                        time:   [285.02 ms 287.67 ms 290.63 ms]
+                        change: [-2.6766% -1.5267% -0.4052%] (p = 0.02 < 0.05)
+                        Change within noise threshold.
+Random Insertion/On disk Foster BTree Initial Allocation
+                        time:   [14.635 ms 14.659 ms 14.687 ms]
+                        change: [-4.6366% -1.4302% +1.7827%] (p = 0.45 > 0.05)
+                        No change in performance detected.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
 Benchmarking Random Insertion/On disk Foster BTree Insertion: Warming up for 3.0000 s
-Warning: Unable to complete 10 samples in 5.0s. You may wish to increase target time to 10.2s.
+Warning: Unable to complete 10 samples in 5.0s. You may wish to increase target time to 9.8s.
 Random Insertion/On disk Foster BTree Insertion
-                        time:   [1.0093 s 1.0157 s 1.0250 s]
-                        change: [-0.7224% +0.6344% +2.1050%] (p = 0.40 > 0.05)
+                        time:   [960.74 ms 975.66 ms 1.0008 s]
+                        change: [-4.6045% -2.4195% +0.9489%] (p = 0.10 > 0.05)
                         No change in performance detected.
 Found 1 outliers among 10 measurements (10.00%)
   1 (10.00%) high severe
 Benchmarking Random Insertion/On disk Foster BTree Insertion Parallel: Warming up for 3.0000 s
-Warning: Unable to complete 10 samples in 5.0s. You may wish to increase target time to 8.1s.
+Warning: Unable to complete 10 samples in 5.0s. You may wish to increase target time to 7.3s.
 Random Insertion/On disk Foster BTree Insertion Parallel
-                        time:   [806.46 ms 811.53 ms 817.61 ms]
-                        change: [-0.8242% +0.1775% +1.2137%] (p = 0.76 > 0.05)
+                        time:   [717.28 ms 724.93 ms 732.74 ms]
+                        change: [-2.4263% -0.8722% +0.5856%] (p = 0.30 > 0.05)
                         No change in performance detected.
-Found 1 outliers among 10 measurements (10.00%)
-  1 (10.00%) high mild
 Random Insertion/BTreeMap Insertion
-                        time:   [442.08 ms 444.52 ms 447.57 ms]
-                        change: [+0.3357% +1.0474% +1.7972%] (p = 0.02 < 0.05)
-                        Change within noise threshold.
-Found 1 outliers among 10 measurements (10.00%)
+                        time:   [434.31 ms 440.89 ms 450.57 ms]
+                        change: [-1.1270% +0.4669% +2.7757%] (p = 0.73 > 0.05)
+                        No change in performance detected.
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) low mild
   1 (10.00%) high severe
 ```
 

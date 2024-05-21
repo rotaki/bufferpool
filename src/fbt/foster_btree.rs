@@ -832,9 +832,7 @@ fn merge<E: EvictionPolicy>(this: &mut FrameWriteGuard<E>, foster_child: &mut Fr
     let res = this.append_sorted(&kvs);
     assert!(res);
     this.set_has_foster_child(foster_child.has_foster_child());
-    let high_fence_slot_id = foster_child.high_fence_slot_id();
-    foster_child.remove_range(1, high_fence_slot_id);
-    foster_child.set_has_foster_child(false);
+    foster_child.init();
 
     #[cfg(debug_assertions)]
     {

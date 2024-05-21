@@ -28,15 +28,15 @@ mod stat {
     use std::{cell::UnsafeCell, sync::Mutex};
     /// Statistics #pages evicted from the buffer pool.
     pub struct BPStats {
-        hit_rate: UnsafeCell<[usize; 2]>, // [faults, total]
+        hit_rate: UnsafeCell<[usize; 5]>, // [fast_path_hit, slow_path_hit, slow_path_miss, new_page, latch_failures]
         victim_status: UnsafeCell<[usize; 4]>,
     }
 
     impl BPStats {
         pub fn new() -> Self {
             BPStats {
-                hit_rate: UnsafeCell::new([0, 0]),            // [faults, total]
-                victim_status: UnsafeCell::new([0, 0, 0, 0]), // [free, clean, dirty, all_latched]
+                hit_rate: UnsafeCell::new([0, 0, 0, 0, 0]),
+                victim_status: UnsafeCell::new([0, 0, 0, 0]),
             }
         }
 
@@ -46,24 +46,33 @@ mod stat {
             let mut result = String::new();
             result.push_str("Buffer Pool Statistics\n");
             result.push_str("Hit Rate\n");
+            let total_access = hit_rate.iter().sum::<usize>();
+            let labels = [
+                "Fast Path Hit",
+                "Slow Path Hit",
+                "Slow Path Miss",
+                "New Page",
+                "Latch Failures (Retry)",
+            ];
+            for i in 0..5 {
+                result.push_str(&format!(
+                    "{:25}: {:8} ({:6.2}%)\n",
+                    labels[i],
+                    hit_rate[i],
+                    (hit_rate[i] as f64 / total_access as f64) * 100.0
+                ));
+            }
             result.push_str(&format!(
-                "Hits  :  {:8} ({:.2}%)\n",
-                hit_rate[1] - hit_rate[0],
-                (hit_rate[1] - hit_rate[0]) as f64 / hit_rate[1] as f64 * 100.0
+                "{:25}: {:8} ({:6.2}%)\n",
+                "Total Access", total_access, 100.0
             ));
-            result.push_str(&format!(
-                "Faults:  {:8} ({:.2}%)\n",
-                hit_rate[0],
-                hit_rate[0] as f64 / hit_rate[1] as f64 * 100.0
-            ));
-            result.push_str(&format!("Total :  {:8} ({:.2}%)\n", hit_rate[1], 100.0));
             result.push_str("\n");
             result.push_str("Eviction Statistics\n");
             let op_types = ["Free", "Clean", "Dirty", "All Latched", "Total"];
             let total = victim_status.iter().sum::<usize>();
             for i in 0..4 {
                 result.push_str(&format!(
-                    "{:12}: {:8} ({:.2}%)\n",
+                    "{:12}: {:8} ({:6.2}%)\n",
                     op_types[i],
                     victim_status[i],
                     (victim_status[i] as f64 / total as f64) * 100.0
@@ -79,7 +88,7 @@ mod stat {
         pub fn merge(&self, other: &BPStats) {
             let hit_rate = unsafe { &mut *self.hit_rate.get() };
             let other_hit_rate = unsafe { &*other.hit_rate.get() };
-            for i in 0..2 {
+            for i in 0..5 {
                 hit_rate[i] += other_hit_rate[i];
             }
             let victim_status = unsafe { &mut *self.victim_status.get() };
@@ -91,7 +100,7 @@ mod stat {
 
         pub fn clear(&self) {
             let hit_rate = unsafe { &mut *self.hit_rate.get() };
-            for i in 0..2 {
+            for i in 0..5 {
                 hit_rate[i] = 0;
             }
             let victim_status = unsafe { &mut *self.victim_status.get() };
@@ -121,17 +130,38 @@ mod stat {
         };
     }
 
-    pub fn inc_local_bp_lookup() {
+    pub fn inc_local_bp_fast_path_hit() {
+        LOCAL_BP_STAT.with(|stat| {
+            let hit_rate = unsafe { &mut *stat.stat.hit_rate.get() };
+            hit_rate[0] += 1;
+        });
+    }
+
+    pub fn inc_local_bp_slow_path_hit() {
         LOCAL_BP_STAT.with(|stat| {
             let hit_rate = unsafe { &mut *stat.stat.hit_rate.get() };
             hit_rate[1] += 1;
         });
     }
 
-    pub fn inc_local_bp_faults() {
+    pub fn inc_local_bp_slow_path_miss() {
         LOCAL_BP_STAT.with(|stat| {
             let hit_rate = unsafe { &mut *stat.stat.hit_rate.get() };
-            hit_rate[0] += 1;
+            hit_rate[2] += 1;
+        });
+    }
+
+    pub fn inc_local_bp_new_page() {
+        LOCAL_BP_STAT.with(|stat| {
+            let hit_rate = unsafe { &mut *stat.stat.hit_rate.get() };
+            hit_rate[3] += 1;
+        });
+    }
+
+    pub fn inc_local_bp_latch_failures() {
+        LOCAL_BP_STAT.with(|stat| {
+            let hit_rate = unsafe { &mut *stat.stat.hit_rate.get() };
+            hit_rate[4] += 1;
         });
     }
 
@@ -195,7 +225,7 @@ impl<T: EvictionPolicy> Frames<T> {
         }
         if self.num_frames > EVICTION_SCAN_DEPTH {
             // Generate **distinct** random numbers.
-            for _ in 0..2 * EVICTION_SCAN_DEPTH {
+            for _ in 0..3 * EVICTION_SCAN_DEPTH {
                 let rand_idx = gen_random_int(0, self.num_frames - 1);
                 self.eviction_candidates[rand_idx % EVICTION_SCAN_DEPTH] = rand_idx;
                 // Use mod to avoid duplicates
@@ -206,7 +236,6 @@ impl<T: EvictionPolicy> Frames<T> {
                 self.eviction_candidates[i] = i;
             }
         }
-        // Remove duplicates
         log_debug!("Eviction candidates: {:?}", self.eviction_candidates);
 
         let mut frame_with_min_score: Option<FrameWriteGuard<T>> = None;
@@ -234,19 +263,9 @@ impl<T: EvictionPolicy> Frames<T> {
         log_debug!("Frame with min score: {:?}", frame_with_min_score);
 
         if let Some(guard) = frame_with_min_score {
-            #[cfg(feature = "stat")]
-            {
-                if guard.is_dirty() {
-                    inc_local_bp_dirty_victim();
-                } else {
-                    inc_local_bp_clean_victim();
-                }
-            }
-            log_debug!("Victim found: {}", guard.frame_id());
+            log_debug!("Victim found @ frame({})", guard.frame_id());
             Some(guard)
         } else {
-            #[cfg(feature = "stat")]
-            inc_local_bp_all_latched_victim();
             log_debug!("All latched");
             None
         }
@@ -372,9 +391,6 @@ where
         key: PageKey,
         new_page: bool,
     ) -> Result<FrameWriteGuard<T>, MemPoolStatus> {
-        #[cfg(feature = "stat")]
-        inc_local_bp_faults();
-
         let frames = unsafe { &mut *self.frames.get() };
         let id_to_index = unsafe { &mut *self.id_to_index.get() };
         let container_to_file = unsafe { &mut *self.container_to_file.get() };
@@ -386,14 +402,22 @@ where
             // Evict old page if necessary
             if let Some(old_key) = guard.page_key() {
                 if is_dirty {
+                    #[cfg(feature = "stat")]
+                    inc_local_bp_dirty_victim();
                     guard.dirty().store(false, Ordering::Release);
                     let file = container_to_file
                         .get(&old_key.c_key)
                         .ok_or(MemPoolStatus::FileManagerNotFound)?;
                     file.write_page(old_key.page_id, &guard)?;
+                } else {
+                    #[cfg(feature = "stat")]
+                    inc_local_bp_clean_victim();
                 }
                 id_to_index.remove(old_key);
                 log_debug!("Page evicted: {}", old_key);
+            } else {
+                #[cfg(feature = "stat")]
+                inc_local_bp_free_victim();
             }
 
             // Create a new page or read from disk
@@ -417,6 +441,8 @@ where
             log_debug!("Page loaded: key: {}", key);
             Ok(guard)
         } else {
+            #[cfg(feature = "stat")]
+            inc_local_bp_all_latched_victim();
             return Err(MemPoolStatus::CannotEvictPage);
         }
     }
@@ -430,6 +456,8 @@ where
         &self,
         c_key: ContainerKey,
     ) -> Result<FrameWriteGuard<T>, MemPoolStatus> {
+        log_debug!("Page create: {}", c_key);
+
         self.exclusive();
 
         let container_to_file = unsafe { &mut *self.container_to_file.get() };
@@ -447,8 +475,12 @@ where
         let key = PageKey::new(c_key, page_id);
         let res: Result<FrameWriteGuard<T>, MemPoolStatus> = self.handle_page_fault(key, true);
         if let Ok(ref guard) = res {
+            #[cfg(feature = "stat")]
+            inc_local_bp_new_page();
             guard.dirty().store(true, Ordering::Release);
         } else {
+            #[cfg(feature = "stat")]
+            inc_local_bp_latch_failures();
             fm.fetch_sub_page_id();
         }
 
@@ -460,8 +492,6 @@ where
         &self,
         key: PageFrameKey,
     ) -> Result<FrameWriteGuard<T>, MemPoolStatus> {
-        #[cfg(feature = "stat")]
-        inc_local_bp_lookup();
         log_debug!("Page write: {}", key);
 
         {
@@ -479,6 +509,8 @@ where
                             // Mark the page as dirty
                             g.dirty().store(true, Ordering::Release);
                             log_debug!("Page fast path write: {}", key);
+                            #[cfg(feature = "stat")]
+                            inc_local_bp_fast_path_hit();
                             return Ok(guard.unwrap());
                         } else {
                             // The page key does not match.
@@ -494,6 +526,8 @@ where
                     // The frame is latched.
                     // Need to retry.
                     log_debug!("Page fast path write latch failed: {}", key);
+                    #[cfg(feature = "stat")]
+                    inc_local_bp_latch_failures();
                     return Err(MemPoolStatus::FrameWriteLatchGrantFailed);
                 }
             } else {
@@ -517,9 +551,15 @@ where
                 match guard {
                     Some(g) => {
                         log_debug!("Page slow path(shared bp latch) write: {}", key);
+                        #[cfg(feature = "stat")]
+                        inc_local_bp_slow_path_hit();
                         return Ok(g);
                     }
-                    None => return Err(MemPoolStatus::FrameWriteLatchGrantFailed),
+                    None => {
+                        #[cfg(feature = "stat")]
+                        inc_local_bp_latch_failures();
+                        return Err(MemPoolStatus::FrameWriteLatchGrantFailed);
+                    }
                 }
             }
             self.release_shared();
@@ -535,7 +575,12 @@ where
             Some(&index) => {
                 let guard = frames[index].try_write(true);
                 if let Some(g) = &guard {
+                    #[cfg(feature = "stat")]
+                    inc_local_bp_slow_path_hit();
                     g.evict_info().write().unwrap().update();
+                } else {
+                    #[cfg(feature = "stat")]
+                    inc_local_bp_latch_failures();
                 }
                 guard.ok_or(MemPoolStatus::FrameWriteLatchGrantFailed)
             }
@@ -543,7 +588,12 @@ where
                 let res = self.handle_page_fault(key.p_key(), false);
                 // If guard is ok, mark the page as dirty
                 if let Ok(ref guard) = res {
+                    #[cfg(feature = "stat")]
+                    inc_local_bp_slow_path_miss();
                     guard.dirty().store(true, Ordering::Release);
+                } else {
+                    #[cfg(feature = "stat")]
+                    inc_local_bp_latch_failures();
                 }
                 res
             }
@@ -553,8 +603,6 @@ where
     }
 
     pub fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard<T>, MemPoolStatus> {
-        #[cfg(feature = "stat")]
-        inc_local_bp_lookup();
         log_debug!("Page read: {}", key);
 
         {
@@ -570,6 +618,8 @@ where
                             // Update the eviction info
                             g.evict_info().write().unwrap().update();
                             log_debug!("Page fast path read: {}", key);
+                            #[cfg(feature = "stat")]
+                            inc_local_bp_fast_path_hit();
                             return Ok(guard.unwrap());
                         } else {
                             // The page key does not match.
@@ -585,6 +635,8 @@ where
                     // The frame is latched.
                     // Need to retry.
                     log_debug!("Page fast path read latch failed: {}", key);
+                    #[cfg(feature = "stat")]
+                    inc_local_bp_latch_failures();
                     return Err(MemPoolStatus::FrameReadLatchGrantFailed);
                 }
             } else {
@@ -608,9 +660,15 @@ where
                 match guard {
                     Some(g) => {
                         log_debug!("Page slow path(shared bp latch) read: {}", key);
+                        #[cfg(feature = "stat")]
+                        inc_local_bp_slow_path_hit();
                         return Ok(g);
                     }
-                    None => return Err(MemPoolStatus::FrameReadLatchGrantFailed),
+                    None => {
+                        #[cfg(feature = "stat")]
+                        inc_local_bp_latch_failures();
+                        return Err(MemPoolStatus::FrameReadLatchGrantFailed);
+                    }
                 }
             }
             self.release_shared();
@@ -625,13 +683,27 @@ where
             Some(&index) => {
                 let guard = frames[index].try_read();
                 if let Some(g) = &guard {
+                    #[cfg(feature = "stat")]
+                    inc_local_bp_slow_path_hit();
                     g.evict_info().write().unwrap().update();
+                } else {
+                    #[cfg(feature = "stat")]
+                    inc_local_bp_latch_failures();
                 }
                 guard.ok_or(MemPoolStatus::FrameReadLatchGrantFailed)
             }
-            None => self
-                .handle_page_fault(key.p_key(), false)
-                .map(|guard| guard.downgrade()),
+            None => {
+                let res = self
+                    .handle_page_fault(key.p_key(), false)
+                    .map(|guard| guard.downgrade());
+                #[cfg(feature = "stat")]
+                if res.is_ok() {
+                    inc_local_bp_slow_path_miss();
+                } else {
+                    inc_local_bp_latch_failures();
+                }
+                res
+            }
         };
         self.release_exclusive();
         result
