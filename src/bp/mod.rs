@@ -12,7 +12,7 @@ use eviction_policy::{DummyEvictionPolicy, EvictionPolicy};
 pub use buffer_frame::{FrameReadGuard, FrameWriteGuard};
 pub use buffer_pool::BufferPool;
 pub use in_mem_pool::InMemPool;
-pub use mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, PageKey};
+pub use mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, PageFrameKey};
 use tempfile::TempDir;
 
 pub struct BufferPoolForTest<E: EvictionPolicy> {
@@ -55,12 +55,12 @@ impl<E: EvictionPolicy> MemPool<E> for BufferPoolForTest<E> {
     }
 
     #[inline]
-    fn get_page_for_read(&self, key: PageKey) -> Result<FrameReadGuard<E>, MemPoolStatus> {
+    fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard<E>, MemPoolStatus> {
         self.bp.get_page_for_read(key)
     }
 
     #[inline]
-    fn get_page_for_write(&self, key: PageKey) -> Result<FrameWriteGuard<E>, MemPoolStatus> {
+    fn get_page_for_write(&self, key: PageFrameKey) -> Result<FrameWriteGuard<E>, MemPoolStatus> {
         self.bp.get_page_for_write(key)
     }
 
@@ -80,7 +80,7 @@ pub fn get_in_mem_pool() -> Arc<InMemPool<DummyEvictionPolicy>> {
 pub mod prelude {
     pub use super::buffer_frame::{BufferFrame, FrameReadGuard, FrameWriteGuard};
     pub use super::eviction_policy::{DummyEvictionPolicy, EvictionPolicy, LRUEvictionPolicy};
-    pub use super::mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, PageKey};
+    pub use super::mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, PageFrameKey};
     pub use super::{get_in_mem_pool, get_test_bp, BufferPoolForTest};
     pub use super::{BufferPool, InMemPool};
 }

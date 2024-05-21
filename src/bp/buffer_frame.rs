@@ -1,5 +1,5 @@
-use super::eviction_policy::EvictionPolicy;
-use super::mem_pool_trait::PageKey;
+use super::mem_pool_trait::PageFrameKey;
+use super::{eviction_policy::EvictionPolicy, mem_pool_trait::PageKey};
 use crate::page::Page;
 use crate::rwlatch::RwLatch;
 use std::{
@@ -114,9 +114,15 @@ impl<'a, T: EvictionPolicy> FrameReadGuard<'a, T> {
         self.buffer_frame.frame_id
     }
 
-    pub fn key(&self) -> &Option<PageKey> {
+    pub(crate) fn page_key(&self) -> &Option<PageKey> {
         // SAFETY: This is safe because the latch is held shared.
         unsafe { &*self.buffer_frame.key.get() }
+    }
+
+    pub fn page_frame_key(&self) -> Option<PageFrameKey> {
+        self.page_key().map(|p_key| {
+            PageFrameKey::new_with_frame_id(p_key.c_key, p_key.page_id, self.frame_id())
+        })
     }
 
     /// Returns a reference to the dirty flag.
@@ -169,7 +175,7 @@ impl<T: EvictionPolicy> Deref for FrameReadGuard<'_, T> {
 impl<T: EvictionPolicy> Debug for FrameReadGuard<'_, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FrameReadGuard")
-            .field("key", &self.key())
+            .field("key", &self.page_key())
             .field("dirty", &self.dirty().load(Ordering::Relaxed))
             .finish()
     }
@@ -185,14 +191,20 @@ impl<'a, T: EvictionPolicy> FrameWriteGuard<'a, T> {
         self.buffer_frame.frame_id
     }
 
-    pub fn key(&self) -> &Option<PageKey> {
+    pub(crate) fn page_key(&self) -> &Option<PageKey> {
         // SAFETY: This is safe because the latch is held exclusively.
         unsafe { &*self.buffer_frame.key.get() }
     }
 
-    pub fn key_mut(&mut self) -> &mut Option<PageKey> {
+    pub(crate) fn page_key_mut(&mut self) -> &mut Option<PageKey> {
         // SAFETY: This is safe because the latch is held exclusively.
         unsafe { &mut *self.buffer_frame.key.get() }
+    }
+
+    pub fn page_frame_key(&self) -> Option<PageFrameKey> {
+        self.page_key().map(|p_key| {
+            PageFrameKey::new_with_frame_id(p_key.c_key, p_key.page_id, self.frame_id())
+        })
     }
 
     pub fn dirty(&self) -> &AtomicBool {
@@ -215,7 +227,7 @@ impl<'a, T: EvictionPolicy> FrameWriteGuard<'a, T> {
     pub fn clear(&mut self) {
         self.buffer_frame.is_dirty.store(false, Ordering::Release);
         self.buffer_frame.evict_info.write().unwrap().reset();
-        self.key_mut().take();
+        self.page_key_mut().take();
     }
 }
 
@@ -246,7 +258,7 @@ impl<T: EvictionPolicy> DerefMut for FrameWriteGuard<'_, T> {
 impl<T: EvictionPolicy> Debug for FrameWriteGuard<'_, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FrameWriteGuard")
-            .field("key", &self.key())
+            .field("key", &self.page_key())
             .field("dirty", &self.dirty().load(Ordering::Relaxed))
             .finish()
     }
@@ -273,7 +285,7 @@ mod tests {
     fn test_read_access() {
         let buffer_frame = TestBufferFrame::new(0);
         let guard = buffer_frame.read();
-        assert_eq!(guard.key(), &None);
+        assert_eq!(guard.page_key(), &None);
         assert_eq!(guard.dirty().load(Ordering::Relaxed), false);
         guard.iter().all(|&x| x == 0);
         assert!(!guard.dirty().load(Ordering::Relaxed));
@@ -283,7 +295,7 @@ mod tests {
     fn test_write_access() {
         let buffer_frame = TestBufferFrame::new(0);
         let mut guard = buffer_frame.write(true);
-        assert_eq!(guard.key(), &None);
+        assert_eq!(guard.page_key(), &None);
         assert_eq!(guard.dirty().load(Ordering::Relaxed), true);
         guard.iter().all(|&x| x == 0);
         guard[0] = 1;
@@ -296,8 +308,8 @@ mod tests {
         let buffer_frame = TestBufferFrame::new(0);
         let guard1 = buffer_frame.read();
         let guard2 = buffer_frame.read();
-        assert_eq!(guard1.key(), &None);
-        assert_eq!(guard2.key(), &None);
+        assert_eq!(guard1.page_key(), &None);
+        assert_eq!(guard2.page_key(), &None);
         assert_eq!(guard1.dirty().load(Ordering::Relaxed), false);
         assert_eq!(guard2.dirty().load(Ordering::Relaxed), false);
         guard1.iter().all(|&x| x == 0);
@@ -352,7 +364,7 @@ mod tests {
             // Upgrade read guard to write guard and modify the first element
             let guard = buffer_frame.read();
             let mut guard = guard.try_upgrade(true).unwrap();
-            assert_eq!(guard.key(), &None);
+            assert_eq!(guard.page_key(), &None);
             assert_eq!(guard.dirty().load(Ordering::Relaxed), true);
             guard.iter().all(|&x| x == 0);
             guard[0] = 1;

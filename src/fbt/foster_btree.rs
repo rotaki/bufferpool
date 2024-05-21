@@ -1168,7 +1168,7 @@ fn print_page(p: &Page) {
 
 pub struct FosterBtree<E: EvictionPolicy, T: MemPool<E>> {
     pub c_key: ContainerKey,
-    pub root_key: PageKey,
+    pub root_key: PageFrameKey,
     pub mem_pool: Arc<T>,
     phantom: PhantomData<E>,
     // pub wal_buffer: LogBufferRef,
@@ -1179,7 +1179,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
         let root_key = {
             let mut root = mem_pool.create_new_page_for_write(c_key).unwrap();
             root.init_as_root();
-            root.key().unwrap()
+            root.page_frame_key().unwrap()
         };
 
         FosterBtree {
@@ -1255,7 +1255,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
         foster_page
     }
 
-    fn read_page(&self, page_key: PageKey) -> FrameReadGuard<E> {
+    fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard<E> {
         let base = Duration::from_millis(1);
         let mut attempts = 0;
         loop {
@@ -1433,10 +1433,9 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
             if this_page.is_leaf() {
                 if this_page.has_foster_child() && this_page.get_foster_key() <= key {
                     // Check whether the foster child should be traversed.
-                    let foster_page_key = PageKey::new(
-                        self.c_key,
-                        deserialize_page_id(this_page.get_foster_val()).unwrap(),
-                    );
+                    let val = InnerVal::from_bytes(this_page.get_foster_val());
+                    let foster_page_key =
+                        PageFrameKey::new_with_frame_id(self.c_key, val.page_id, val.frame_id);
                     let foster_page = self.read_page(foster_page_key);
                     // Now we have two locks. We need to release the lock of the current page.
                     let (op, this_page, foster_page) = self.modify_structure_if_needed_for_read(
@@ -1468,9 +1467,11 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
                 let slot_id = this_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
                 let is_foster_relationship =
                     this_page.has_foster_child() && slot_id == this_page.foster_child_slot_id();
-                let page_id_bytes = this_page.get_val(slot_id);
-                let page_id: u32 = deserialize_page_id(page_id_bytes).unwrap();
-                (is_foster_relationship, PageKey::new(self.c_key, page_id))
+                let val = InnerVal::from_bytes(this_page.get_val(slot_id));
+                (
+                    is_foster_relationship,
+                    PageFrameKey::new_with_frame_id(self.c_key, val.page_id, val.frame_id),
+                )
             };
 
             let next_page = self.read_page(page_key);
@@ -1804,10 +1805,9 @@ impl<'a, E: EvictionPolicy, T: MemPool<E>> Iterator for FosterBtreeRangeScanner<
                 // If the current slot is the foster child slot, move to the foster child.
                 // Before releasing the current page, we need to get the read-latch of the foster child.
                 let current_page = self.current_leaf_page.take().unwrap();
-                let foster_page_key = PageKey::new(
-                    self.btree.c_key,
-                    deserialize_page_id(current_page.get_foster_val()).unwrap(),
-                );
+                let val = InnerVal::from_bytes(&current_page.get_foster_val());
+                let foster_page_key =
+                    PageFrameKey::new_with_frame_id(self.btree.c_key, val.page_id, val.frame_id);
                 let foster_page = self
                     .btree
                     .mem_pool
@@ -1833,7 +1833,7 @@ impl<'a, E: EvictionPolicy, T: MemPool<E>> Iterator for FosterBtreeRangeScanner<
 pub struct FosterBTreePageTraversal<E: EvictionPolicy, T: MemPool<E>> {
     // BTree parameters
     c_key: ContainerKey,
-    root_key: PageKey,
+    root_key: PageFrameKey,
     mem_pool: Arc<T>,
     phantom: PhantomData<E>,
 }
@@ -1851,19 +1851,18 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBTreePageTraversal<E, T> {
 
 impl<E: EvictionPolicy, T: MemPool<E>> FosterBTreePageTraversal<E, T> {
     // Return the children to visit in the order of the traversal
-    fn get_children_page_ids(&self, page: &Page) -> Vec<PageId> {
+    fn get_children_page_ids(&self, page: &Page) -> Vec<InnerVal> {
         let mut children = Vec::new();
         if page.is_leaf() {
             if page.has_foster_child() {
-                let foster_child_page_id = deserialize_page_id(page.get_foster_val()).unwrap();
-                children.push(foster_child_page_id);
+                let val = InnerVal::from_bytes(page.get_foster_val());
+                children.push(val);
             }
             children
         } else {
             for i in 1..=page.active_slot_count() {
-                let child_page_id =
-                    deserialize_page_id(page.get_val(i).try_into().unwrap()).unwrap();
-                children.push(child_page_id);
+                let val = InnerVal::from_bytes(page.get_val(i));
+                children.push(val);
             }
             children
         }
@@ -1885,7 +1884,14 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBTreePageTraversal<E, T> {
                 visitor.visit_pre(&page);
                 let children = self.get_children_page_ids(&page);
                 for child_key in children.into_iter().rev() {
-                    stack.push((PageKey::new(self.c_key, child_key), false));
+                    stack.push((
+                        PageFrameKey::new_with_frame_id(
+                            self.c_key,
+                            child_key.page_id,
+                            child_key.frame_id,
+                        ),
+                        false,
+                    ));
                 }
             }
         }
@@ -2061,7 +2067,7 @@ mod tests {
 
     use super::{
         ContainerKey, EvictionPolicy, FosterBtree, FosterBtreePage, LRUEvictionPolicy, MemPool,
-        PageKey, MAX_BYTES_USED,
+        PageFrameKey, MAX_BYTES_USED,
     };
 
     fn to_bytes(num: usize) -> Vec<u8> {
@@ -2695,7 +2701,7 @@ mod tests {
         is_root: bool,
         this_size: usize,
         foster_size: usize,
-    ) -> (PageKey, PageKey) {
+    ) -> (PageFrameKey, PageFrameKey) {
         let this_size = this_size as u16;
         let foster_size = foster_size as u16;
         // Create a foster relationship between two pages.
@@ -2746,8 +2752,8 @@ mod tests {
         this.run_consistency_checks(true);
         foster.run_consistency_checks(true);
 
-        let this_id = PageKey::new(c_key, this.get_id());
-        let foster_id = PageKey::new(c_key, foster.get_id());
+        let this_id = this.page_frame_key().unwrap();
+        let foster_id = foster.page_frame_key().unwrap();
 
         (this_id, foster_id)
     }
@@ -2876,7 +2882,7 @@ mod tests {
     fn build_two_children_tree<E: EvictionPolicy, T: MemPool<E>>(
         bp: Arc<T>,
         child0_size: usize,
-    ) -> (PageKey, PageKey) {
+    ) -> (PageFrameKey, PageFrameKey) {
         let child0_size = child0_size as u16;
 
         // Create a parent with two children.
@@ -2927,8 +2933,8 @@ mod tests {
         child0.run_consistency_checks(true);
         child1.run_consistency_checks(true);
 
-        let parent_id = PageKey::new(c_key, parent.get_id());
-        let child0_id = PageKey::new(c_key, child0.get_id());
+        let parent_id = parent.page_frame_key().unwrap();
+        let child0_id = child0.page_frame_key().unwrap();
 
         (parent_id, child0_id)
     }
@@ -2936,7 +2942,7 @@ mod tests {
     fn build_single_child_with_foster_child_tree<E: EvictionPolicy, T: MemPool<E>>(
         bp: Arc<T>,
         child0_size: usize,
-    ) -> (PageKey, PageKey) {
+    ) -> (PageFrameKey, PageFrameKey) {
         let child0_size = child0_size as u16;
 
         // Create a parent with a child and a foster child.
@@ -2987,8 +2993,8 @@ mod tests {
         child0.run_consistency_checks(true);
         child1.run_consistency_checks(true);
 
-        let parent_id = PageKey::new(c_key, parent.get_id());
-        let child0_id = PageKey::new(c_key, child0.get_id());
+        let parent_id = parent.page_frame_key().unwrap();
+        let child0_id = child0.page_frame_key().unwrap();
 
         (parent_id, child0_id)
     }
@@ -2996,7 +3002,7 @@ mod tests {
     fn build_single_child_tree<E: EvictionPolicy, T: MemPool<E>>(
         bp: Arc<T>,
         child0_size: usize,
-    ) -> (PageKey, PageKey) {
+    ) -> (PageFrameKey, PageFrameKey) {
         let child0_size = child0_size as u16;
 
         // Create a parent with a child.
@@ -3039,8 +3045,8 @@ mod tests {
         parent.run_consistency_checks(true);
         child0.run_consistency_checks(true);
 
-        let parent_id = PageKey::new(c_key, parent.get_id());
-        let child0_id = PageKey::new(c_key, child0.get_id());
+        let parent_id = parent.page_frame_key().unwrap();
+        let child0_id = child0.page_frame_key().unwrap();
 
         (parent_id, child0_id)
     }

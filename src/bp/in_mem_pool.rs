@@ -8,8 +8,8 @@ use crate::{page::Page, rwlatch::RwLatch};
 use super::{
     buffer_frame::BufferFrame,
     eviction_policy::EvictionPolicy,
-    mem_pool_trait::MemPool,
-    prelude::{ContainerKey, FrameReadGuard, FrameWriteGuard, MemPoolStatus, PageKey},
+    mem_pool_trait::{MemPool, PageKey},
+    prelude::{ContainerKey, FrameReadGuard, FrameWriteGuard, MemPoolStatus, PageFrameKey},
 };
 
 /// A simple in-memory page pool.
@@ -90,15 +90,15 @@ impl<T: EvictionPolicy> MemPool<T> for InMemPool<T> {
         self.release_exclusive();
 
         guard.copy(&page);
-        *guard.key_mut() = Some(page_key);
+        *guard.page_key_mut() = Some(page_key);
         Ok(guard)
     }
 
-    fn get_page_for_write(&self, key: PageKey) -> Result<FrameWriteGuard<T>, MemPoolStatus> {
+    fn get_page_for_write(&self, key: PageFrameKey) -> Result<FrameWriteGuard<T>, MemPoolStatus> {
         self.shared();
         let frames = unsafe { &*self.frames.get() };
         let id_to_index = unsafe { &*self.id_to_index.get() };
-        let frame_index = match id_to_index.get(&key) {
+        let frame_index = match id_to_index.get(&key.p_key()) {
             Some(index) => *index,
             None => {
                 self.release_shared();
@@ -115,11 +115,11 @@ impl<T: EvictionPolicy> MemPool<T> for InMemPool<T> {
         }
     }
 
-    fn get_page_for_read(&self, key: PageKey) -> Result<FrameReadGuard<T>, MemPoolStatus> {
+    fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard<T>, MemPoolStatus> {
         self.shared();
         let frames = unsafe { &*self.frames.get() };
         let id_to_index = unsafe { &*self.id_to_index.get() };
-        let frame_index = match id_to_index.get(&key) {
+        let frame_index = match id_to_index.get(&key.p_key()) {
             Some(index) => *index,
             None => {
                 self.release_shared();
@@ -166,7 +166,7 @@ impl<T: EvictionPolicy> InMemPool<T> {
         for (key, index) in id_to_index.iter() {
             let frame = &frames[*index];
             let frame = frame.read();
-            assert_eq!(*frame.key(), Some(*key));
+            assert_eq!(*frame.page_key(), Some(*key));
         }
     }
 
@@ -174,7 +174,7 @@ impl<T: EvictionPolicy> InMemPool<T> {
         let frames = unsafe { &*self.frames.get() };
         for frame in frames.iter() {
             let frame = frame.read();
-            let key = frame.key().unwrap();
+            let key = frame.page_key().unwrap();
             let page_id = frame.get_id();
             assert_eq!(key.page_id, page_id);
         }
@@ -196,9 +196,9 @@ mod tests {
     fn test_mp_and_frame_latch() {
         let mp = InMemPool::new();
         let c_key = ContainerKey { db_id: 0, c_id: 0 };
-        let page_key = PageKey::new(c_key, 0);
 
         let frame = mp.create_new_page_for_write(c_key).unwrap();
+        let page_key = frame.page_frame_key().unwrap();
         drop(frame);
 
         let num_threads = 3;
@@ -236,13 +236,13 @@ mod tests {
 
         for i in 0..20 {
             let frame = mp.create_new_page_for_write(c_key).unwrap();
-            assert_eq!(frame.key().unwrap(), PageKey::new(c_key, i));
+            assert_eq!(frame.page_key().unwrap(), PageKey::new(c_key, i));
             drop(frame);
         }
 
         for i in 0..20 {
-            let frame = mp.get_page_for_read(PageKey::new(c_key, i)).unwrap();
-            assert_eq!(frame.key().unwrap(), PageKey::new(c_key, i));
+            let frame = mp.get_page_for_read(PageFrameKey::new(c_key, i)).unwrap();
+            assert_eq!(frame.page_key().unwrap(), PageKey::new(c_key, i));
         }
 
         mp.check_all_frames_unlatched();
@@ -259,13 +259,13 @@ mod tests {
         frame1[0] = 1;
         let mut frame2 = mp.create_new_page_for_write(c_key).unwrap();
         frame2[0] = 2;
-        assert_eq!(frame1.key().unwrap(), PageKey::new(c_key, 0));
-        assert_eq!(frame2.key().unwrap(), PageKey::new(c_key, 1));
+        assert_eq!(frame1.page_key().unwrap(), PageKey::new(c_key, 0));
+        assert_eq!(frame2.page_key().unwrap(), PageKey::new(c_key, 1));
         drop(frame1);
         drop(frame2);
 
-        let frame1 = mp.get_page_for_read(PageKey::new(c_key, 0)).unwrap();
-        let frame2 = mp.get_page_for_read(PageKey::new(c_key, 1)).unwrap();
+        let frame1 = mp.get_page_for_read(PageFrameKey::new(c_key, 0)).unwrap();
+        let frame2 = mp.get_page_for_read(PageFrameKey::new(c_key, 1)).unwrap();
         assert_eq!(frame1[0], 1);
         assert_eq!(frame2[0], 2);
     }

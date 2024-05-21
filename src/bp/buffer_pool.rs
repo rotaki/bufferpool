@@ -6,7 +6,7 @@ use crate::{log_debug, random::gen_random_int, rwlatch::RwLatch};
 use super::{
     buffer_frame::{BufferFrame, FrameReadGuard, FrameWriteGuard},
     eviction_policy::EvictionPolicy,
-    mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, PageKey},
+    mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, PageFrameKey, PageKey},
 };
 
 use crate::file_manager::FileManager;
@@ -416,7 +416,7 @@ where
         let mut guard = frames[index].try_write(false).unwrap(); // We have already checked that the frame is not locked
 
         // Evict old page if necessary
-        if let Some(old_key) = guard.key() {
+        if let Some(old_key) = guard.page_key() {
             if is_dirty {
                 guard.dirty().store(false, Ordering::Relaxed);
                 let file = container_to_file
@@ -439,7 +439,7 @@ where
         };
 
         id_to_index.insert(key, index);
-        *guard.key_mut() = Some(key);
+        *guard.page_key_mut() = Some(key);
         {
             let mut evict_info = guard.evict_info().write().unwrap();
             evict_info.reset();
@@ -485,7 +485,10 @@ where
         res
     }
 
-    pub fn get_page_for_write(&self, key: PageKey) -> Result<FrameWriteGuard<T>, MemPoolStatus> {
+    pub fn get_page_for_write(
+        &self,
+        key: PageFrameKey,
+    ) -> Result<FrameWriteGuard<T>, MemPoolStatus> {
         #[cfg(feature = "stat")]
         inc_local_bp_lookup();
         log_debug!("Page write: {}", key);
@@ -495,7 +498,7 @@ where
             let id_to_index = unsafe { &mut *self.id_to_index.get() };
             let frames = unsafe { &mut *self.frames.get() };
 
-            if let Some(&index) = id_to_index.get(&key) {
+            if let Some(&index) = id_to_index.get(&key.p_key()) {
                 let guard = frames[index].try_write(true);
                 if let Some(g) = &guard {
                     g.evict_info().write().unwrap().update();
@@ -512,7 +515,7 @@ where
         let frames = unsafe { &mut *self.frames.get() };
 
         // We need to recheck the id_to_index because another thread might have inserted the page
-        let result = match id_to_index.get(&key) {
+        let result = match id_to_index.get(&key.p_key()) {
             Some(&index) => {
                 let guard = frames[index].try_write(true);
                 if let Some(g) = &guard {
@@ -521,7 +524,7 @@ where
                 guard.ok_or(MemPoolStatus::FrameWriteLatchGrantFailed)
             }
             None => {
-                let res = self.handle_page_fault(key, false);
+                let res = self.handle_page_fault(key.p_key(), false);
                 // If guard is ok, mark the page as dirty
                 if let Ok(ref guard) = res {
                     guard.dirty().store(true, Ordering::Release);
@@ -533,7 +536,7 @@ where
         result
     }
 
-    pub fn get_page_for_read(&self, key: PageKey) -> Result<FrameReadGuard<T>, MemPoolStatus> {
+    pub fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard<T>, MemPoolStatus> {
         #[cfg(feature = "stat")]
         inc_local_bp_lookup();
         log_debug!("Page read: {}", key);
@@ -543,7 +546,7 @@ where
             let id_to_index = unsafe { &mut *self.id_to_index.get() };
             let frames = unsafe { &mut *self.frames.get() };
 
-            if let Some(&index) = id_to_index.get(&key) {
+            if let Some(&index) = id_to_index.get(&key.p_key()) {
                 let guard = frames[index].try_read();
                 if let Some(g) = &guard {
                     g.evict_info().write().unwrap().update();
@@ -560,7 +563,7 @@ where
         let id_to_index = unsafe { &mut *self.id_to_index.get() };
         let frames = unsafe { &mut *self.frames.get() };
 
-        let result = match id_to_index.get(&key) {
+        let result = match id_to_index.get(&key.p_key()) {
             Some(&index) => {
                 let guard = frames[index].try_read();
                 if let Some(g) = &guard {
@@ -569,7 +572,7 @@ where
                 guard.ok_or(MemPoolStatus::FrameReadLatchGrantFailed)
             }
             None => self
-                .handle_page_fault(key, false)
+                .handle_page_fault(key.p_key(), false)
                 .map(|guard| guard.downgrade()),
         };
         self.release_exclusive();
@@ -592,7 +595,7 @@ where
             };
             if frame.dirty().swap(false, Ordering::Acquire) {
                 // swap is required to avoid concurrent flushes
-                let key = frame.key().unwrap();
+                let key = frame.page_key().unwrap();
                 if let Some(file) = container_to_file.get(&key.c_key) {
                     file.write_page(key.page_id, &frame)?;
                 } else {
@@ -651,11 +654,11 @@ where
         BufferPool::create_new_page_for_write(self, c_key)
     }
 
-    fn get_page_for_write(&self, key: PageKey) -> Result<FrameWriteGuard<T>, MemPoolStatus> {
+    fn get_page_for_write(&self, key: PageFrameKey) -> Result<FrameWriteGuard<T>, MemPoolStatus> {
         BufferPool::get_page_for_write(self, key)
     }
 
-    fn get_page_for_read(&self, key: PageKey) -> Result<FrameReadGuard<T>, MemPoolStatus> {
+    fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard<T>, MemPoolStatus> {
         BufferPool::get_page_for_read(self, key)
     }
 
@@ -691,9 +694,9 @@ impl<T: EvictionPolicy> BufferPool<T> {
         for (i, frame) in frames.iter().enumerate() {
             let frame = frame.read();
             if index_to_id.contains_key(&i) {
-                assert_eq!(frame.key().unwrap(), *index_to_id[&i]);
+                assert_eq!(frame.page_key().unwrap(), *index_to_id[&i]);
             } else {
-                assert_eq!(frame.key(), &None);
+                assert_eq!(frame.page_key(), &None);
             }
         }
         // println!("id_to_index: {:?}", id_to_index);
@@ -703,16 +706,16 @@ impl<T: EvictionPolicy> BufferPool<T> {
         let frames = unsafe { &*self.frames.get() };
         for frame in frames.iter() {
             let frame = frame.read();
-            if let Some(key) = frame.key() {
+            if let Some(key) = frame.page_key() {
                 let page_id = frame.get_id();
                 assert_eq!(key.page_id, page_id);
             }
         }
     }
 
-    pub fn is_in_buffer_pool(&self, key: PageKey) -> bool {
+    pub fn is_in_buffer_pool(&self, key: PageFrameKey) -> bool {
         let id_to_index = unsafe { &*self.id_to_index.get() };
-        id_to_index.contains_key(&key)
+        id_to_index.contains_key(&key.p_key())
     }
 }
 
@@ -742,7 +745,7 @@ mod tests {
             let bp = TestRAWBufferPool::new(temp_dir.path(), num_frames).unwrap();
             let c_key = ContainerKey::new(db_id, 0);
             let frame = bp.create_new_page_for_write(c_key).unwrap();
-            let key = frame.key().unwrap();
+            let key = frame.page_frame_key().unwrap();
             drop(frame);
 
             let num_threads = 3;
@@ -788,12 +791,12 @@ mod tests {
             let key1 = {
                 let mut guard = bp.create_new_page_for_write(c_key).unwrap();
                 guard[0] = 1;
-                guard.key().unwrap()
+                guard.page_frame_key().unwrap()
             };
             let key2 = {
                 let mut guard = bp.create_new_page_for_write(c_key).unwrap();
                 guard[0] = 2;
-                guard.key().unwrap()
+                guard.page_frame_key().unwrap()
             };
             bp.run_checks();
             // check contents of evicted page
@@ -825,7 +828,7 @@ mod tests {
             for i in 0..100 {
                 let mut guard = bp.create_new_page_for_write(c_key).unwrap();
                 guard[0] = i;
-                keys.push(guard.key().unwrap());
+                keys.push(guard.page_frame_key().unwrap());
             }
             bp.run_checks();
             for (i, key) in keys.iter().enumerate() {
@@ -856,12 +859,12 @@ mod tests {
             let mut guard1 = bp.create_new_page_for_write(c_key).unwrap();
             guard1[0] = count;
             count += 1;
-            keys.push(guard1.key().unwrap());
+            keys.push(guard1.page_frame_key().unwrap());
 
             let mut guard2 = bp.create_new_page_for_write(c_key).unwrap();
             guard2[0] = count;
             count += 1;
-            keys.push(guard2.key().unwrap());
+            keys.push(guard2.page_frame_key().unwrap());
         }
 
         bp.run_checks();
@@ -916,7 +919,7 @@ mod tests {
         let key_1 = {
             let mut guard = bp.create_new_page_for_write(c_key).unwrap();
             guard[0] = 1;
-            guard.key().unwrap()
+            guard.page_frame_key().unwrap()
         };
 
         let stats = bp.eviction_stats();
@@ -925,7 +928,7 @@ mod tests {
         let key_2 = {
             let mut guard = bp.create_new_page_for_write(c_key).unwrap();
             guard[0] = 2;
-            guard.key().unwrap()
+            guard.page_frame_key().unwrap()
         };
 
         let stats = bp.eviction_stats();

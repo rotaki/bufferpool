@@ -42,6 +42,42 @@ impl std::fmt::Display for PageKey {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PageFrameKey {
+    p_key: PageKey,
+    frame_id: u32, // Frame id in the buffer pool
+}
+
+impl PageFrameKey {
+    pub fn new(c_key: ContainerKey, page_id: PageId) -> Self {
+        PageFrameKey {
+            p_key: PageKey::new(c_key, page_id),
+            frame_id: u32::MAX,
+        }
+    }
+
+    pub fn new_with_frame_id(c_key: ContainerKey, page_id: PageId, frame_id: u32) -> Self {
+        PageFrameKey {
+            p_key: PageKey::new(c_key, page_id),
+            frame_id,
+        }
+    }
+
+    pub fn p_key(&self) -> PageKey {
+        self.p_key
+    }
+
+    pub fn frame_id(&self) -> u32 {
+        self.frame_id
+    }
+}
+
+impl std::fmt::Display for PageFrameKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "({}, f:{})", self.p_key, self.frame_id)
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub enum MemPoolStatus {
     FileManagerNotFound,
@@ -90,12 +126,12 @@ pub trait MemPool<T: EvictionPolicy>: Sync + Send {
     /// Get a page for read.
     /// This function will return a FrameReadGuard.
     /// This function assumes that a page is already created and either in memory or on disk.
-    fn get_page_for_write(&self, key: PageKey) -> Result<FrameWriteGuard<T>, MemPoolStatus>;
+    fn get_page_for_write(&self, key: PageFrameKey) -> Result<FrameWriteGuard<T>, MemPoolStatus>;
 
     /// Get a page for write.
     /// This function will return a FrameWriteGuard.
     /// This function assumes that a page is already created and either in memory or on disk.
-    fn get_page_for_read(&self, key: PageKey) -> Result<FrameReadGuard<T>, MemPoolStatus>;
+    fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard<T>, MemPoolStatus>;
 
     /// Reset the memory pool.
     /// This function will reset the memory pool to its initial state.

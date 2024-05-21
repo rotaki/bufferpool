@@ -78,7 +78,11 @@ mod tests {
             let p0 = bp.create_new_page_for_write(c_key).unwrap();
             let p1 = bp.create_new_page_for_write(c_key).unwrap();
             let p2 = bp.create_new_page_for_write(c_key).unwrap();
-            (p0.key().unwrap(), p1.key().unwrap(), p2.key().unwrap())
+            (
+                p0.page_frame_key().unwrap(),
+                p1.page_frame_key().unwrap(),
+                p2.page_frame_key().unwrap(),
+            )
         };
 
         let (victim, is_dirty) = bp.choose_victim().unwrap();
