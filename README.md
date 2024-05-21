@@ -135,11 +135,18 @@ Found 2 outliers among 10 measurements (20.00%)
   1 (10.00%) high severe
 ```
 
+## Stats
+
+```sh
+cargo build --features stat --release --bin on_disk
+./target/release/on_disk
+```
+
 ## Perf
 
 ```sh
-cargo build --release
-perf record -e cycles -g --call-graph dwarf ./target/release/main 
+cargo build --target x86_64-unknown-linux-gnu --release --bin on_disk
+perf record -e cycles -g --call-graph dwarf ./target/x86_64-unknown-linux-gnu/release/main
 hotspot perf.data
 ```
 
