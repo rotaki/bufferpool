@@ -24,6 +24,7 @@ impl std::fmt::Display for ContainerKey {
     }
 }
 
+/// Page key is used to determine a specific page in a container in the database.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PageKey {
     pub c_key: ContainerKey,
@@ -42,6 +43,9 @@ impl std::fmt::Display for PageKey {
     }
 }
 
+/// Page frame key is used to access a page in the buffer pool.
+/// It contains not only the page key but also the frame id in the buffer pool.
+/// The frame id is used as a hint to access the page in O(1) time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PageFrameKey {
     p_key: PageKey,

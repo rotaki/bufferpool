@@ -10,7 +10,7 @@ use std::{
 
 use crate::{
     bp::prelude::*,
-    log_trace, log_warn,
+    log_debug, log_trace, log_warn,
     page::{Page, PageId, AVAILABLE_PAGE_SIZE},
 };
 
@@ -682,6 +682,25 @@ fn should_root_descend(this: &Page, child: &Page) -> bool {
     true
 }
 
+/// Opportunistically try to fix the child page frame id
+fn fix_frame_id<'a, E: EvictionPolicy>(
+    this: FrameReadGuard<'a, E>,
+    slot_id: u16,
+    new_frame_key: &PageFrameKey,
+) -> FrameReadGuard<'a, E> {
+    match this.try_upgrade(true) {
+        Ok(mut write_guard) => {
+            let val = InnerVal::new_with_frame_id(
+                new_frame_key.p_key().page_id,
+                new_frame_key.frame_id(),
+            );
+            write_guard.update_at(slot_id, None, &val.to_bytes());
+            write_guard.downgrade()
+        }
+        Err(read_guard) => read_guard,
+    }
+}
+
 /// Split this page into two pages.
 /// The foster child will be the right page of this page after the split.
 /// Returns the foster key
@@ -1309,7 +1328,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
         key: &[u8],
         value: &[u8],
     ) {
-        if !this.update_at(slot, key, value) {
+        if !this.update_at(slot, None, value) {
             #[cfg(feature = "stat")]
             inc_local_stat_trigger(OpType::Split);
             // Remove the slot and split insert
@@ -1437,6 +1456,23 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
                     let foster_page_key =
                         PageFrameKey::new_with_frame_id(self.c_key, val.page_id, val.frame_id);
                     let foster_page = self.read_page(foster_page_key);
+
+                    let this_page = if foster_page.frame_id() != val.frame_id {
+                        log_debug!(
+                            "Frame ID mismatch: Expected: {}, Actual: {}.",
+                            val.frame_id,
+                            foster_page.frame_id()
+                        );
+                        let foster_child_slot_id = this_page.foster_child_slot_id();
+                        fix_frame_id(
+                            this_page,
+                            foster_child_slot_id,
+                            &foster_page.page_frame_key().unwrap(),
+                        )
+                    } else {
+                        this_page
+                    };
+
                     // Now we have two locks. We need to release the lock of the current page.
                     let (op, this_page, foster_page) = self.modify_structure_if_needed_for_read(
                         true,
@@ -1463,18 +1499,26 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
                     return this_page;
                 }
             }
-            let (is_foster_relationship, page_key) = {
-                let slot_id = this_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
-                let is_foster_relationship =
-                    this_page.has_foster_child() && slot_id == this_page.foster_child_slot_id();
-                let val = InnerVal::from_bytes(this_page.get_val(slot_id));
-                (
-                    is_foster_relationship,
-                    PageFrameKey::new_with_frame_id(self.c_key, val.page_id, val.frame_id),
-                )
-            };
+            let slot_id = this_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
+            let is_foster_relationship =
+                this_page.has_foster_child() && slot_id == this_page.foster_child_slot_id();
+            let val = InnerVal::from_bytes(this_page.get_val(slot_id));
+            let page_key = PageFrameKey::new_with_frame_id(self.c_key, val.page_id, val.frame_id);
 
             let next_page = self.read_page(page_key);
+
+            // Check if the frame_id is the same
+            let this_page = if next_page.frame_id() != val.frame_id {
+                log_debug!(
+                    "Frame ID mismatch: Expected: {}, Actual: {}.",
+                    val.frame_id,
+                    next_page.frame_id()
+                );
+                fix_frame_id(this_page, slot_id, &next_page.page_frame_key().unwrap())
+            } else {
+                this_page
+            };
+
             // Now we have two locks. We need to release the lock of the current page.
             let (op, this_page, next_page) = self.modify_structure_if_needed_for_read(
                 is_foster_relationship,

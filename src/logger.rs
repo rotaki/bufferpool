@@ -4,7 +4,6 @@ use std::io::{self, Write};
 use std::sync::Mutex;
 use std::thread;
 
-/*
 // Multi-buffer logger
 use std::cell::RefCell;
 use std::fs::{File, OpenOptions};
@@ -36,8 +35,8 @@ pub fn log(level: &str, file: &str, line: u32, message: &str) {
         }
     });
 }
-*/
 
+/*
 // Single-buffer logger
 // This will print logs to a single file
 lazy_static! {
@@ -59,6 +58,7 @@ pub fn log(level: &str, file: &str, line: u32, message: &str) {
     let _ = stdout.write_all(log_message.as_bytes());
     let _ = stdout.flush();
 }
+*/
 
 #[macro_export]
 macro_rules! log_error {

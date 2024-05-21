@@ -260,7 +260,7 @@ pub trait FosterBtreePage {
     fn upper_bound_slot_id(&self, key: &BTreeKey) -> u16;
     fn find_slot_id(&self, key: &BTreeKey) -> Option<u16>;
     fn insert_at(&mut self, slot_id: u16, key: &[u8], value: &[u8]) -> bool;
-    fn update_at(&mut self, slot_id: u16, key: &[u8], value: &[u8]) -> bool;
+    fn update_at(&mut self, slot_id: u16, key: Option<&[u8]>, value: &[u8]) -> bool;
     fn remove_at(&mut self, slot_id: u16);
     fn set_low_fence(&mut self, key: &[u8]);
     fn set_high_fence(&mut self, key: &[u8]);
@@ -800,7 +800,7 @@ impl FosterBtreePage for Page {
         if key.is_empty() {
             self.set_left_most(true)
         }
-        let res = self.update_at(self.low_fence_slot_id(), key, &[]);
+        let res = self.update_at(self.low_fence_slot_id(), Some(key), &[]);
         assert!(res);
     }
 
@@ -810,7 +810,7 @@ impl FosterBtreePage for Page {
         if key.is_empty() {
             self.set_right_most(true)
         }
-        let res = self.update_at(self.high_fence_slot_id(), key, &[]);
+        let res = self.update_at(self.high_fence_slot_id(), Some(key), &[]);
         assert!(res);
     }
 
@@ -897,16 +897,23 @@ impl FosterBtreePage for Page {
     ///
     /// If the new record cannot be inserted into the page, return false without removing the old record.
     /// This function **DOES NOT** check the sorted order of the keys.
-    fn update_at(&mut self, slot_id: u16, key: &[u8], value: &[u8]) -> bool {
+    fn update_at(&mut self, slot_id: u16, key: Option<&[u8]>, value: &[u8]) -> bool {
         assert!(slot_id < self.slot_count());
         let mut slot = self.slot(slot_id).unwrap();
         let old_rec_size = slot.key_size() as usize + slot.value_size() as usize;
-        let new_rec_size = key.len() + value.len();
+        let new_rec_size = key.map(|k| k.len()).unwrap_or(slot.key_size() as usize) + value.len();
         if new_rec_size <= old_rec_size {
             let offset = slot.offset() as usize;
-            self[offset..offset + key.len()].copy_from_slice(key);
-            self[offset + key.len()..offset + new_rec_size].copy_from_slice(value);
-            slot.set_key_size(key.len() as u16);
+            if let Some(key) = key {
+                // Key changes
+                self[offset..offset + key.len()].copy_from_slice(key);
+                self[offset + key.len()..offset + new_rec_size].copy_from_slice(value);
+                slot.set_key_size(key.len() as u16);
+            } else {
+                // Key is the same
+                self[offset + slot.key_size() as usize..offset + new_rec_size]
+                    .copy_from_slice(value);
+            }
             slot.set_value_size(value.len() as u16);
             self.update_slot(slot_id, &slot);
             self.set_total_bytes_used(
@@ -928,10 +935,26 @@ impl FosterBtreePage for Page {
         // Insert the key-value pair at the beginning of the record space.
         let current_offset = self.rec_start_offset();
         let offset = current_offset - new_rec_size as u16;
-        self[offset as usize..offset as usize + key.len()].copy_from_slice(key);
-        self[offset as usize + key.len()..offset as usize + new_rec_size].copy_from_slice(value);
-        // Update the slot
-        let new_slot = Slot::new(offset, key.len() as u16, value.len() as u16);
+        let new_slot = if let Some(key) = key {
+            // Key changes
+            self[offset as usize..offset as usize + key.len()].copy_from_slice(key);
+            self[offset as usize + key.len()..offset as usize + new_rec_size]
+                .copy_from_slice(value);
+            // Update the slot
+            let new_slot = Slot::new(offset, key.len() as u16, value.len() as u16);
+            new_slot
+        } else {
+            // Key is the same
+            self.copy_within(
+                slot.offset() as usize..slot.offset() as usize + slot.key_size() as usize,
+                offset as usize,
+            );
+            self[offset as usize + slot.key_size() as usize..offset as usize + new_rec_size]
+                .copy_from_slice(value);
+            // Update the slot
+            let new_slot = Slot::new(offset, slot.key_size(), value.len() as u16);
+            new_slot
+        };
         self.update_slot(slot_id, &new_slot);
         self.set_total_bytes_used(
             self.total_bytes_used() - old_rec_size as u16 + new_rec_size as u16,
@@ -1680,11 +1703,20 @@ mod tests {
         fbt_page.insert("c".as_bytes(), "cc".as_bytes(), false);
         fbt_page.run_consistency_checks(true);
 
-        assert!(fbt_page.update_at(1, "b".as_bytes(), "bbb".as_bytes()));
+        assert!(fbt_page.update_at(1, Some("b_new".as_bytes()), "bbb".as_bytes()));
         fbt_page.run_consistency_checks(false);
         // fbt_page.print_all(|key| String::from_utf8_lossy(key).to_string());
         fbt_page.compact_space();
         fbt_page.run_consistency_checks(true);
+        assert_eq!(fbt_page.get_raw_key(1), "b_new".as_bytes());
         assert_eq!(fbt_page.get_val(1), "bbb".as_bytes());
+
+        // update only the value
+        assert!(fbt_page.update_at(1, None, "bbbb".as_bytes()));
+        fbt_page.run_consistency_checks(false);
+        fbt_page.compact_space();
+        fbt_page.run_consistency_checks(true);
+        assert_eq!(fbt_page.get_raw_key(1), "b_new".as_bytes());
+        assert_eq!(fbt_page.get_val(1), "bbbb".as_bytes());
     }
 }

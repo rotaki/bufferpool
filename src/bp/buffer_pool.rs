@@ -494,6 +494,41 @@ where
         log_debug!("Page write: {}", key);
 
         {
+            // Fast path access to the frame using frame_id
+            let frame_id = key.frame_id();
+            let frames = unsafe { &*self.frames.get() };
+            if (frame_id as usize) < frames.len() {
+                let guard = frames[frame_id as usize].try_write(false);
+                if let Some(g) = &guard {
+                    // Check if the page key matches
+                    if let Some(page_key) = g.page_key() {
+                        if page_key == &key.p_key() {
+                            // Update the eviction info
+                            g.evict_info().write().unwrap().update();
+                            // Mark the page as dirty
+                            g.dirty().store(true, Ordering::Release);
+                            log_debug!("Page fast path write: {}", key);
+                            return Ok(guard.unwrap());
+                        } else {
+                            // The page key does not match.
+                            // Go to the slow path.
+                        }
+                    } else {
+                        // The frame is empty.
+                        // Go to the slow path.
+                    }
+                } else {
+                    // The frame is latched.
+                    // Need to retry.
+                    return Err(MemPoolStatus::FrameWriteLatchGrantFailed);
+                }
+            } else {
+                // The frame id is out of bounds.
+                // Go to the slow path.
+            }
+        }
+
+        {
             self.shared();
             let id_to_index = unsafe { &mut *self.id_to_index.get() };
             let frames = unsafe { &mut *self.frames.get() };
@@ -540,6 +575,39 @@ where
         #[cfg(feature = "stat")]
         inc_local_bp_lookup();
         log_debug!("Page read: {}", key);
+
+        {
+            // Fast path access to the frame using frame_id
+            let frame_id = key.frame_id();
+            let frames = unsafe { &*self.frames.get() };
+            if (frame_id as usize) < frames.len() {
+                let guard = frames[frame_id as usize].try_read();
+                if let Some(g) = &guard {
+                    // Check if the page key matches
+                    if let Some(page_key) = g.page_key() {
+                        if page_key == &key.p_key() {
+                            // Update the eviction info
+                            g.evict_info().write().unwrap().update();
+                            log_debug!("Page fast path read: {}", key);
+                            return Ok(guard.unwrap());
+                        } else {
+                            // The page key does not match.
+                            // Go to the slow path.
+                        }
+                    } else {
+                        // The frame is empty.
+                        // Go to the slow path.
+                    }
+                } else {
+                    // The frame is latched.
+                    // Need to retry.
+                    return Err(MemPoolStatus::FrameReadLatchGrantFailed);
+                }
+            } else {
+                // The frame id is out of bounds.
+                // Go to the slow path.
+            }
+        }
 
         {
             self.shared();
