@@ -1271,7 +1271,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
     }
 
     fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard<E> {
-        let base = Duration::from_millis(1);
+        #[cfg(feature = "stat")]
         let mut attempts = 0;
         loop {
             #[cfg(feature = "stat")]
@@ -1284,7 +1284,10 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
                     return page;
                 }
                 Err(MemPoolStatus::FrameReadLatchGrantFailed) => {
-                    attempts += 1;
+                    #[cfg(feature = "stat")]
+                    {
+                        attempts += 1;
+                    }
                     log_warn!("Shared page latch grant failed: {:?}. Will retry", page_key);
                     std::hint::spin_loop();
                 }
