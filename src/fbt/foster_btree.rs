@@ -1286,8 +1286,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
                 Err(MemPoolStatus::FrameReadLatchGrantFailed) => {
                     attempts += 1;
                     log_warn!("Shared page latch grant failed: {:?}. Will retry", page_key);
-                    std::thread::sleep(base * attempts);
-                    // std::hint::spin_loop();
+                    std::hint::spin_loop();
                 }
                 Err(MemPoolStatus::CannotEvictPage) => {
                     log_warn!("All frames are latched and cannot evict page to read the page: {:?}. Will retry", page_key);

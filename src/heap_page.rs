@@ -218,11 +218,9 @@ impl<'a> HeapPage<'a> {
         if start >= end || shift_size == 0 {
             return;
         }
-        let data = self.page[start..end].to_vec();
-
+        // Use copy_within to shift the recs
         let new_start = start + shift_size as usize;
-        let new_end = end + shift_size as usize;
-        self.page[new_start..new_end].copy_from_slice(&data);
+        self.page.copy_within(start..end, new_start);
 
         // For each valid slot shifted, update the slot
         for slot_id in 0..self.header().active_slot_count() {

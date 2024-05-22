@@ -870,10 +870,8 @@ impl FosterBtreePage for Page {
                     .copy_from_slice(value);
 
                 // Shift the slots to the right by 1
-                let data = self[start..end].to_vec();
-                let new_start = start + SLOT_SIZE;
-                let new_end = end + SLOT_SIZE;
-                self[new_start..new_end].copy_from_slice(&data);
+                // Use copy within to avoid heap allocation
+                self.copy_within(start..end, start + SLOT_SIZE);
 
                 // Update the slot
                 let slot = Slot::new(offset, key.len() as u16, value.len() as u16);
@@ -994,10 +992,8 @@ impl FosterBtreePage for Page {
             );
 
             // Shift the slots to the left by 1
-            let data = self[start..end].to_vec();
-            let new_start = start - SLOT_SIZE;
-            let new_end = end - SLOT_SIZE;
-            self[new_start..new_end].copy_from_slice(&data);
+            // Use copy_within to avoid heap allocation
+            self.copy_within(start..end, start - SLOT_SIZE);
 
             // Update the slot_count of the page
             self.decrement_slot_count();
@@ -1097,8 +1093,10 @@ impl FosterBtreePage for Page {
         }
 
         // Place the key-value pairs in the record space and create the slots.
-        let mut slots = Vec::with_capacity(recs.len() + 1);
         let mut offset = self.rec_start_offset();
+        let high_fence_slot = self.slot(self.high_fence_slot_id()).unwrap();
+        self.decrement_slot_count(); // Remove the high fence slot temporarily
+
         for (key, value) in recs.iter().map(|(k, v)| (k.as_ref(), v.as_ref())) {
             let rec_size = key.len() + value.len();
             offset -= rec_size as u16;
@@ -1106,17 +1104,10 @@ impl FosterBtreePage for Page {
             // Copy the key-value pair to the record space
             self[offset as usize..offset as usize + key.len()].copy_from_slice(key);
             self[offset as usize + key.len()..offset as usize + rec_size].copy_from_slice(value);
-            slots.push(slot);
-        }
-        let high_fence_slot = self.slot(self.high_fence_slot_id()).unwrap();
-        slots.push(high_fence_slot);
-
-        self.decrement_slot_count(); // Remove the high fence slot temporarily
-
-        // slots contains the key-value pairs, and the high fence.
-        for slot in slots {
             self.append_slot(&slot);
         }
+
+        self.append_slot(&high_fence_slot); // Restore the high fence slot
 
         // Update the header
         self.set_rec_start_offset(offset);
