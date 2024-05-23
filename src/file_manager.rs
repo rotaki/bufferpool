@@ -781,7 +781,7 @@ mod tests {
 
         let temp_path = tempfile::tempdir().unwrap();
         let path = temp_path.path().join("test_file_flush.db");
-        let file_manager1 = FileManager::new(path.clone()).unwrap();
+        let mut file_manager1 = FileManager::new(path.clone()).unwrap();
         let file_manager2 = FileManager::new(path).unwrap();
 
         let num_pages = 2;
