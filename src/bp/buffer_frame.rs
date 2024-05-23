@@ -1,7 +1,8 @@
 use super::mem_pool_trait::PageFrameKey;
 use super::{eviction_policy::EvictionPolicy, mem_pool_trait::PageKey};
 use crate::page::Page;
-use crate::rwlatch::RwLatch;
+// use crate::rwlatch::RwLatch;
+use crate::hybrid_latch::HybridLatch;
 use std::{
     cell::UnsafeCell,
     fmt::Debug,
@@ -14,7 +15,7 @@ use std::{
 
 pub struct BufferFrame<T: EvictionPolicy> {
     frame_id: u32, // An index of the frame in the buffer pool. This is a constant value.
-    latch: RwLatch,
+    latch: HybridLatch,
     is_dirty: AtomicBool, // Can be updated even when ReadGuard is held (see flush_all() in buffer_pool.rs)
     evict_info: RwLock<T>, // Can be updated even when ReadGuard is held (see get_page_for_read() in buffer_pool.rs)
     key: UnsafeCell<PageKey>, // Can only be updated when WriteGuard is held. Default is invalid. See PageKey::default().
@@ -27,7 +28,7 @@ impl<T: EvictionPolicy> BufferFrame<T> {
     pub fn new(frame_id: u32) -> Self {
         BufferFrame {
             frame_id,
-            latch: RwLatch::default(),
+            latch: HybridLatch::default(),
             is_dirty: AtomicBool::new(false),
             key: UnsafeCell::new(PageKey::default()),
             evict_info: RwLock::new(T::new()),

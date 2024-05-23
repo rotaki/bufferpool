@@ -9,5 +9,6 @@ mod logger;
 mod page;
 pub mod random;
 mod rwlatch;
+mod hybrid_latch;
 
 pub use logger::log;
