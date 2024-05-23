@@ -90,7 +90,7 @@ impl<T: EvictionPolicy> MemPool<T> for InMemPool<T> {
         self.release_exclusive();
 
         guard.copy(&page);
-        *guard.page_key_mut() = Some(page_key);
+        *guard.page_key_mut() = page_key;
         Ok(guard)
     }
 
@@ -165,7 +165,7 @@ impl<T: EvictionPolicy> InMemPool<T> {
         for (key, index) in id_to_index.iter() {
             let frame = &frames[*index];
             let frame = frame.read();
-            assert_eq!(*frame.page_key(), Some(*key));
+            assert_eq!(frame.page_key(), Some(*key));
         }
     }
 

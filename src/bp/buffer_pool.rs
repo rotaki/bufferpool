@@ -414,7 +414,7 @@ where
                     #[cfg(feature = "stat")]
                     inc_local_bp_clean_victim();
                 }
-                id_to_index.remove(old_key);
+                id_to_index.remove(&old_key);
                 log_debug!("Page evicted: {}", old_key);
             } else {
                 #[cfg(feature = "stat")]
@@ -432,7 +432,7 @@ where
             };
 
             id_to_index.insert(key, index as usize);
-            *guard.page_key_mut() = Some(key);
+            *guard.page_key_mut() = key;
             {
                 let mut evict_info = guard.evict_info().write().unwrap();
                 evict_info.reset();
@@ -504,7 +504,7 @@ where
                 if let Some(g) = &guard {
                     // Check if the page key matches
                     if let Some(page_key) = g.page_key() {
-                        if page_key == &key.p_key() {
+                        if page_key == key.p_key() {
                             // Update the eviction info
                             g.evict_info().write().unwrap().update();
                             // Mark the page as dirty
@@ -615,7 +615,7 @@ where
                 if let Some(g) = &guard {
                     // Check if the page key matches
                     if let Some(page_key) = g.page_key() {
-                        if page_key == &key.p_key() {
+                        if page_key == key.p_key() {
                             // Update the eviction info
                             g.evict_info().write().unwrap().update();
                             log_debug!("Page fast path read: {}", key);
@@ -824,7 +824,7 @@ impl<T: EvictionPolicy> BufferPool<T> {
             if index_to_id.contains_key(&i) {
                 assert_eq!(frame.page_key().unwrap(), *index_to_id[&i]);
             } else {
-                assert_eq!(frame.page_key(), &None);
+                assert_eq!(frame.page_key(), None);
             }
         }
         // println!("id_to_index: {:?}", id_to_index);

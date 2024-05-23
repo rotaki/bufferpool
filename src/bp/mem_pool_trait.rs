@@ -31,9 +31,24 @@ pub struct PageKey {
     pub page_id: PageId,
 }
 
+impl Default for PageKey {
+    fn default() -> Self {
+        PageKey {
+            c_key: ContainerKey::new(DatabaseId::MAX, ContainerId::MAX),
+            page_id: PageId::MAX,
+        }
+    }
+}
+
 impl PageKey {
     pub fn new(c_key: ContainerKey, page_id: PageId) -> Self {
         PageKey { c_key, page_id }
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.c_key.db_id != DatabaseId::MAX
+            && self.c_key.c_id != ContainerId::MAX
+            && self.page_id != PageId::MAX
     }
 }
 
