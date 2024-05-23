@@ -17,7 +17,7 @@ pub struct BufferFrame<T: EvictionPolicy> {
     latch: RwLatch,
     is_dirty: AtomicBool, // Can be updated even when ReadGuard is held (see flush_all() in buffer_pool.rs)
     evict_info: RwLock<T>, // Can be updated even when ReadGuard is held (see get_page_for_read() in buffer_pool.rs)
-    key: UnsafeCell<PageKey>, // Can only be updated when WriteGuard is held
+    key: UnsafeCell<PageKey>, // Can only be updated when WriteGuard is held. Default is invalid. See PageKey::default().
     page: UnsafeCell<Page>, // Can only be updated when WriteGuard is held
 }
 
