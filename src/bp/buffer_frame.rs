@@ -17,7 +17,7 @@ pub struct BufferFrame<T: EvictionPolicy> {
     frame_id: u32, // An index of the frame in the buffer pool. This is a constant value.
     latch: HybridLatch,
     is_dirty: AtomicBool, // Can be updated even when ReadGuard is held (see flush_all() in buffer_pool.rs)
-    evict_info: RwLock<T>, // Can be updated even when ReadGuard is held (see get_page_for_read() in buffer_pool.rs)
+    evict_info: T, // Can be updated even when ReadGuard is held (see get_page_for_read() in buffer_pool.rs)
     key: UnsafeCell<PageKey>, // Can only be updated when WriteGuard is held. Default is invalid. See PageKey::default().
     page: UnsafeCell<Page>, // Can only be updated when WriteGuard is held
 }
@@ -31,13 +31,34 @@ impl<T: EvictionPolicy> BufferFrame<T> {
             latch: HybridLatch::default(),
             is_dirty: AtomicBool::new(false),
             key: UnsafeCell::new(PageKey::default()),
-            evict_info: RwLock::new(T::new()),
+            evict_info: T::new(),
             page: UnsafeCell::new(Page::new_empty()),
         }
     }
 
     pub fn frame_id(&self) -> u32 {
         self.frame_id
+    }
+
+    pub fn optimistic(&self) -> FrameOptimisticReadGuard<T> {
+        self.latch.optimistic();
+        let version = self.latch.version();
+        FrameOptimisticReadGuard {
+            version,
+            buffer_frame: self,
+        }
+    }
+
+    pub fn try_optimistic(&self) -> Option<FrameOptimisticReadGuard<T>> {
+        if self.latch.try_optimistic() {
+            let version = self.latch.version();
+            Some(FrameOptimisticReadGuard {
+                version,
+                buffer_frame: self,
+            })
+        } else {
+            None
+        }
     }
 
     pub fn read(&self) -> FrameReadGuard<T> {
@@ -85,6 +106,91 @@ impl<T: EvictionPolicy> BufferFrame<T> {
     }
 }
 
+pub struct FrameOptimisticReadGuard<'a, T: EvictionPolicy> {
+    version: u64,
+    buffer_frame: &'a BufferFrame<T>,
+}
+
+impl<'a, T: EvictionPolicy> FrameOptimisticReadGuard<'a, T> {
+    pub fn frame_id(&self) -> u32 {
+        self.buffer_frame.frame_id
+    }
+
+    pub fn page_key(&self) -> Option<PageKey> {
+        // SAFETY: This is safe because the latch is held optimistically.
+        unsafe {
+            let p_key = &*self.buffer_frame.key.get();
+            if p_key.is_valid() {
+                Some(*p_key)
+            } else {
+                None
+            }
+        }
+    }
+
+    pub fn page_frame_key(&self) -> Option<PageFrameKey> {
+        let p_key = unsafe {*self.buffer_frame.key.get()};
+        let is_valid = p_key.is_valid();
+        let p_key = if is_valid {
+            Some(PageFrameKey::new_with_frame_id(p_key.c_key, p_key.page_id, self.frame_id()))
+        } else {
+            None
+        };
+        p_key
+    }
+
+    pub fn read_page(&self, page: &mut Page) {
+        // Read the buffer frame page into the given page.
+        page.copy(unsafe { &*self.buffer_frame.page.get() });
+    }
+
+    pub fn check_version(&self) -> bool {
+        if self.buffer_frame.latch.is_exclusive() {
+            // The latch is exclusive, so there is a concurrent writer.
+            return false;
+        }
+        self.buffer_frame.latch.check_version(self.version)
+    }
+
+    pub fn shared(self) -> FrameReadGuard<'a, T> {
+        self.buffer_frame.latch.shared();
+        FrameReadGuard {
+            upgraded: AtomicBool::new(false),
+            buffer_frame: self.buffer_frame,
+        }
+    }
+
+    pub fn try_shared(self) -> Result<FrameReadGuard<'a, T>, Self> {
+        if self.buffer_frame.latch.try_shared() {
+            Ok(FrameReadGuard {
+                upgraded: AtomicBool::new(false),
+                buffer_frame: self.buffer_frame,
+            })
+        } else {
+            Err(self)
+        }
+    }
+
+    pub fn exclusive(self) -> FrameWriteGuard<'a, T> {
+        self.buffer_frame.latch.exclusive();
+        FrameWriteGuard {
+            downgraded: AtomicBool::new(false),
+            buffer_frame: self.buffer_frame,
+        }
+    }
+
+    pub fn try_exclusive(self) -> Result<FrameWriteGuard<'a, T>, Self> {
+        if self.buffer_frame.latch.try_exclusive() {
+            Ok(FrameWriteGuard {
+                downgraded: AtomicBool::new(false),
+                buffer_frame: self.buffer_frame,
+            })
+        } else {
+            Err(self)
+        }
+    }
+}
+
 pub struct FrameReadGuard<'a, T: EvictionPolicy> {
     upgraded: AtomicBool,
     buffer_frame: &'a BufferFrame<T>,
@@ -120,7 +226,7 @@ impl<'a, T: EvictionPolicy> FrameReadGuard<'a, T> {
         &self.buffer_frame.is_dirty
     }
 
-    pub fn evict_info(&self) -> &RwLock<T> {
+    pub fn evict_info(&self) -> &T {
         &self.buffer_frame.evict_info
     }
 
@@ -206,15 +312,13 @@ impl<'a, T: EvictionPolicy> FrameWriteGuard<'a, T> {
         &self.buffer_frame.is_dirty
     }
 
-    pub fn evict_info(&self) -> &RwLock<T> {
+    pub fn evict_info(&self) -> &T {
         &self.buffer_frame.evict_info
     }
 
     pub fn eviction_score(&self) -> u64 {
         self.buffer_frame
             .evict_info
-            .read()
-            .unwrap()
             .score(self.buffer_frame)
     }
 
@@ -229,7 +333,7 @@ impl<'a, T: EvictionPolicy> FrameWriteGuard<'a, T> {
 
     pub fn clear(&mut self) {
         self.buffer_frame.is_dirty.store(false, Ordering::Release);
-        self.buffer_frame.evict_info.write().unwrap().reset();
+        self.buffer_frame.evict_info.reset();
         *self.page_key_mut() = PageKey::default();
     }
 }

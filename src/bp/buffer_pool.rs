@@ -4,7 +4,7 @@ use crate::log;
 use crate::{log_debug, random::gen_random_int, rwlatch::RwLatch};
 
 use super::{
-    buffer_frame::{BufferFrame, FrameReadGuard, FrameWriteGuard},
+    buffer_frame::{BufferFrame, FrameOptimisticReadGuard, FrameReadGuard, FrameWriteGuard},
     eviction_policy::EvictionPolicy,
     mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, PageFrameKey, PageKey},
 };
@@ -433,11 +433,9 @@ where
 
             id_to_index.insert(key, index as usize);
             *guard.page_key_mut() = key;
-            {
-                let mut evict_info = guard.evict_info().write().unwrap();
-                evict_info.reset();
-                evict_info.update();
-            }
+            let evict_info = guard.evict_info();
+            evict_info.reset();
+            evict_info.update();
 
             log_debug!("Page loaded: key: {}", key);
             Ok(guard)
@@ -506,7 +504,7 @@ where
                     if let Some(page_key) = g.page_key() {
                         if page_key == key.p_key() {
                             // Update the eviction info
-                            g.evict_info().write().unwrap().update();
+                            g.evict_info().update();
                             // Mark the page as dirty
                             g.dirty().store(true, Ordering::Release);
                             log_debug!("Page fast path write: {}", key);
@@ -546,7 +544,7 @@ where
             if let Some(&index) = id_to_index.get(&key.p_key()) {
                 let guard = frames[index].try_write(true);
                 if let Some(g) = &guard {
-                    g.evict_info().write().unwrap().update();
+                    g.evict_info().update();
                 }
                 self.release_shared();
                 match guard {
@@ -578,7 +576,7 @@ where
                 if let Some(g) = &guard {
                     #[cfg(feature = "stat")]
                     inc_local_bp_slow_path_hit();
-                    g.evict_info().write().unwrap().update();
+                    g.evict_info().update();
                 } else {
                     #[cfg(feature = "stat")]
                     inc_local_bp_latch_failures();
@@ -617,7 +615,7 @@ where
                     if let Some(page_key) = g.page_key() {
                         if page_key == key.p_key() {
                             // Update the eviction info
-                            g.evict_info().write().unwrap().update();
+                            g.evict_info().update();
                             log_debug!("Page fast path read: {}", key);
                             #[cfg(feature = "stat")]
                             inc_local_bp_fast_path_hit();
@@ -655,7 +653,7 @@ where
             if let Some(&index) = id_to_index.get(&key.p_key()) {
                 let guard = frames[index].try_read();
                 if let Some(g) = &guard {
-                    g.evict_info().write().unwrap().update();
+                    g.evict_info().update();
                 }
                 self.release_shared();
                 match guard {
@@ -686,12 +684,82 @@ where
                 if let Some(g) = &guard {
                     #[cfg(feature = "stat")]
                     inc_local_bp_slow_path_hit();
-                    g.evict_info().write().unwrap().update();
+                    g.evict_info().update();
                 } else {
                     #[cfg(feature = "stat")]
                     inc_local_bp_latch_failures();
                 }
                 guard.ok_or(MemPoolStatus::FrameReadLatchGrantFailed)
+            }
+            None => {
+                let res = self
+                    .handle_page_fault(key.p_key(), false)
+                    .map(|guard| guard.downgrade());
+                #[cfg(feature = "stat")]
+                if res.is_ok() {
+                    inc_local_bp_slow_path_miss();
+                } else {
+                    inc_local_bp_latch_failures();
+                }
+                res
+            }
+        };
+        self.release_exclusive();
+        result
+    }
+
+    pub fn get_page_for_optimistic_read(&self, key: PageFrameKey) -> Result<FrameOptimisticReadGuard<T>, MemPoolStatus> {
+        log_debug!("Page optimistic read: {}", key);
+
+        {
+            // Fast path access to the frame using frame_id
+            let frame_id = key.frame_id();
+            let frames = unsafe { &*self.frames.get() };
+            if (frame_id as usize) < frames.len() {
+                loop {
+                    let guard = frames[frame_id as usize].optimistic(); // wait for the concurrent writer to finish
+                    let page_key = guard.page_key();
+                    if guard.check_version() {
+                        continue; // If the page is being written, retry.
+                    }
+                    if page_key == Some(key.p_key()) {
+                        log_debug!("Page fast path optimistic read: {}", key);
+                        #[cfg(feature = "stat")]
+                        inc_local_bp_fast_path_hit();
+                        return Ok(guard);
+                    } else {
+                        // The frame is empty or the page key does not match.
+                        log_debug!("Page fast path optimistic read key mismatch: {}", key);
+                        break; // break out of the loop and go to the slow path
+                    }
+                }
+            } else {
+                // The frame id is out of bounds.
+                // Go to the slow path.
+                log_debug!("Page fast path optimistic read frame id out of bounds: {}", key);
+            }
+        }
+
+        {
+            self.shared();
+            let id_to_index = unsafe { &mut *self.id_to_index.get() };
+            let frames = unsafe { &mut *self.frames.get() };
+
+            if let Some(&index) = id_to_index.get(&key.p_key()) {
+                let guard = frames[index].optimistic(); // wait for the concurrent writer to finish
+                return Ok(guard);
+            }
+            self.release_shared();
+        }
+
+        self.exclusive();
+        let id_to_index = unsafe { &mut *self.id_to_index.get() };
+        let frames = unsafe { &mut *self.frames.get() };
+
+        let result = match id_to_index.get(&key.p_key()) {
+            Some(&index) => {
+                let guard = frames[index].optimistic(); // wait for the concurrent writer to finish
+                return Ok(guard);
             }
             None => {
                 let res = self
@@ -789,6 +857,10 @@ where
 
     fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard<T>, MemPoolStatus> {
         BufferPool::get_page_for_read(self, key)
+    }
+
+    fn get_page_for_optimistic_read(&self, key: PageFrameKey) -> Result<FrameOptimisticReadGuard<T>, MemPoolStatus> {
+        BufferPool::get_page_for_optimistic_read(self, key)
     }
 
     fn reset(&self) {

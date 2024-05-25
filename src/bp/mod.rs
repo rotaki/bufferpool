@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use eviction_policy::{DummyEvictionPolicy, EvictionPolicy};
 
-pub use buffer_frame::{FrameReadGuard, FrameWriteGuard};
+pub use buffer_frame::{FrameReadGuard, FrameWriteGuard, FrameOptimisticReadGuard};
 pub use buffer_pool::BufferPool;
 pub use in_mem_pool::InMemPool;
 pub use mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, PageFrameKey};
@@ -60,6 +60,11 @@ impl<E: EvictionPolicy> MemPool<E> for BufferPoolForTest<E> {
     }
 
     #[inline]
+    fn get_page_for_optimistic_read(&self, key: PageFrameKey) -> Result<FrameOptimisticReadGuard<E>, MemPoolStatus> {
+        self.bp.get_page_for_optimistic_read(key)
+    }
+
+    #[inline]
     fn reset(&self) {
         self.bp.reset();
     }
@@ -73,7 +78,7 @@ pub fn get_in_mem_pool() -> Arc<InMemPool<DummyEvictionPolicy>> {
     Arc::new(InMemPool::new())
 }
 pub mod prelude {
-    pub use super::buffer_frame::{BufferFrame, FrameReadGuard, FrameWriteGuard};
+    pub use super::buffer_frame::{BufferFrame, FrameReadGuard, FrameWriteGuard, FrameOptimisticReadGuard};
     pub use super::eviction_policy::{DummyEvictionPolicy, EvictionPolicy, LRUEvictionPolicy};
     pub use super::mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, PageFrameKey};
     pub use super::{get_in_mem_pool, get_test_bp, BufferPoolForTest};

@@ -1441,6 +1441,10 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
         }
     }
 
+    fn traverse_to_leaf_for_read_optimistic(&self, key: &[u8]) -> FrameOptimisticReadGuard<E> {
+        let mut current_page = 
+    }
+
     fn traverse_to_leaf_for_read(&self, key: &[u8]) -> FrameReadGuard<E> {
         let mut current_page = self.read_page(self.root_key);
         let mut op_byte = OpByte::new();

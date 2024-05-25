@@ -43,6 +43,13 @@ impl HybridLatch {
         }
     }
 
+    pub fn try_optimistic(&self) -> bool {
+        if self.is_exclusive() {
+            return false;
+        }
+        true
+    }
+
     pub fn shared(&self) {
         self.rwlatch.shared()
     }

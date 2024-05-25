@@ -136,6 +136,10 @@ impl<T: EvictionPolicy> MemPool<T> for InMemPool<T> {
         }
     }
 
+    fn get_page_for_optimistic_read(&self, key: PageFrameKey) -> Result<super::FrameOptimisticReadGuard<T>, MemPoolStatus> {
+        unimplemented!("Optimistic read is not supported in InMemPool")
+    }
+
     fn reset(&self) {
         self.exclusive();
         let frames = unsafe { &mut *self.frames.get() };

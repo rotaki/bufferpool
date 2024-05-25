@@ -1,5 +1,6 @@
 use super::buffer_frame::{FrameReadGuard, FrameWriteGuard};
 use super::eviction_policy::EvictionPolicy;
+use super::FrameOptimisticReadGuard;
 
 use crate::{file_manager::FMError, page::PageId};
 
@@ -63,8 +64,8 @@ impl std::fmt::Display for PageKey {
 /// The frame id is used as a hint to access the page in O(1) time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PageFrameKey {
-    p_key: PageKey,
-    frame_id: u32, // Frame id in the buffer pool
+    pub p_key: PageKey,
+    pub frame_id: u32, // Frame id in the buffer pool
 }
 
 impl PageFrameKey {
@@ -80,6 +81,10 @@ impl PageFrameKey {
             p_key: PageKey::new(c_key, page_id),
             frame_id,
         }
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.p_key.is_valid()
     }
 
     pub fn p_key(&self) -> PageKey {
@@ -145,12 +150,17 @@ pub trait MemPool<T: EvictionPolicy>: Sync + Send {
     /// Get a page for read.
     /// This function will return a FrameReadGuard.
     /// This function assumes that a page is already created and either in memory or on disk.
-    fn get_page_for_write(&self, key: PageFrameKey) -> Result<FrameWriteGuard<T>, MemPoolStatus>;
+    fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard<T>, MemPoolStatus>;
 
     /// Get a page for write.
     /// This function will return a FrameWriteGuard.
     /// This function assumes that a page is already created and either in memory or on disk.
-    fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard<T>, MemPoolStatus>;
+    fn get_page_for_write(&self, key: PageFrameKey) -> Result<FrameWriteGuard<T>, MemPoolStatus>;
+
+    /// Get a page for optimistic read.
+    /// This function will return a FrameOptimisticReadGuard.
+    /// This function assumes that a page is already created and either in memory or on disk.
+    fn get_page_for_optimistic_read(&self, key: PageFrameKey) -> Result<FrameOptimisticReadGuard<T>, MemPoolStatus>;
 
     /// Reset the memory pool.
     /// This function will reset the memory pool to its initial state.

@@ -12,8 +12,8 @@ pub trait EvictionPolicy: Send + Sync {
     fn score(&self, frame: &BufferFrame<Self>) -> u64
     where
         Self: Sized;
-    fn update(&mut self);
-    fn reset(&mut self);
+    fn update(&self);
+    fn reset(&self);
 }
 
 pub struct DummyEvictionPolicy; // Used for in-memory pool
@@ -29,20 +29,20 @@ impl EvictionPolicy for DummyEvictionPolicy {
     }
 
     #[inline]
-    fn update(&mut self) {}
+    fn update(&self) {}
 
     #[inline]
-    fn reset(&mut self) {}
+    fn reset(&self) {}
 }
 
 pub struct LRUEvictionPolicy {
-    pub score: u64,
+    pub score: AtomicU64,
 }
 
 impl EvictionPolicy for LRUEvictionPolicy {
     fn new() -> Self {
         LRUEvictionPolicy {
-            score: INITIAL_COUNTER,
+            score: AtomicU64::new(INITIAL_COUNTER),
         }
     }
 
@@ -50,15 +50,15 @@ impl EvictionPolicy for LRUEvictionPolicy {
     where
         Self: Sized,
     {
-        self.score
+        self.score.load(Ordering::Acquire)
     }
 
-    fn update(&mut self) {
-        self.score = LRU_COUNTER.fetch_add(1, Ordering::AcqRel);
+    fn update(&self) {
+        self.score.store(LRU_COUNTER.fetch_add(1, Ordering::Relaxed), Ordering::Release);
     }
 
-    fn reset(&mut self) {
-        self.score = INITIAL_COUNTER;
+    fn reset(&self) {
+        self.score.store(INITIAL_COUNTER, Ordering::Release);
     }
 }
 
