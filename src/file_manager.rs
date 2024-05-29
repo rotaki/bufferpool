@@ -29,14 +29,26 @@ impl From<io::Error> for FMError {
     }
 }
 
-#[cfg(any(not(target_os = "linux"), target_arch = "wasm32"))]
+#[cfg(any(
+    not(target_os = "linux"),
+    not(feature = "async_write"),
+    target_arch = "wasm32"
+))]
 pub type FileManager = not_linux::FileManager;
-#[cfg(all(target_os = "linux", not(target_arch = "wasm32")))]
+#[cfg(all(
+    target_os = "linux",
+    feature = "async_write",
+    not(target_arch = "wasm32")
+))]
 pub type FileManager = linux::FileManager;
 
-#[cfg(any(not(target_os = "linux"), target_arch = "wasm32"))]
+#[cfg(any(
+    not(target_os = "linux"),
+    not(feature = "async_write"),
+    target_arch = "wasm32"
+))]
 pub mod not_linux {
-    use super::FMStatus;
+    use super::FMError;
     use crate::page::{Page, PageId, PAGE_SIZE};
     use crate::{log, log_debug, log_trace};
     use std::cell::UnsafeCell;
@@ -105,7 +117,7 @@ pub mod not_linux {
             Ok(())
         }
 
-        pub fn flush(&mut self) -> Result<(), FMError> {
+        pub fn flush(&self) -> Result<(), FMError> {
             let mut file = self.file.lock().unwrap();
             log_trace!("Flushing file: {:?}", self.path);
             file.flush().map_err(|_| FMError::Flush)
@@ -113,7 +125,11 @@ pub mod not_linux {
     }
 }
 
-#[cfg(all(target_os = "linux", not(target_arch = "wasm32")))]
+#[cfg(all(
+    target_os = "linux",
+    feature = "async_write",
+    not(target_arch = "wasm32")
+))]
 pub mod linux {
     use super::FMError;
     #[allow(unused_imports)]
