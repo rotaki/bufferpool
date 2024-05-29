@@ -29,12 +29,24 @@ impl From<io::Error> for FMError {
     }
 }
 
-#[cfg(any(not(target_os = "linux"), target_arch = "wasm32"))]
+#[cfg(any(
+    not(target_os = "linux"),
+    not(feature = "async_write"),
+    target_arch = "wasm32"
+))]
 pub type FileManager = not_linux::FileManager;
-#[cfg(all(target_os = "linux", not(target_arch = "wasm32")))]
+#[cfg(all(
+    target_os = "linux",
+    feature = "async_write",
+    not(target_arch = "wasm32")
+))]
 pub type FileManager = linux::FileManager;
 
-#[cfg(any(not(target_os = "linux"), target_arch = "wasm32"))]
+#[cfg(any(
+    not(target_os = "linux"),
+    not(feature = "async_write"),
+    target_arch = "wasm32"
+))]
 pub mod not_linux {
     use super::FMError;
     #[allow(unused_imports)]
@@ -111,7 +123,11 @@ pub mod not_linux {
     }
 }
 
-#[cfg(all(target_os = "linux", not(target_arch = "wasm32")))]
+#[cfg(all(
+    target_os = "linux",
+    feature = "async_write",
+    not(target_arch = "wasm32")
+))]
 pub mod linux {
     use super::FMError;
     #[allow(unused_imports)]
