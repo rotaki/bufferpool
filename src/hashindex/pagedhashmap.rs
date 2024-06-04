@@ -5,18 +5,21 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(feature = "stat")]
+use stat::*;
+
 use crate::bp::prelude::*;
 use crate::{log_info, page::PageId};
 
 use super::shortkeypage::{ShortKeyPage, SHORT_KEY_PAGE_HEADER_SIZE};
 use crate::page::AVAILABLE_PAGE_SIZE;
 
-const DEFAULT_BUCKET_NUM: usize = 512;
+const DEFAULT_BUCKET_NUM: usize = 4096;
 const PAGE_HEADER_SIZE: usize = 0;
 
 pub struct PagedHashMap<E: EvictionPolicy, T: MemPool<E>> {
     func: Box<dyn Fn(&[u8], &[u8]) -> Vec<u8>>, // func(old_value, new_value) -> new_value
-    bp: Arc<T>,
+    pub bp: Arc<T>,
     c_key: ContainerKey,
     pub bucket_num: usize, // number of hash header pages
     phantom: PhantomData<E>,
@@ -42,6 +45,8 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
             // }
         } else {
             let root_page = bp.create_new_page_for_write(c_key).unwrap();
+            #[cfg(feature = "stat")]
+            inc_local_stat_total_page_count();
             // Need to do something for the root page e.g. set n
             log_info!(
                 "Root page id: {}, Need to set root page",
@@ -51,6 +56,8 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
 
             for i in 1..DEFAULT_BUCKET_NUM + 1 {
                 let mut new_page = bp.create_new_page_for_write(c_key).unwrap();
+                #[cfg(feature = "stat")]
+                inc_local_stat_total_page_count();
                 new_page.init();
                 assert_eq!(
                     new_page.get_id() as usize,
@@ -77,6 +84,10 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
     }
 
     pub fn insert<K: AsRef<[u8]> + Hash>(&self, key: K, value: K) -> Option<Vec<u8>> {
+        let mut chain_len = 0;
+        #[cfg(feature = "stat")]
+        inc_local_stat_insert_count();
+
         let required_space = key.as_ref().len() + value.as_ref().len() + 6; // 6 is for key_len, val_offset, val_len
         if required_space > AVAILABLE_PAGE_SIZE - SHORT_KEY_PAGE_HEADER_SIZE {
             panic!("key and value should be less than a (page size - meta data size)");
@@ -84,6 +95,10 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
 
         let mut page_key = PageFrameKey::new(self.c_key, self.hash(&key));
         let mut current_page = self.bp.get_page_for_write(page_key).unwrap();
+        #[cfg(feature = "stat")]
+        {
+            chain_len += 1;
+        }
 
         let mut current_value: Option<Vec<u8>> = None;
 
@@ -92,6 +107,12 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
             (inserted, current_value) =
                 current_page.insert_with_function(key.as_ref(), value.as_ref(), &self.func);
             if inserted {
+                #[cfg(feature = "stat")]
+                {
+                    update_local_stat_max_chain_len(chain_len);
+                    update_local_stat_min_chain_len(chain_len);
+                    update_to_global_stat();
+                }
                 return current_value;
             }
             if current_page.get_next_page_id() == 0 {
@@ -102,6 +123,10 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
             }
             page_key = PageFrameKey::new(self.c_key, current_page.get_next_page_id());
             current_page = self.bp.get_page_for_write(page_key).unwrap();
+            #[cfg(feature = "stat")]
+            {
+                chain_len += 1;
+            }
         }
 
         // 2 cases:
@@ -118,14 +143,36 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         while current_page.get_next_page_id() != 0 {
             page_key = PageFrameKey::new(self.c_key, current_page.get_next_page_id());
             current_page = self.bp.get_page_for_write(page_key).unwrap();
+            #[cfg(feature = "stat")]
+            {
+                chain_len += 1;
+            }
             let (inserted, _) = current_page.insert(key.as_ref(), &new_value);
             if inserted {
+                #[cfg(feature = "stat")]
+                {
+                    update_local_stat_max_chain_len(chain_len);
+                    update_local_stat_min_chain_len(chain_len);
+                    update_to_global_stat();
+                }
                 return current_value;
+            }
+            #[cfg(feature = "stat")]
+            {
+                chain_len += 1;
             }
         }
 
         // If we reach here, we need to create a new page
         let mut new_page = self.bp.create_new_page_for_write(self.c_key).unwrap();
+        #[cfg(feature = "stat")]
+        {
+            update_local_stat_max_chain_len(chain_len);
+            update_local_stat_min_chain_len(chain_len);
+            inc_local_stat_total_page_count();
+            update_to_global_stat();
+        }
+
         new_page.init();
         current_page.set_next_page_id(new_page.get_id());
 
@@ -134,6 +181,12 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
     }
 
     pub fn get<K: AsRef<[u8]> + Hash>(&self, key: K) -> Option<Vec<u8>> {
+        #[cfg(feature = "stat")]
+        {
+            inc_local_stat_get_count();
+            update_to_global_stat();
+        }
+
         let mut page_key = PageFrameKey::new(self.c_key, self.hash(&key));
         let mut result: Option<Vec<u8>> = None;
 
@@ -149,6 +202,12 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
     }
 
     pub fn remove<K: AsRef<[u8]> + Hash>(&self, key: K) -> Option<Vec<u8>> {
+        #[cfg(feature = "stat")]
+        {
+            inc_local_stat_remove_count();
+            update_to_global_stat();
+        }
+
         let mut page_key = PageFrameKey::new(self.c_key, self.hash(&key));
         let mut result: Option<Vec<u8>> = None;
 
@@ -162,16 +221,186 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         }
         result
     }
+
+    #[cfg(feature = "stat")]
+    pub fn stats(&self) -> String {
+        LOCAL_STAT.with(|s| s.stat.to_string())
+        // GLOBAL_STAT.lock().unwrap().to_string()
+    }
+}
+
+unsafe impl<E: EvictionPolicy, T: MemPool<E>> Sync for PagedHashMap<E, T> {}
+unsafe impl<E: EvictionPolicy, T: MemPool<E>> Send for PagedHashMap<E, T> {}
+
+#[cfg(feature = "stat")]
+mod stat {
+    use super::*;
+    use lazy_static::lazy_static;
+    use std::{cell::UnsafeCell, os::unix::thread, sync::Mutex};
+
+    pub struct PagedHashMapStat {
+        pub insert_count: UnsafeCell<usize>,
+        pub get_count: UnsafeCell<usize>,
+        pub remove_count: UnsafeCell<usize>,
+
+        pub total_page_count: UnsafeCell<usize>,
+        pub max_chain_len: UnsafeCell<usize>,
+        pub min_chain_len: UnsafeCell<usize>,
+    }
+
+    impl PagedHashMapStat {
+        pub fn new() -> Self {
+            PagedHashMapStat {
+                insert_count: UnsafeCell::new(0),
+                get_count: UnsafeCell::new(0),
+                remove_count: UnsafeCell::new(0),
+                total_page_count: UnsafeCell::new(0),
+                max_chain_len: UnsafeCell::new(0),
+                min_chain_len: UnsafeCell::new(999),
+            }
+        }
+
+        pub fn inc_insert_count(&self) {
+            unsafe {
+                *self.insert_count.get() += 1;
+            }
+        }
+
+        pub fn inc_get_count(&self) {
+            unsafe {
+                *self.get_count.get() += 1;
+            }
+        }
+
+        pub fn inc_remove_count(&self) {
+            unsafe {
+                *self.remove_count.get() += 1;
+            }
+        }
+
+        pub fn inc_total_page_count(&self) {
+            unsafe {
+                *self.total_page_count.get() += 1;
+            }
+        }
+
+        pub fn update_max_chain_len(&self, chain_len: usize) {
+            unsafe {
+                let max_chain_len = self.max_chain_len.get();
+                if chain_len > *max_chain_len {
+                    *max_chain_len = chain_len;
+                }
+            }
+        }
+
+        pub fn update_min_chain_len(&self, chain_len: usize) {
+            unsafe {
+                let min_chain_len = self.min_chain_len.get();
+                if chain_len < *min_chain_len {
+                    *min_chain_len = chain_len;
+                }
+            }
+        }
+
+        pub fn to_string(&self) -> String {
+            format!(
+                "Paged Hash Map Statistics\ninsert_count: {}\nget_count: {}\nremove_count: {}\ntotal_page_count: {}\nmax_chain_len: {}\nmin_chain_len: {}",
+                unsafe { *self.insert_count.get() },
+                unsafe { *self.get_count.get() },
+                unsafe { *self.remove_count.get() },
+                unsafe { *self.total_page_count.get() },
+                unsafe { *self.max_chain_len.get() },
+                unsafe { *self.min_chain_len.get() }
+            )
+        }
+
+        pub fn merge(&self, other: &PagedHashMapStat) {
+            let insert_count = unsafe { &mut *self.insert_count.get() };
+            let get_count = unsafe { &mut *self.get_count.get() };
+            let remove_count = unsafe { &mut *self.remove_count.get() };
+            let total_page_count = unsafe { &mut *self.total_page_count.get() };
+            let max_chain_len = unsafe { &mut *self.max_chain_len.get() };
+            let min_chain_len = unsafe { &mut *self.min_chain_len.get() };
+
+            *insert_count += unsafe { &*other.insert_count.get() };
+            *get_count += unsafe { &*other.get_count.get() };
+            *remove_count += unsafe { &*other.remove_count.get() };
+            *total_page_count += unsafe { &*other.total_page_count.get() };
+            *max_chain_len = std::cmp::max(*max_chain_len, *unsafe { &*other.max_chain_len.get() });
+            *min_chain_len = std::cmp::min(*min_chain_len, *unsafe { &*other.min_chain_len.get() });
+        }
+    }
+
+    pub struct LocalStat {
+        pub stat: PagedHashMapStat,
+    }
+
+    impl Drop for LocalStat {
+        fn drop(&mut self) {
+            GLOBAL_STAT.lock().unwrap().merge(&self.stat);
+        }
+    }
+
+    lazy_static! {
+        pub static ref GLOBAL_STAT: Mutex<PagedHashMapStat> = Mutex::new(PagedHashMapStat::new());
+    }
+
+    thread_local! {
+        pub static LOCAL_STAT: LocalStat = LocalStat {
+            stat: PagedHashMapStat::new()
+        };
+    }
+
+    pub fn inc_local_stat_insert_count() {
+        LOCAL_STAT.with(|s| {
+            s.stat.inc_insert_count();
+        });
+    }
+
+    pub fn inc_local_stat_get_count() {
+        LOCAL_STAT.with(|s| {
+            s.stat.inc_get_count();
+        });
+    }
+
+    pub fn inc_local_stat_remove_count() {
+        LOCAL_STAT.with(|s| {
+            s.stat.inc_remove_count();
+        });
+    }
+
+    pub fn inc_local_stat_total_page_count() {
+        LOCAL_STAT.with(|s| {
+            s.stat.inc_total_page_count();
+        });
+    }
+
+    pub fn update_local_stat_max_chain_len(chain_len: usize) {
+        LOCAL_STAT.with(|s| {
+            s.stat.update_max_chain_len(chain_len);
+        });
+    }
+
+    pub fn update_local_stat_min_chain_len(chain_len: usize) {
+        LOCAL_STAT.with(|s| {
+            s.stat.update_min_chain_len(chain_len);
+        });
+    }
+
+    pub fn update_to_global_stat() {
+        LOCAL_STAT.with(|s| {
+            GLOBAL_STAT.lock().unwrap().merge(&s.stat);
+        });
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use rand::{distributions::Alphanumeric, Rng};
-    use std::sync::Arc;
     use std::collections::HashMap;
-    
-    
+    use std::sync::Arc;
+
     // A simple hash function mimic for testing
     fn simple_hash_func(old_val: &[u8], new_val: &[u8]) -> Vec<u8> {
         [old_val, new_val].concat()
