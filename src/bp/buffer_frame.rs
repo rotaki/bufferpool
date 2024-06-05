@@ -84,6 +84,15 @@ impl<T: EvictionPolicy> BufferFrame<T> {
     }
 }
 
+impl<E: EvictionPolicy> Deref for BufferFrame<E> {
+    type Target = Page;
+
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: This is safe because the latch is held shared.
+        unsafe { &*self.page.get() }
+    }
+}
+
 pub struct FrameReadGuard<'a, T: EvictionPolicy> {
     upgraded: AtomicBool,
     buffer_frame: &'a BufferFrame<T>,

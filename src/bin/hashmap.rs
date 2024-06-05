@@ -6,6 +6,7 @@ fn main() {
 
     let bp_size = bench_params.bp_size;
     let phm = gen_paged_hash_map_on_disk(bp_size);
+    // let phm = gen_paged_hash_map_on_disk_with_hash_eviction_policy(bp_size);
 
     let kvs = RandomKVs::new(
         bench_params.unique_keys,

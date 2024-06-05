@@ -1,9 +1,9 @@
-use std::mem::size_of;
+use std::{char::MAX, mem::size_of};
 
 use crate::page::{Page, PageId, AVAILABLE_PAGE_SIZE};
 const PAGE_HEADER_SIZE: usize = 0;
 
-pub const SHORT_KEY_PAGE_HEADER_SIZE: usize = size_of::<ShortKeyHeader>(); // 4 + 2 + 2 = 8
+pub const SHORT_KEY_PAGE_HEADER_SIZE: usize = size_of::<ShortKeyHeader>(); // 4 + 4 + 2 + 2 = 12
 pub const SHORT_KEY_SLOT_SIZE: usize = size_of::<ShortKeySlot>(); // 2 + 8 + 2 = 12
 
 pub trait ShortKeyPage {
@@ -26,6 +26,14 @@ pub trait ShortKeyPage {
     fn decode_shortkey_header(&self) -> ShortKeyHeader;
     fn get_next_page_id(&self) -> PageId;
     fn set_next_page_id(&mut self, next_page_id: PageId);
+    fn get_next_frame_id(&self) -> u32 {
+        self.decode_shortkey_header().next_frame_id
+    }
+    fn set_next_frame_id(&mut self, next_frame_id: u32) {
+        let mut header = self.decode_shortkey_header();
+        header.next_frame_id = next_frame_id;
+        self.encode_shortkey_header(&header);
+    }
 
     fn encode_shortkey_slot(&mut self, index: u16, slot: &ShortKeySlot);
     fn decode_shortkey_slot(&self, index: u16) -> ShortKeySlot;
@@ -51,7 +59,8 @@ pub trait ShortKeyPage {
 
 #[derive(Debug, Clone)]
 pub struct ShortKeyHeader {
-    next_page_id: PageId,  // u16 -> u32
+    next_page_id: PageId,  // u32
+    next_frame_id: u32,     // u32
     slot_num: u16,         // u16
     val_start_offset: u16, // u16
 }
@@ -75,6 +84,7 @@ impl ShortKeyPage for Page {
         let mut page = Page::new_empty();
         let header = ShortKeyHeader {
             next_page_id: 0,
+            next_frame_id: u32::MAX,
             slot_num: 0,
             val_start_offset: AVAILABLE_PAGE_SIZE as u16,
         };
@@ -85,6 +95,7 @@ impl ShortKeyPage for Page {
     fn init(&mut self) {
         let header = ShortKeyHeader {
             next_page_id: 0,
+            next_frame_id: u32::MAX,
             slot_num: 0,
             val_start_offset: AVAILABLE_PAGE_SIZE as u16,
         };
@@ -379,8 +390,9 @@ impl ShortKeyPage for Page {
     fn encode_shortkey_header(&mut self, header: &ShortKeyHeader) {
         let offset = PAGE_HEADER_SIZE;
         self[offset..offset + 4].copy_from_slice(&header.next_page_id.to_le_bytes());
-        self[offset + 4..offset + 6].copy_from_slice(&header.slot_num.to_le_bytes());
-        self[offset + 6..offset + 8].copy_from_slice(&header.val_start_offset.to_le_bytes());
+        self[offset + 4..offset + 8].copy_from_slice(&header.next_frame_id.to_le_bytes());
+        self[offset + 8..offset + 10].copy_from_slice(&header.slot_num.to_le_bytes());
+        self[offset + 10..offset + 12].copy_from_slice(&header.val_start_offset.to_le_bytes());
     }
 
     fn decode_shortkey_header(&self) -> ShortKeyHeader {
@@ -390,19 +402,25 @@ impl ShortKeyPage for Page {
                 .try_into()
                 .expect("Invalid slice length"),
         );
+        let next_frame_id = u32::from_le_bytes(
+            self[offset + 4..offset + 8]
+                .try_into()
+                .expect("Invalid slice length"),
+        );
         let slot_num = u16::from_le_bytes(
-            self[offset + 4..offset + 6]
+            self[offset + 8..offset + 10]
                 .try_into()
                 .expect("Invalid slice length"),
         );
         let val_start_offset = u16::from_le_bytes(
-            self[offset + 6..offset + 8]
+            self[offset + 10..offset + 12]
                 .try_into()
                 .expect("Invalid slice length"),
         );
 
         ShortKeyHeader {
             next_page_id,
+            next_frame_id,
             slot_num,
             val_start_offset,
         }

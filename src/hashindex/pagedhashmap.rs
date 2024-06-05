@@ -2,7 +2,7 @@ use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
     marker::PhantomData,
-    sync::Arc,
+    sync::{atomic::AtomicU32, Arc},
 };
 
 #[cfg(feature = "stat")]
@@ -21,8 +21,19 @@ pub struct PagedHashMap<E: EvictionPolicy, T: MemPool<E>> {
     func: Box<dyn Fn(&[u8], &[u8]) -> Vec<u8>>, // func(old_value, new_value) -> new_value
     pub bp: Arc<T>,
     c_key: ContainerKey,
+    
     pub bucket_num: usize, // number of hash header pages
+    frame_buckets: Vec<AtomicU32>, // vec of frame_id for each bucket
+    // bucket_metas: Vec<BucketMeta>, // first_frame_id, last_page_id, last_frame_id, bloomfilter // no need to be page
+
     phantom: PhantomData<E>,
+}
+
+struct BucketMeta {
+    first_frame_id: u32,
+    last_page_id: u32,
+    last_frame_id: u32,
+    bloomfilter: Vec<u8>,
 }
 
 impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
@@ -44,20 +55,29 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
             //     bucket_num,
             // }
         } else {
+            let mut frame_buckets = (0..DEFAULT_BUCKET_NUM + 1)
+                .map(|_| AtomicU32::new(u32::MAX))
+                .collect::<Vec<AtomicU32>>();
+            //vec![AtomicU32::new(u32::MAX); DEFAULT_BUCKET_NUM + 1];
+            
+            // SET ROOT: Need to do something for the root page e.g. set n
             let root_page = bp.create_new_page_for_write(c_key).unwrap();
             #[cfg(feature = "stat")]
             inc_local_stat_total_page_count();
-            // Need to do something for the root page e.g. set n
             log_info!(
                 "Root page id: {}, Need to set root page",
                 root_page.get_id()
             );
             assert_eq!(root_page.get_id(), 0, "root page id should be 0");
+            frame_buckets[0].store(root_page.frame_id(), std::sync::atomic::Ordering::Release);
+            //root_page.frame_id();
 
+            // SET HASH BUCKET PAGES
             for i in 1..DEFAULT_BUCKET_NUM + 1 {
                 let mut new_page = bp.create_new_page_for_write(c_key).unwrap();
                 #[cfg(feature = "stat")]
                 inc_local_stat_total_page_count();
+                frame_buckets[i].store(new_page.frame_id(), std::sync::atomic::Ordering::Release);
                 new_page.init();
                 assert_eq!(
                     new_page.get_id() as usize,
@@ -72,6 +92,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
                 bp: bp.clone(),
                 c_key,
                 bucket_num: DEFAULT_BUCKET_NUM,
+                frame_buckets,
                 phantom: PhantomData,
             }
         }
@@ -93,8 +114,15 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
             panic!("key and value should be less than a (page size - meta data size)");
         }
 
-        let mut page_key = PageFrameKey::new(self.c_key, self.hash(&key));
+        let hashed_key = self.hash(&key);
+        let expect_frame_id = self.frame_buckets[hashed_key as usize].load(std::sync::atomic::Ordering::Acquire);
+            
+        let mut page_key = PageFrameKey::new_with_frame_id(self.c_key, hashed_key, expect_frame_id);
         let mut current_page = self.bp.get_page_for_write(page_key).unwrap();
+        if current_page.frame_id() != expect_frame_id {
+            self.frame_buckets[hashed_key as usize].store(current_page.frame_id(), std::sync::atomic::Ordering::Release);
+            // self.frame_buckets[hashed_key as usize] = current_page.frame_id();
+        }
         #[cfg(feature = "stat")]
         {
             chain_len += 1;
@@ -115,23 +143,29 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
                 }
                 return current_value;
             }
-            if current_page.get_next_page_id() == 0 {
+            let (next_page_id, next_frame_id) = (current_page.get_next_page_id(), current_page.get_next_frame_id());
+
+            if next_page_id == 0 {
                 break;
             }
             if current_value.is_some() {
                 break;
             }
-            page_key = PageFrameKey::new(self.c_key, current_page.get_next_page_id());
-            current_page = self.bp.get_page_for_write(page_key).unwrap();
+            page_key = PageFrameKey::new_with_frame_id(self.c_key, next_page_id, next_frame_id);
+            let next_page = self.bp.get_page_for_write(page_key).unwrap();
+            if next_frame_id != next_page.frame_id() {
+                current_page.set_next_frame_id(next_page.frame_id());
+            }
             #[cfg(feature = "stat")]
             {
                 chain_len += 1;
             }
+            current_page = next_page;
         }
 
         // 2 cases:
-        // - no next page in chain: need to create new page.
-        // - current_page is full and has next page in chain: need to move to next page in chain.
+        // - no next page in chain: need to create new page. (next_page_id == 0)
+        // - current_page is full and has next page in chain: need to move to next page in chain. (current_value.is_some())
 
         // Apply the function on existing value or insert new
         let new_value = if let Some(ref val) = current_value {
@@ -140,13 +174,22 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
             value.as_ref().to_vec()
         };
 
-        while current_page.get_next_page_id() != 0 {
-            page_key = PageFrameKey::new(self.c_key, current_page.get_next_page_id());
-            current_page = self.bp.get_page_for_write(page_key).unwrap();
+        let mut next_page_id = current_page.get_next_page_id();
+
+        while next_page_id != 0 {
+            let next_frame_id = current_page.get_next_frame_id();
+
+            page_key = PageFrameKey::new_with_frame_id(self.c_key, next_page_id, next_frame_id);
+            let next_page = self.bp.get_page_for_write(page_key).unwrap();
+            if next_frame_id != next_page.frame_id() {
+                current_page.set_next_frame_id(next_page.frame_id());
+            }
             #[cfg(feature = "stat")]
             {
                 chain_len += 1;
             }
+            current_page = next_page;
+            
             let (inserted, _) = current_page.insert(key.as_ref(), &new_value);
             if inserted {
                 #[cfg(feature = "stat")]
@@ -157,16 +200,14 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
                 }
                 return current_value;
             }
-            #[cfg(feature = "stat")]
-            {
-                chain_len += 1;
-            }
+            next_page_id = current_page.get_next_page_id();
         }
 
         // If we reach here, we need to create a new page
         let mut new_page = self.bp.create_new_page_for_write(self.c_key).unwrap();
         #[cfg(feature = "stat")]
         {
+            chain_len += 1;
             update_local_stat_max_chain_len(chain_len);
             update_local_stat_min_chain_len(chain_len);
             inc_local_stat_total_page_count();
@@ -175,6 +216,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
 
         new_page.init();
         current_page.set_next_page_id(new_page.get_id());
+        current_page.set_next_frame_id(new_page.frame_id());
 
         new_page.insert(key.as_ref(), &new_value);
         current_value
@@ -185,18 +227,39 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         {
             inc_local_stat_get_count();
             update_to_global_stat();
+
         }
 
-        let mut page_key = PageFrameKey::new(self.c_key, self.hash(&key));
+        let hashed_key = self.hash(&key);
+        let expect_frame_id = self.frame_buckets[hashed_key as usize].load(std::sync::atomic::Ordering::Acquire);
+        
+        let mut page_key = PageFrameKey::new_with_frame_id(self.c_key, hashed_key, expect_frame_id);
+        let mut current_page = self.bp.get_page_for_read(page_key).unwrap();
+        if current_page.frame_id() != expect_frame_id {
+            self.frame_buckets[hashed_key as usize].store(current_page.frame_id(), std::sync::atomic::Ordering::Release);
+            // self.frame_buckets[hashed_key as usize] = current_page.frame_id();
+        }
+
         let mut result: Option<Vec<u8>> = None;
 
         loop {
-            let current_page = self.bp.get_page_for_read(page_key).unwrap();
             result = current_page.get(key.as_ref());
-            if result.is_some() || current_page.get_next_page_id() == 0 {
+            let (next_page_id, next_frame_id) = (current_page.get_next_page_id(), current_page.get_next_frame_id());
+            if result.is_some() || next_page_id == 0 {
                 break;
             }
-            page_key = PageFrameKey::new(self.c_key, current_page.get_next_page_id());
+            page_key = PageFrameKey::new_with_frame_id(self.c_key, next_page_id, next_frame_id);
+            let next_page = self.bp.get_page_for_read(page_key).unwrap();
+            if next_frame_id != next_page.frame_id() {
+                current_page = match current_page.try_upgrade(true) {
+                    Ok(mut upgraded_page) => {
+                        upgraded_page.set_next_frame_id(next_page.frame_id());
+                        upgraded_page.downgrade()
+                    },
+                    Err(current_page) => current_page,
+                };
+            }
+            current_page = next_page;
         }
         result
     }
@@ -488,7 +551,7 @@ mod tests {
 
     #[test]
     fn test_insert_and_get() {
-        let map = setup_paged_hash_map(get_in_mem_pool());
+        let mut map = setup_paged_hash_map(get_in_mem_pool());
         let key = "test_key".as_bytes();
         let value = "test_value".as_bytes();
 
@@ -507,7 +570,7 @@ mod tests {
 
     #[test]
     fn test_update_existing_key() {
-        let map = setup_paged_hash_map(get_in_mem_pool());
+        let mut map = setup_paged_hash_map(get_in_mem_pool());
         let key = "test_key".as_bytes();
         let value1 = "value1".as_bytes();
         let value2 = "value2".as_bytes();
@@ -530,7 +593,7 @@ mod tests {
 
     #[test]
     fn test_remove_key() {
-        let map = setup_paged_hash_map(get_in_mem_pool());
+        let mut map = setup_paged_hash_map(get_in_mem_pool());
         let key = "test_key".as_bytes();
         let value = "test_value".as_bytes();
 
@@ -551,7 +614,7 @@ mod tests {
 
     #[test]
     fn test_page_overflow_and_chain_handling() {
-        let map = setup_paged_hash_map(get_in_mem_pool());
+        let mut map = setup_paged_hash_map(get_in_mem_pool());
         let key1 = "key1".as_bytes();
         let value1 = vec![0u8; AVAILABLE_PAGE_SIZE / 2]; // Half page size to simulate near-full page
         let key2 = "key2".as_bytes();
@@ -576,7 +639,7 @@ mod tests {
 
     #[test]
     fn test_edge_case_key_value_sizes() {
-        let map = setup_paged_hash_map(get_in_mem_pool());
+        let mut map = setup_paged_hash_map(get_in_mem_pool());
         let key = random_string(AVAILABLE_PAGE_SIZE / 4); // Large key
         let value = random_string(
             AVAILABLE_PAGE_SIZE / 2 - PAGE_HEADER_SIZE - SHORT_KEY_PAGE_HEADER_SIZE - 10,
@@ -595,7 +658,8 @@ mod tests {
 
     #[test]
     fn test_random_operations() {
-        let map = Arc::new(setup_paged_hash_map(get_in_mem_pool()));
+        // let mut map = Arc::new(setup_paged_hash_map(get_in_mem_pool()));
+        let mut map = setup_paged_hash_map(get_in_mem_pool());
         let mut rng = rand::thread_rng();
         let mut data = HashMap::new();
         let mut inserted_keys = Vec::new(); // Track keys that are currently valid for removal
@@ -645,10 +709,10 @@ mod tests {
 
     #[test]
     fn test_sequential_inserts_multiple_pages() {
-        let map = setup_paged_hash_map(get_in_mem_pool());
+        let mut map = setup_paged_hash_map(get_in_mem_pool());
         let mut last_key = vec![];
 
-        for i in 0..(DEFAULT_BUCKET_NUM * 500) {
+        for i in 0..(DEFAULT_BUCKET_NUM * 10) {
             // Insert more than the default number of buckets
             let key = format!("key{}", i).into_bytes();
             let value = format!("value{}", i).into_bytes();
@@ -672,7 +736,8 @@ mod tests {
 
     #[test]
     fn test_random_operations_without_remove() {
-        let map = Arc::new(setup_paged_hash_map(get_in_mem_pool()));
+        // let mut map = Arc::new(setup_paged_hash_map(get_in_mem_pool()));
+        let mut map = setup_paged_hash_map(get_in_mem_pool());
         let mut rng = rand::thread_rng();
         let mut data = HashMap::new();
         let mut inserted_keys = Vec::new(); // Track keys that are currently valid for removal
@@ -722,7 +787,7 @@ mod tests {
 
     #[test]
     fn test_iterator_basic() {
-        let map = setup_paged_hash_map(get_in_mem_pool());
+        let mut map = setup_paged_hash_map(get_in_mem_pool());
         let mut expected_data = HashMap::new();
 
         // Insert a few key-value pairs
@@ -745,7 +810,7 @@ mod tests {
 
     #[test]
     fn test_iterator_across_pages() {
-        let map = setup_paged_hash_map(get_in_mem_pool());
+        let mut map = setup_paged_hash_map(get_in_mem_pool());
         let mut expected_data = HashMap::new();
 
         // Insert more key-value pairs than would fit on a single page

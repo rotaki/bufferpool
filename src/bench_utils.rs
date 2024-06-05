@@ -22,7 +22,10 @@ use crate::{
 
 use crate::{
     bp::prelude::*,
-    hashindex::{pagedhashmap::PagedHashMap, rusthashmap::RustHashMap},
+    hashindex::{
+        pagedhashmap::PagedHashMap, rusthashmap::RustHashMap,
+        hash_eviction_policy::HashEvictionPolicy,
+    },
 };
 
 #[derive(Debug, Parser)]
@@ -258,6 +261,18 @@ pub fn gen_paged_hash_map_in_mem(
 pub fn gen_paged_hash_map_on_disk(
     bp_size: usize,
 ) -> Arc<PagedHashMap<LRUEvictionPolicy, BufferPoolForTest<LRUEvictionPolicy>>> {
+    // let func = Box::new(|old: &[u8], new: &[u8]| {
+    //     old.iter().chain(new.iter()).copied().collect::<Vec<u8>>()
+    // });
+    let func = Box::new(|old: &[u8], new: &[u8]| new.to_vec());
+    let c_key = ContainerKey::new(0, 0);
+    let map = PagedHashMap::new(func, get_test_bp(bp_size), c_key, false);
+    Arc::new(map)
+}
+
+pub fn gen_paged_hash_map_on_disk_with_hash_eviction_policy(
+    bp_size: usize,
+) -> Arc<PagedHashMap<HashEvictionPolicy, BufferPoolForTest<HashEvictionPolicy>>> {
     // let func = Box::new(|old: &[u8], new: &[u8]| {
     //     old.iter().chain(new.iter()).copied().collect::<Vec<u8>>()
     // });
