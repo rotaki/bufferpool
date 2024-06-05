@@ -8,7 +8,7 @@ use std::{
 #[cfg(feature = "stat")]
 use stat::*;
 
-use crate::bp::prelude::*;
+use crate::{bp::prelude::*, page::Page};
 use crate::{log_info, page::PageId};
 
 use super::shortkeypage::{ShortKeyPage, SHORT_KEY_PAGE_HEADER_SIZE};
@@ -222,6 +222,17 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         result
     }
 
+    pub fn iter(&self) -> PagedHashMapIter<E, T> {
+        let page_key = PageFrameKey::new(self.c_key, 1);
+        let current_page = self.bp.get_page_for_read(page_key).unwrap();
+        PagedHashMapIter {
+            map: self,
+            current_page: Some(current_page),
+            current_index: 0,
+            current_bucket: 1,
+        }
+    }
+
     #[cfg(feature = "stat")]
     pub fn stats(&self) -> String {
         LOCAL_STAT.with(|s| s.stat.to_string())
@@ -231,6 +242,58 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
 
 unsafe impl<E: EvictionPolicy, T: MemPool<E>> Sync for PagedHashMap<E, T> {}
 unsafe impl<E: EvictionPolicy, T: MemPool<E>> Send for PagedHashMap<E, T> {}
+
+pub struct PagedHashMapIter<'a, E: EvictionPolicy, T: MemPool<E>> {
+    map: &'a PagedHashMap<E, T>,
+    current_page: Option<FrameReadGuard<'a, E>>,
+    current_index: usize,
+    current_bucket: usize,
+}
+
+impl<'a, E: EvictionPolicy, T: MemPool<E>> Iterator for PagedHashMapIter<'a, E, T> {
+    type Item = (Vec<u8>, Vec<u8>); // Key and value types
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(page) = &self.current_page {
+            if self.current_index < (page.num_slots() as usize) { 
+                let sks = page.decode_shortkey_slot((self.current_index as u16));
+                let skv = page.decode_shortkey_value_by_id((self.current_index as u16));
+                
+                let mut key = sks.key_prefix.to_vec();
+                key.extend_from_slice(&skv.remain_key);
+                // slice length of sks.key_len
+                key.truncate(sks.key_len as usize);
+
+                let value = skv.vals.to_vec();
+
+                self.current_index += 1;
+                return Some((key, value)); // Adjust based on actual data structure
+            }
+
+            let next_page_id = page.get_next_page_id();
+
+            // If end of current page, fetch next
+            if next_page_id != 0 {
+                self.current_page = self.map.bp.get_page_for_read(PageFrameKey::new(self.map.c_key, next_page_id)).ok();
+                self.current_index = 0;
+                continue;
+            }
+
+            // No more pages in the current bucket, move to next bucket
+            self.current_bucket += 1;
+            if self.current_bucket <= self.map.bucket_num {
+                self.current_page = self.map.bp.get_page_for_read(PageFrameKey::new(self.map.c_key, (self.current_bucket as u32))).ok();
+                self.current_index = 0;
+                continue;
+            }
+
+            // All buckets processed
+            break;
+        }
+
+        None
+    }
+}
 
 #[cfg(feature = "stat")]
 mod stat {
@@ -655,6 +718,52 @@ mod tests {
                 _ => {} // Skip remove if no keys are available
             }
         }
+    }
+
+    #[test]
+    fn test_iterator_basic() {
+        let map = setup_paged_hash_map(get_in_mem_pool());
+        let mut expected_data = HashMap::new();
+
+        // Insert a few key-value pairs
+        for i in 0..10 {
+            let key = format!("key{}", i).into_bytes();
+            let value = format!("value{}", i).into_bytes();
+            map.insert(&key, &value);
+            expected_data.insert(key, value);
+        }
+
+        // Use the iterator to fetch all key-value pairs
+        let mut iterated_data = HashMap::new();
+        for (key, value) in map.iter() {
+            iterated_data.insert(key, value);
+        }
+
+        // Check if all inserted data was iterated over correctly
+        assert_eq!(expected_data, iterated_data, "Iterator did not retrieve all key-value pairs correctly");
+    }
+
+    #[test]
+    fn test_iterator_across_pages() {
+        let map = setup_paged_hash_map(get_in_mem_pool());
+        let mut expected_data = HashMap::new();
+
+        // Insert more key-value pairs than would fit on a single page
+        for i in 0..1000 {  // Adjust the count according to the capacity of a single page
+            let key = format!("key_large_{}", i).into_bytes();
+            let value = format!("large_value_{}", i).into_bytes();
+            map.insert(&key, &value);
+            expected_data.insert(key, value);
+        }
+
+        // Use the iterator to fetch all key-value pairs
+        let mut iterated_data = HashMap::new();
+        for (key, value) in map.iter() {
+            iterated_data.insert(key, value);
+        }
+
+        // Check if all inserted data was iterated over correctly
+        assert_eq!(expected_data, iterated_data, "Iterator did not handle page overflow correctly");
     }
 
     // #[test]

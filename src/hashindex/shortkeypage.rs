@@ -33,6 +33,10 @@ pub trait ShortKeyPage {
 
     fn encode_shortkey_value(&mut self, offset: usize, entry: &ShortKeyValue);
     fn decode_shortkey_value(&self, offset: usize, remain_key_len: u16) -> ShortKeyValue;
+    fn decode_shortkey_value_by_id(&self, slot_id: u16) -> ShortKeyValue {
+        let slot = self.decode_shortkey_slot(slot_id);
+        self.decode_shortkey_value(slot.val_offset as usize, slot.key_len)
+    }
 
     fn compare_key(&self, key: &[u8], slot_id: u16) -> std::cmp::Ordering;
     fn binary_search<F>(&self, f: F) -> (bool, u16)
@@ -40,6 +44,9 @@ pub trait ShortKeyPage {
     where
         F: Fn(u16) -> std::cmp::Ordering;
     fn slot_end_offset(&self) -> usize;
+    fn num_slots(&self) -> u16 {
+        self.decode_shortkey_header().slot_num
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -51,16 +58,16 @@ pub struct ShortKeyHeader {
 
 #[derive(Debug, Clone)]
 pub struct ShortKeySlot {
-    key_len: u16,        // u16 (key length)
-    key_prefix: [u8; 8], // 8 bytes (fixed size for the key prefix)
-    val_offset: u16,     // u16
+    pub key_len: u16,        // u16 (key length)
+    pub key_prefix: [u8; 8], // 8 bytes (fixed size for the key prefix)
+    pub val_offset: u16,     // u16
 }
 
 #[derive(Debug, Clone)]
 pub struct ShortKeyValue {
-    remain_key: Vec<u8>, // dynamic size (remain part of actual key), if key_len > 8
-    vals_len: u16,       // u16
-    vals: Vec<u8>, // vector of vals (variable size), decode in the top of the page (HashTable)
+    pub remain_key: Vec<u8>, // dynamic size (remain part of actual key), if key_len > 8
+    pub vals_len: u16,       // u16
+    pub vals: Vec<u8>, // vector of vals (variable size), decode in the top of the page (HashTable)
 }
 
 impl ShortKeyPage for Page {
