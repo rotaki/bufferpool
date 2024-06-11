@@ -10,4 +10,6 @@ mod page;
 pub mod random;
 mod rwlatch;
 
+pub mod hashindex;
+
 pub use logger::log;
