@@ -217,6 +217,9 @@ pub fn run_bench_for_hash_map<E: EvictionPolicy, M: MemPool<E>>(
     kvs: Vec<RandomKVs>,
     phm: Arc<PagedHashMap<E, M>>,
 ) {
+    // simple function to merge two values, not Box
+    let func = |old: &[u8], new: &[u8]| new.to_vec();
+    
     let ops_ratio = bench_params.parse_ops_ratio();
     thread::scope(|s| {
         for partition in kvs.iter() {
@@ -227,7 +230,7 @@ pub fn run_bench_for_hash_map<E: EvictionPolicy, M: MemPool<E>>(
                     let op = rand.get();
                     match op {
                         TreeOperation::Insert => {
-                            let _ = phm.insert(k, v);
+                            let _ = phm.upsert_with_merge(k, v, func);
                         }
                         TreeOperation::Update => {
                             panic!("Update not supported")
@@ -252,9 +255,10 @@ pub fn gen_paged_hash_map_in_mem(
     // let func = Box::new(|old: &[u8], new: &[u8]| {
     //     old.iter().chain(new.iter()).copied().collect::<Vec<u8>>()
     // });
-    let func = Box::new(|old: &[u8], new: &[u8]| new.to_vec());
+    // let func = Box::new(|old: &[u8], new: &[u8]| new.to_vec());
     let c_key = ContainerKey::new(0, 0);
-    let map = PagedHashMap::new(func, get_in_mem_pool(), c_key, false);
+    // let map = PagedHashMap::new(func, get_in_mem_pool(), c_key, false);
+    let map = PagedHashMap::new(get_in_mem_pool(), c_key, false);
     Arc::new(map)
 }
 
@@ -264,9 +268,10 @@ pub fn gen_paged_hash_map_on_disk(
     // let func = Box::new(|old: &[u8], new: &[u8]| {
     //     old.iter().chain(new.iter()).copied().collect::<Vec<u8>>()
     // });
-    let func = Box::new(|old: &[u8], new: &[u8]| new.to_vec());
+    // let func = Box::new(|old: &[u8], new: &[u8]| new.to_vec());
     let c_key = ContainerKey::new(0, 0);
-    let map = PagedHashMap::new(func, get_test_bp(bp_size), c_key, false);
+    // let map = PagedHashMap::new(func, get_test_bp(bp_size), c_key, false);
+    let map = PagedHashMap::new(get_test_bp(bp_size), c_key, false);
     Arc::new(map)
 }
 
@@ -276,9 +281,10 @@ pub fn gen_paged_hash_map_on_disk_with_hash_eviction_policy(
     // let func = Box::new(|old: &[u8], new: &[u8]| {
     //     old.iter().chain(new.iter()).copied().collect::<Vec<u8>>()
     // });
-    let func = Box::new(|old: &[u8], new: &[u8]| new.to_vec());
+    // let func = Box::new(|old: &[u8], new: &[u8]| new.to_vec());
     let c_key = ContainerKey::new(0, 0);
-    let map = PagedHashMap::new(func, get_test_bp(bp_size), c_key, false);
+    // let map = PagedHashMap::new(func, get_test_bp(bp_size), c_key, false);
+    let map = PagedHashMap::new(get_test_bp(bp_size), c_key, false);
     Arc::new(map)
 }
 
@@ -295,9 +301,10 @@ pub fn insert_into_paged_hash_map<E: EvictionPolicy, M: MemPool<E>>(
     phm: Arc<PagedHashMap<E, M>>,
     kvs: &[RandomKVs],
 ) {
+    let func = |old: &[u8], new: &[u8]| new.to_vec();
     for partition in kvs.iter() {
         for (k, v) in partition.iter() {
-            let _ = phm.insert(k, v);
+            let _ = phm.upsert_with_merge(k, v, func);
         }
     }
 }

@@ -20,7 +20,9 @@ fn main() {
     // run_bench_for_hash_map(bench_params, kvs, phm.clone());
     for partition in kvs.iter() {
         for (k, v) in partition.iter() {
-            phm.insert(k, v);
+            phm.upsert_with_merge(k, v, |v1: &[u8], v2: &[u8]| -> Vec<u8> {
+                v2.to_vec()
+            });
         }
     }
 

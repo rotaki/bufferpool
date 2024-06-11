@@ -5,20 +5,21 @@ use std::{
     sync::{atomic::AtomicU32, Arc},
 };
 
+use clap::Error;
 #[cfg(feature = "stat")]
 use stat::*;
 
 use crate::{bp::prelude::*, page::Page};
 use crate::{log_info, page::PageId};
 
-use super::shortkeypage::{ShortKeyPage, SHORT_KEY_PAGE_HEADER_SIZE};
+use super::shortkeypage::{ShortKeyPage, ShortKeyPageError, SHORT_KEY_PAGE_HEADER_SIZE};
 use crate::page::AVAILABLE_PAGE_SIZE;
 
 const DEFAULT_BUCKET_NUM: usize = 4096;
 const PAGE_HEADER_SIZE: usize = 0;
 
 pub struct PagedHashMap<E: EvictionPolicy, T: MemPool<E>> {
-    func: Box<dyn Fn(&[u8], &[u8]) -> Vec<u8>>, // func(old_value, new_value) -> new_value
+    // func: Box<dyn Fn(&[u8], &[u8]) -> Vec<u8>>, // func(old_value, new_value) -> new_value
     pub bp: Arc<T>,
     c_key: ContainerKey,
     
@@ -27,6 +28,15 @@ pub struct PagedHashMap<E: EvictionPolicy, T: MemPool<E>> {
     // bucket_metas: Vec<BucketMeta>, // first_frame_id, last_page_id, last_frame_id, bloomfilter // no need to be page
 
     phantom: PhantomData<E>,
+}
+
+#[derive(Debug)]
+pub enum PagedHashMapError {
+    KeyExists,
+    KeyNotFound,
+    OutOfSpace,
+    PageCreationFailed,
+    Other(String),
 }
 
 struct BucketMeta {
@@ -38,7 +48,7 @@ struct BucketMeta {
 
 impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
     pub fn new(
-        func: Box<dyn Fn(&[u8], &[u8]) -> Vec<u8>>,
+        // func: Box<dyn Fn(&[u8], &[u8]) -> Vec<u8>>,
         bp: Arc<T>,
         c_key: ContainerKey,
         from_container: bool,
@@ -88,7 +98,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
             }
 
             PagedHashMap {
-                func,
+                // func,
                 bp: bp.clone(),
                 c_key,
                 bucket_num: DEFAULT_BUCKET_NUM,
@@ -104,7 +114,208 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         (((hasher.finish() as usize) % self.bucket_num + 1) as usize) as PageId
     }
 
-    pub fn insert<K: AsRef<[u8]> + Hash>(&self, key: K, value: K) -> Option<Vec<u8>> {
+    /// Insert a new key-value pair into the index.
+    /// If the key already exists, it will return an error.
+    pub fn insert<K: AsRef<[u8]> + Hash>(&self, key: K, value: K) -> Result<(), PagedHashMapError> {
+        #[cfg(feature = "stat")]
+        inc_local_stat_insert_count();
+
+        let required_space = key.as_ref().len() + value.as_ref().len() + 6; // 6 is for key_len, val_offset, val_len
+        if required_space > AVAILABLE_PAGE_SIZE - SHORT_KEY_PAGE_HEADER_SIZE {
+            panic!("key and value should be less than a (page size - meta data size)");
+        }
+
+        let hashed_key = self.hash(&key);
+        let expect_frame_id = self.frame_buckets[hashed_key as usize].load(std::sync::atomic::Ordering::Acquire);
+
+        let mut page_key = PageFrameKey::new_with_frame_id(self.c_key, hashed_key, expect_frame_id);
+        let mut current_page = self.bp.get_page_for_write(page_key).unwrap();
+        if current_page.frame_id() != expect_frame_id {
+            self.frame_buckets[hashed_key as usize].store(current_page.frame_id(), std::sync::atomic::Ordering::Release);
+        }
+
+        let mut chain_len = 0;
+        #[cfg(feature = "stat")]
+        {
+            chain_len += 1;
+        }
+
+        loop {
+            match current_page.insert(key.as_ref(), value.as_ref()) {
+                Ok(_) => {
+                    #[cfg(feature = "stat")]
+                    {
+                        update_local_stat_max_chain_len(chain_len);
+                        update_local_stat_min_chain_len(chain_len);
+                        update_to_global_stat();
+                    }
+                    return Ok(());
+                },
+                Err(ShortKeyPageError::KeyExists) => {
+                    return Err(PagedHashMapError::KeyExists);
+                },
+                Err(ShortKeyPageError::OutOfSpace) => {
+                    let (next_page_id, next_frame_id) = (current_page.get_next_page_id(), current_page.get_next_frame_id());
+                    if next_page_id == 0 {
+                        break;
+                    }
+                    page_key = PageFrameKey::new_with_frame_id(self.c_key, next_page_id, next_frame_id);
+                    let next_page = self.bp.get_page_for_write(page_key).unwrap();
+                    if next_frame_id != next_page.frame_id() {
+                        current_page.set_next_frame_id(next_page.frame_id());
+                    }
+                    #[cfg(feature = "stat")]
+                    {
+                        chain_len += 1;
+                    }
+                    current_page = next_page;
+                },
+                Err(err) => {
+                    return Err(PagedHashMapError::Other(format!("Insert error: {:?}", err)));
+                }
+            }
+        }
+
+        // If we reach here, we need to create a new page
+        let mut new_page = self.bp.create_new_page_for_write(self.c_key).unwrap();
+        new_page.init();
+        current_page.set_next_page_id(new_page.get_id());
+        current_page.set_next_frame_id(new_page.frame_id());
+
+        match new_page.insert(key.as_ref(), value.as_ref()) {
+            Ok(_) => Ok(()),
+            Err(err) => Err(PagedHashMapError::Other(format!("Insert error: {:?}", err))),
+        }
+    }
+    
+    /// Update the value of an existing key.
+    /// If the key does not exist, it will return an error.
+    pub fn update<K: AsRef<[u8]> + Hash>(&self, key: K, value: K) -> Result<Vec<u8>, PagedHashMapError> {
+        #[cfg(feature = "stat")]
+        inc_local_stat_insert_count();
+
+        let hashed_key = self.hash(&key);
+        let expect_frame_id = self.frame_buckets[hashed_key as usize].load(std::sync::atomic::Ordering::Acquire);
+
+        let mut page_key = PageFrameKey::new_with_frame_id(self.c_key, hashed_key, expect_frame_id);
+        let mut current_page = self.bp.get_page_for_write(page_key).unwrap();
+        if current_page.frame_id() != expect_frame_id {
+            self.frame_buckets[hashed_key as usize].store(current_page.frame_id(), std::sync::atomic::Ordering::Release);
+        }
+
+        let mut chain_len = 0;
+        #[cfg(feature = "stat")]
+        {
+            chain_len += 1;
+        }
+
+        loop {
+            match current_page.update(key.as_ref(), value.as_ref()) {
+                Ok(old_value) => {
+                    #[cfg(feature = "stat")]
+                    {
+                        update_local_stat_max_chain_len(chain_len);
+                        update_local_stat_min_chain_len(chain_len);
+                        update_to_global_stat();
+                    }
+                    return Ok(old_value);
+                },
+                Err(ShortKeyPageError::KeyNotFound) => {
+                    let (next_page_id, next_frame_id) = (current_page.get_next_page_id(), current_page.get_next_frame_id());
+                    if next_page_id == 0 {
+                        return Err(PagedHashMapError::KeyNotFound);
+                    }
+                    page_key = PageFrameKey::new_with_frame_id(self.c_key, next_page_id, next_frame_id);
+                    let next_page = self.bp.get_page_for_write(page_key).unwrap();
+                    if next_frame_id != next_page.frame_id() {
+                        current_page.set_next_frame_id(next_page.frame_id());
+                    }
+                    #[cfg(feature = "stat")]
+                    {
+                        chain_len += 1;
+                    }
+                    current_page = next_page;
+                },
+                Err(err) => {
+                    return Err(PagedHashMapError::Other(format!("Update error: {:?}", err)));
+                }
+            }
+        }
+    }
+
+    /// Upsert a key-value pair into the index.
+    /// If the key already exists, it will update the value and return old value.
+    /// If the key does not exist, it will insert a new key-value pair.
+    pub fn upsert<K: AsRef<[u8]> + Hash>(&self, key: K, value: K) -> Result<Option<Vec<u8>>, PagedHashMapError> {
+        #[cfg(feature = "stat")]
+        inc_local_stat_insert_count();
+
+        let required_space = key.as_ref().len() + value.as_ref().len() + 6; // 6 is for key_len, val_offset, val_len
+        if required_space > AVAILABLE_PAGE_SIZE - SHORT_KEY_PAGE_HEADER_SIZE {
+            panic!("key and value should be less than a (page size - meta data size)");
+        }
+
+        let hashed_key = self.hash(&key);
+        let expect_frame_id = self.frame_buckets[hashed_key as usize].load(std::sync::atomic::Ordering::Acquire);
+
+        let mut page_key = PageFrameKey::new_with_frame_id(self.c_key, hashed_key, expect_frame_id);
+        let mut current_page = self.bp.get_page_for_write(page_key).unwrap();
+        if current_page.frame_id() != expect_frame_id {
+            self.frame_buckets[hashed_key as usize].store(current_page.frame_id(), std::sync::atomic::Ordering::Release);
+        }
+
+        let mut chain_len = 0;
+        #[cfg(feature = "stat")]
+        {
+            chain_len += 1;
+        }
+
+        loop {
+            match current_page.upsert(key.as_ref(), value.as_ref()) {
+                (true, old_value) => {
+                    #[cfg(feature = "stat")]
+                    {
+                        update_local_stat_max_chain_len(chain_len);
+                        update_local_stat_min_chain_len(chain_len);
+                        update_to_global_stat();
+                    }
+                    return Ok(old_value);
+                },
+                (false, old_value) => {
+                    let (next_page_id, next_frame_id) = (current_page.get_next_page_id(), current_page.get_next_frame_id());
+                    if next_page_id == 0 {
+                        break;
+                    }
+                    page_key = PageFrameKey::new_with_frame_id(self.c_key, next_page_id, next_frame_id);
+                    let next_page = self.bp.get_page_for_write(page_key).unwrap();
+                    if next_frame_id != next_page.frame_id() {
+                        current_page.set_next_frame_id(next_page.frame_id());
+                    }
+                    #[cfg(feature = "stat")]
+                    {
+                        chain_len += 1;
+                    }
+                    current_page = next_page;
+                }
+            }
+        }
+
+        // If we reach here, we need to create a new page
+        let mut new_page = self.bp.create_new_page_for_write(self.c_key).unwrap();
+        new_page.init();
+        current_page.set_next_page_id(new_page.get_id());
+        current_page.set_next_frame_id(new_page.frame_id());
+
+        match new_page.upsert(key.as_ref(), value.as_ref()) {
+            (true, old_value) => Ok(old_value),
+            (false, _) => Err(PagedHashMapError::OutOfSpace),
+        }
+    }
+
+    /// Upsert with a custom merge function.
+    /// If the key already exists, it will update the value with the merge function.
+    /// If the key does not exist, it will insert a new key-value pair.
+    pub fn upsert_with_merge<K: AsRef<[u8]> + Hash>(&self, key: K, value: K, merge: fn(&[u8], &[u8]) -> Vec<u8>) -> Option<Vec<u8>> {
         let mut chain_len = 0;
         #[cfg(feature = "stat")]
         inc_local_stat_insert_count();
@@ -133,7 +344,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         loop {
             let mut inserted = false;
             (inserted, current_value) =
-                current_page.insert_with_function(key.as_ref(), value.as_ref(), &self.func);
+                current_page.upsert_with_merge(key.as_ref(), value.as_ref(), &merge);
             if inserted {
                 #[cfg(feature = "stat")]
                 {
@@ -169,7 +380,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
 
         // Apply the function on existing value or insert new
         let new_value = if let Some(ref val) = current_value {
-            (self.func)(val, value.as_ref())
+            (merge)(val, value.as_ref())
         } else {
             value.as_ref().to_vec()
         };
@@ -190,7 +401,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
             }
             current_page = next_page;
             
-            let (inserted, _) = current_page.insert(key.as_ref(), &new_value);
+            let (inserted, _) = current_page.upsert(key.as_ref(), &new_value);
             if inserted {
                 #[cfg(feature = "stat")]
                 {
@@ -218,11 +429,13 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         current_page.set_next_page_id(new_page.get_id());
         current_page.set_next_frame_id(new_page.frame_id());
 
-        new_page.insert(key.as_ref(), &new_value);
+        new_page.upsert(key.as_ref(), &new_value);
         current_value
     }
 
-    pub fn get<K: AsRef<[u8]> + Hash>(&self, key: K) -> Option<Vec<u8>> {
+    /// Get the value of a key from the index.
+    /// If the key does not exist, it will return an error.
+    pub fn get<K: AsRef<[u8]> + Hash>(&self, key: K) -> Result<Vec<u8>, PagedHashMapError> {
         #[cfg(feature = "stat")]
         {
             inc_local_stat_get_count();
@@ -261,7 +474,10 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
             }
             current_page = next_page;
         }
-        result
+        match result {
+            Some(v) => Ok(v),
+            None => Err(PagedHashMapError::KeyNotFound),
+        }
     }
 
     pub fn remove<K: AsRef<[u8]> + Hash>(&self, key: K) -> Option<Vec<u8>> {
@@ -537,7 +753,8 @@ mod tests {
         let (db_id, c_id) = (0, 0);
         let c_key = ContainerKey::new(db_id, c_id);
         let func = Box::new(simple_hash_func);
-        PagedHashMap::new(func, bp, c_key, false)
+        // PagedHashMap::new(func, bp, c_key, false)
+        PagedHashMap::new(bp, c_key, false)
     }
 
     /// Helper function to generate random strings of a given length
@@ -551,20 +768,20 @@ mod tests {
 
     #[test]
     fn test_insert_and_get() {
-        let mut map = setup_paged_hash_map(get_in_mem_pool());
+        let map = setup_paged_hash_map(get_in_mem_pool());
         let key = "test_key".as_bytes();
         let value = "test_value".as_bytes();
 
         assert!(
-            map.insert(key, value).is_none(),
-            "Insert should succeed and return None on first insert"
+            map.insert(key, value).is_ok(),
+            "Insert should succeed and return Ok on first insert"
         );
 
-        let retrieved_value = map.get(key);
+        let retrieved_value = map.get(key).unwrap(); 
         assert_eq!(
             retrieved_value,
-            Some(value.to_vec()),
-            "Retrieved value should match the inserted value"
+            value.to_vec(),
+            "Retrieved value should match inserted value"
         );
     }
 
@@ -574,19 +791,20 @@ mod tests {
         let key = "test_key".as_bytes();
         let value1 = "value1".as_bytes();
         let value2 = "value2".as_bytes();
+        let func = simple_hash_func;
 
-        map.insert(key, value1);
-        let old_value = map.insert(key, value2);
+        map.upsert_with_merge(key, value1, func);
+        let old_value = map.upsert_with_merge(key, value2, func);
         assert_eq!(
             old_value,
             Some(value1.to_vec()),
             "Insert should return old value on update"
         );
 
-        let retrieved_value = map.get(key);
+        let retrieved_value = map.get(key).unwrap();
         assert_eq!(
             retrieved_value,
-            Some([value1, value2].concat()),
+            [value1, value2].concat(),
             "Retrieved value should be concatenated values"
         );
     }
@@ -596,8 +814,9 @@ mod tests {
         let mut map = setup_paged_hash_map(get_in_mem_pool());
         let key = "test_key".as_bytes();
         let value = "test_value".as_bytes();
+        let func = simple_hash_func;
 
-        map.insert(key, value);
+        map.upsert_with_merge(key, value, func);
         let removed_value = map.remove(key);
         assert_eq!(
             removed_value,
@@ -606,9 +825,10 @@ mod tests {
         );
 
         let retrieved_value = map.get(key);
+        // check error
         assert!(
-            retrieved_value.is_none(),
-            "Key should no longer exist in the map"
+            retrieved_value.is_err(),
+            "Get should return an error after key is removed"
         );
     }
 
@@ -620,19 +840,21 @@ mod tests {
         let key2 = "key2".as_bytes();
         let value2 = vec![0u8; AVAILABLE_PAGE_SIZE / 2]; // Another half to trigger page overflow
 
-        map.insert(key1, &value1);
-        map.insert(key2, &value2); // Should trigger handling of a new page in chain
+        let func = simple_hash_func;
 
-        let retrieved_value1 = map.get(key1);
-        let retrieved_value2 = map.get(key2);
+        map.upsert_with_merge(key1, &value1, func);
+        map.upsert_with_merge(key2, &value2, func); // Should trigger handling of a new page in chain
+
+        let retrieved_value1 = map.get(key1).unwrap();
+        let retrieved_value2 = map.get(key2).unwrap();
         assert_eq!(
             retrieved_value1,
-            Some(value1),
+            value1,
             "First key should be retrievable"
         );
         assert_eq!(
             retrieved_value2,
-            Some(value2),
+            value2,
             "Second key should be retrievable in a new page"
         );
     }
@@ -645,13 +867,15 @@ mod tests {
             AVAILABLE_PAGE_SIZE / 2 - PAGE_HEADER_SIZE - SHORT_KEY_PAGE_HEADER_SIZE - 10,
         ); // Large value
 
+        let func = simple_hash_func;
+
         assert!(
-            map.insert(&key, &value).is_none(),
+            map.upsert_with_merge(&key, &value, func).is_none(),
             "Should handle large sizes without panic"
         );
         assert_eq!(
-            map.get(&key),
-            Some(value),
+            map.get(&key).unwrap(),
+            value,
             "Should retrieve large value correctly"
         );
     }
@@ -664,6 +888,8 @@ mod tests {
         let mut data = HashMap::new();
         let mut inserted_keys = Vec::new(); // Track keys that are currently valid for removal
 
+        let func = simple_hash_func;
+
         for _ in 0..1000 {
             let operation: u8 = rng.gen_range(0..4);
             let key = random_string(10);
@@ -671,8 +897,8 @@ mod tests {
 
             match operation {
                 0 => {
-                    // Insert
-                    map.insert(&key, &value);
+                    // upsert_with_merge
+                    map.upsert_with_merge(&key, &value, func);
                     data.insert(key.clone(), value.clone());
                     inserted_keys.push(key); // Add key to the list of valid removal candidates
                 }
@@ -680,13 +906,21 @@ mod tests {
                     // Update
                     if let Some(v) = data.get_mut(&key) {
                         *v = value.clone();
-                        map.insert(&key, &value);
+                        map.upsert_with_merge(&key, &value, func);
                     }
                 }
                 2 => {
                     // Get
                     let expected = data.get(&key);
-                    assert_eq!(map.get(&key), expected.cloned(), "Mismatched values on get");
+                    // if key is not in data, map.get is error
+                    match expected {
+                        Some(v) => {
+                            assert_eq!(map.get(&key).unwrap(), v.clone(), "Mismatched values on get");
+                        },
+                        None => {
+                            assert!(map.get(&key).is_err(), "Get should return an error if key is not in data");
+                        }
+                    }
                 }
                 3 if !inserted_keys.is_empty() => {
                     // Remove
@@ -697,7 +931,7 @@ mod tests {
                         "Remove should return Some for existing key"
                     );
                     assert!(
-                        map.get(&remove_key).is_none(),
+                        map.get(&remove_key).is_err(),
                         "Get should return None after remove"
                     );
                     data.remove(&remove_key);
@@ -708,28 +942,30 @@ mod tests {
     }
 
     #[test]
-    fn test_sequential_inserts_multiple_pages() {
+    fn test_sequential_upsert_with_merge_multiple_pages() {
         let mut map = setup_paged_hash_map(get_in_mem_pool());
         let mut last_key = vec![];
 
+        let func = simple_hash_func;
+
         for i in 0..(DEFAULT_BUCKET_NUM * 10) {
-            // Insert more than the default number of buckets
+            // upsert_with_merge more than the default number of buckets
             let key = format!("key{}", i).into_bytes();
             let value = format!("value{}", i).into_bytes();
-            map.insert(&key, &value);
+            map.upsert_with_merge(&key, &value, func);
             last_key = key.clone();
 
             // Check insertion correctness
             assert_eq!(
-                map.get(&key),
-                Some(value),
-                "Each inserted key should retrieve correctly"
+                map.get(&key).unwrap(),
+                value,
+                "Each upsert_with_mergeed key should retrieve correctly"
             );
         }
 
-        // Ensure the last inserted key is still retrievable, implying multi-page handling
+        // Ensure the last upsert_with_mergeed key is still retrievable, implying multi-page handling
         assert!(
-            map.get(&last_key).is_some(),
+            map.get(&last_key).is_ok(),
             "The last key should still be retrievable, indicating multi-page handling"
         );
     }
@@ -742,6 +978,8 @@ mod tests {
         let mut data = HashMap::new();
         let mut inserted_keys = Vec::new(); // Track keys that are currently valid for removal
 
+        let func = simple_hash_func;
+
         for _ in 0..200000 {
             let operation: u8 = rng.gen_range(0..3);
             let key = random_string(10);
@@ -749,8 +987,8 @@ mod tests {
 
             match operation {
                 0 => {
-                    // Insert
-                    map.insert(&key, &value);
+                    // upsert_with_merge
+                    map.upsert_with_merge(&key, &value, func);
                     data.insert(key.clone(), value.clone());
                     inserted_keys.push(key); // Add key to the list of valid removal candidates
                 }
@@ -758,13 +996,21 @@ mod tests {
                     // Update
                     if let Some(v) = data.get_mut(&key) {
                         *v = value.clone();
-                        map.insert(&key, &value);
+                        map.upsert_with_merge(&key, &value, func);
                     }
                 }
                 2 => {
                     // Get
                     let expected = data.get(&key);
-                    assert_eq!(map.get(&key), expected.cloned(), "Mismatched values on get");
+                    match expected {
+                        Some(v) => {
+                            assert_eq!(map.get(&key).unwrap(), v.clone(), "Mismatched values on get");
+                        },
+                        None => {
+                            assert!(map.get(&key).is_err(), "Get should return an error if key is not in data");
+                        }
+                    }
+                    // assert_eq!(map.get(&key), expected.cloned(), "Mismatched values on get");
                 }
                 3 if !inserted_keys.is_empty() => {
                     // Remove
@@ -775,7 +1021,7 @@ mod tests {
                         "Remove should return Some for existing key"
                     );
                     assert!(
-                        map.get(&remove_key).is_none(),
+                        map.get(&remove_key).is_err(),
                         "Get should return None after remove"
                     );
                     data.remove(&remove_key);
@@ -790,11 +1036,13 @@ mod tests {
         let mut map = setup_paged_hash_map(get_in_mem_pool());
         let mut expected_data = HashMap::new();
 
-        // Insert a few key-value pairs
+        let func = simple_hash_func;
+
+        // upsert_with_merge a few key-value pairs
         for i in 0..10 {
             let key = format!("key{}", i).into_bytes();
             let value = format!("value{}", i).into_bytes();
-            map.insert(&key, &value);
+            map.upsert_with_merge(&key, &value, func);
             expected_data.insert(key, value);
         }
 
@@ -804,7 +1052,7 @@ mod tests {
             iterated_data.insert(key, value);
         }
 
-        // Check if all inserted data was iterated over correctly
+        // Check if all upsert_with_mergeed data was iterated over correctly
         assert_eq!(expected_data, iterated_data, "Iterator did not retrieve all key-value pairs correctly");
     }
 
@@ -813,11 +1061,13 @@ mod tests {
         let mut map = setup_paged_hash_map(get_in_mem_pool());
         let mut expected_data = HashMap::new();
 
-        // Insert more key-value pairs than would fit on a single page
+        let func = simple_hash_func;
+
+        // upsert_with_merge more key-value pairs than would fit on a single page
         for i in 0..1000 {  // Adjust the count according to the capacity of a single page
             let key = format!("key_large_{}", i).into_bytes();
             let value = format!("large_value_{}", i).into_bytes();
-            map.insert(&key, &value);
+            map.upsert_with_merge(&key, &value, func);
             expected_data.insert(key, value);
         }
 
@@ -827,8 +1077,243 @@ mod tests {
             iterated_data.insert(key, value);
         }
 
-        // Check if all inserted data was iterated over correctly
+        // Check if all upsert_with_mergeed data was iterated over correctly
         assert_eq!(expected_data, iterated_data, "Iterator did not handle page overflow correctly");
+    }
+
+    #[test]
+    fn test_insert_existing_key() {
+        let map = setup_paged_hash_map(get_in_mem_pool());
+        let key = "test_key".as_bytes();
+        let value1 = "value1".as_bytes();
+        let value2 = "value2".as_bytes();
+
+        map.insert(key, value1).unwrap();
+        assert!(
+            map.insert(key, value2).is_err(),
+            "Insert should return Err when key already exists"
+        );
+
+        let retrieved_value = map.get(key).unwrap();
+        assert_eq!(
+            retrieved_value,
+            value1.to_vec(),
+            "Retrieved value should match the initially inserted value"
+        );
+    }
+
+    #[test]
+    fn test_update_existing_key2() {
+        let map = setup_paged_hash_map(get_in_mem_pool());
+        let key = "test_key".as_bytes();
+        let value1 = "value1".as_bytes();
+        let value2 = "value2".as_bytes();
+
+        map.insert(key, value1).unwrap();
+        let old_value = map.update(key, value2).unwrap();
+        assert_eq!(
+            old_value,
+            value1.to_vec(),
+            "Update should return old value"
+        );
+
+        let retrieved_value = map.get(key).unwrap();
+        assert_eq!(
+            retrieved_value,
+            value2.to_vec(),
+            "Retrieved value should match the updated value"
+        );
+    }
+
+    #[test]
+    fn test_update_non_existent_key() {
+        let map = setup_paged_hash_map(get_in_mem_pool());
+        let key = "test_key".as_bytes();
+        let value = "value".as_bytes();
+
+        assert!(
+            map.update(key, value).is_err(),
+            "Update should return Err when key does not exist"
+        );
+    }
+
+    #[test]
+    fn test_upsert() {
+        let map = setup_paged_hash_map(get_in_mem_pool());
+        let key = "test_key".as_bytes();
+        let value1 = "value1".as_bytes();
+        let value2 = "value2".as_bytes();
+
+        let old_value = map.upsert(key, value1).unwrap();
+        assert_eq!(
+            old_value,
+            None,
+            "Upsert should return None when key is newly inserted"
+        );
+
+        let old_value = map.upsert(key, value2).unwrap();
+        assert_eq!(
+            old_value,
+            Some(value1.to_vec()),
+            "Upsert should return old value when key is updated"
+        );
+
+        let retrieved_value = map.get(key).unwrap();
+        assert_eq!(
+            retrieved_value,
+            value2.to_vec(),
+            "Retrieved value should match the last upserted value"
+        );
+    }
+
+    #[test]
+    fn test_remove_key2() {
+        let map = setup_paged_hash_map(get_in_mem_pool());
+        let key = "test_key".as_bytes();
+        let value = "test_value".as_bytes();
+
+        map.insert(key, value).unwrap();
+        let removed_value = map.remove(key).unwrap();
+        assert_eq!(
+            removed_value,
+            value.to_vec(),
+            "Remove should return the removed value"
+        );
+
+        let retrieved_value = map.get(key);
+        assert!(
+            retrieved_value.is_err(),
+            "Key should no longer exist in the map"
+        );
+    }
+
+    #[test]
+    fn test_page_overflow_and_chain_handling2() {
+        let map = setup_paged_hash_map(get_in_mem_pool());
+        let key1 = "key1".as_bytes();
+        let value1 = vec![0u8; AVAILABLE_PAGE_SIZE / 2]; // Half page size to simulate near-full page
+        let key2 = "key2".as_bytes();
+        let value2 = vec![0u8; AVAILABLE_PAGE_SIZE / 2]; // Another half to trigger page overflow
+
+        map.insert(key1, &value1).unwrap();
+        map.insert(key2, &value2).unwrap(); // Should trigger handling of a new page in chain
+
+        let retrieved_value1 = map.get(key1).unwrap();
+        let retrieved_value2 = map.get(key2).unwrap();
+        assert_eq!(
+            retrieved_value1,
+            value1,
+            "First key should be retrievable"
+        );
+        assert_eq!(
+            retrieved_value2,
+            value2,
+            "Second key should be retrievable in a new page"
+        );
+    }
+
+    #[test]
+    fn test_edge_case_key_value_sizes2() {
+        let map = setup_paged_hash_map(get_in_mem_pool());
+        let key = random_string(AVAILABLE_PAGE_SIZE / 4); // Large key
+        let value = random_string(
+            AVAILABLE_PAGE_SIZE / 2 - PAGE_HEADER_SIZE - SHORT_KEY_PAGE_HEADER_SIZE - 10,
+        ); // Large value
+
+        assert!(
+            map.upsert(&key, &value).is_ok(),
+            "Should handle large sizes without panic"
+        );
+        assert_eq!(
+            map.get(&key).unwrap(),
+            value,
+            "Should retrieve large value correctly"
+        );
+    }
+
+    #[test]
+    fn test_random_operations2() {
+        let map = Arc::new(setup_paged_hash_map(get_in_mem_pool()));
+        let mut rng = rand::thread_rng();
+        let mut data = HashMap::new();
+        let mut inserted_keys = Vec::new(); // Track keys that are currently valid for removal
+
+        for _ in 0..1000 {
+            let operation: u8 = rng.gen_range(0..4);
+            let key = random_string(10);
+            let value = random_string(20);
+
+            match operation {
+                0 => {
+                    // Insert
+                    map.upsert(&key, &value).unwrap();
+                    data.insert(key.clone(), value.clone());
+                    inserted_keys.push(key); // Add key to the list of valid removal candidates
+                }
+                1 => {
+                    // Update
+                    if let Some(v) = data.get_mut(&key) {
+                        *v = value.clone();
+                        map.update(&key, &value).unwrap();
+                    }
+                }
+                2 => {
+                    // Get
+                    let expected = data.get(&key);
+                    match expected {
+                        Some(v) => {
+                            assert_eq!(map.get(&key).unwrap(), v.clone(), "Mismatched values on get");
+                        },
+                        None => {
+                            assert!(map.get(&key).is_err(), "Get should return an error if key is not in data");
+                        } 
+                    }
+                    // assert_eq!(map.get(&key).unwrap(), expected.cloned().unwrap(), "Mismatched values on get");
+                }
+                3 if !inserted_keys.is_empty() => {
+                    // Remove
+                    let remove_index = rng.gen_range(0..inserted_keys.len());
+                    let remove_key = inserted_keys.remove(remove_index);
+                    assert!(
+                        map.remove(&remove_key).is_some(),
+                        "Remove should return Some for existing key"
+                    );
+                    assert!(
+                        map.get(&remove_key).is_err(),
+                        "Get should return None after remove"
+                    );
+                    data.remove(&remove_key);
+                }
+                _ => {} // Skip remove if no keys are available
+            }
+        }
+    }
+
+    #[test]
+    fn test_sequential_inserts_multiple_pages() {
+        let map = setup_paged_hash_map(get_in_mem_pool());
+        let mut last_key = vec![];
+
+        for i in 0..(DEFAULT_BUCKET_NUM * 10) {
+            // Insert more than the default number of buckets
+            let key = format!("key{}", i).into_bytes();
+            let value = format!("value{}", i).into_bytes();
+            map.upsert(&key, &value).unwrap();
+            last_key = key.clone();
+
+            // Check insertion correctness
+            assert_eq!(
+                map.get(&key).unwrap(),
+                value,
+                "Each inserted key should retrieve correctly"
+            );
+        }
+
+        // Ensure the last inserted key is still retrievable, implying multi-page handling
+        assert!(
+            map.get(&last_key).is_ok(),
+            "The last key should still be retrievable, indicating multi-page handling"
+        );
     }
 
     // #[test]
