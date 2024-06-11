@@ -1,15 +1,16 @@
+use core::panic;
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
     marker::PhantomData,
-    sync::{atomic::AtomicU32, Arc},
+    sync::{atomic::AtomicU32, Arc}, time::Duration,
 };
 
 use clap::Error;
 #[cfg(feature = "stat")]
 use stat::*;
 
-use crate::{bp::prelude::*, page::Page};
+use crate::{bp::prelude::*, page::{self, Page}};
 use crate::{log_info, page::PageId};
 
 use super::shortkeypage::{ShortKeyPage, ShortKeyPageError, SHORT_KEY_PAGE_HEADER_SIZE};
@@ -35,6 +36,7 @@ pub enum PagedHashMapError {
     KeyNotFound,
     OutOfSpace,
     PageCreationFailed,
+    WriteLatchFailed,
     Other(String),
 }
 
@@ -115,11 +117,11 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
 
     /// Insert a new key-value pair into the index.
     /// If the key already exists, it will return an error.
-    pub fn insert<K: AsRef<[u8]> + Hash>(&self, key: K, value: K) -> Result<(), PagedHashMapError> {
+    pub fn insert<K: AsRef<[u8]> + Hash>(&self, key: K, val: K) -> Result<(), PagedHashMapError> {
         #[cfg(feature = "stat")]
         inc_local_stat_insert_count();
-
-        let required_space = key.as_ref().len() + value.as_ref().len() + 6; // 6 is for key_len, val_offset, val_len
+        
+        let required_space = key.as_ref().len() + val.as_ref().len() + 6; // 6 is for key_len, val_offset, val_len
         if required_space > AVAILABLE_PAGE_SIZE - SHORT_KEY_PAGE_HEADER_SIZE {
             panic!("key and value should be less than a (page size - meta data size)");
         }
@@ -128,76 +130,190 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         let expect_frame_id =
             self.frame_buckets[hashed_key as usize].load(std::sync::atomic::Ordering::Acquire);
 
-        let mut page_key = PageFrameKey::new_with_frame_id(self.c_key, hashed_key, expect_frame_id);
-        let mut current_page = self.bp.get_page_for_write(page_key).unwrap();
-        if current_page.frame_id() != expect_frame_id {
-            self.frame_buckets[hashed_key as usize].store(
-                current_page.frame_id(),
-                std::sync::atomic::Ordering::Release,
-            );
-        }
-
-        let mut chain_len = 0;
-        #[cfg(feature = "stat")]
-        {
-            chain_len += 1;
-        }
-
-        loop {
-            match current_page.insert(key.as_ref(), value.as_ref()) {
-                Ok(_) => {
-                    #[cfg(feature = "stat")]
-                    {
-                        update_local_stat_max_chain_len(chain_len);
-                        update_local_stat_min_chain_len(chain_len);
-                    }
-                    return Ok(());
+        let page_key = PageFrameKey::new_with_frame_id(self.c_key, hashed_key, expect_frame_id);
+        
+        let mut last_page = self.insert_traverse_to_endofchain_for_write(page_key, key.as_ref())?;
+        match last_page.insert(key.as_ref(), val.as_ref()) {
+            Ok(_) => Ok(()),
+            Err(ShortKeyPageError::KeyExists) => panic!("Key exists should detected in traverse_to_endofchain_for_write"),
+            Err(ShortKeyPageError::OutOfSpace) => {
+                let mut new_page = self.bp.create_new_page_for_write(self.c_key).unwrap();
+                #[cfg(feature = "stat")]{
+                    inc_local_stat_total_page_count();
                 }
-                Err(ShortKeyPageError::KeyExists) => {
+                new_page.init();
+                last_page.set_next_page_id(new_page.get_id());
+                last_page.set_next_frame_id(new_page.frame_id());
+                match new_page.insert(key.as_ref(), val.as_ref()) {
+                    Ok(_) => Ok(()),
+                    Err(err) => panic!("Inserting to new page should succeed: {:?}", err)
+                }
+            },
+            Err(err) => Err(PagedHashMapError::Other(format!("Insert error: {:?}", err))),
+        }
+
+
+        // let mut current_page = self.bp.get_page_for_read(page_key).unwrap();
+        // if current_page.frame_id() != expect_frame_id {
+        //     self.frame_buckets[hashed_key as usize].store(
+        //         current_page.frame_id(),
+        //         std::sync::atomic::Ordering::Release,
+        //     );
+        // }
+
+        // let mut chain_len = 0;
+        // #[cfg(feature = "stat")]
+        // {
+        //     chain_len += 1;
+        // }
+
+        // loop {
+        //     if current_page.get_next_page_id() == 0 {
+        //         // current_page = match current_page.try_upgrade(true) {
+        //         //     Ok(mut upgraded_page) => {
+        //         //         upgraded_page.set_next_frame_id(next_page.frame_id());
+        //         //         upgraded_page.downgrade()
+        //         //     }
+        //         //     Err(current_page) => {
+                        
+        //         //     },
+        //         // };
+        //         match current_page.insert(key.as_ref(), value.as_ref()) {
+        //             Ok(_) => {
+        //                 #[cfg(feature = "stat")]
+        //                 {
+        //                     update_local_stat_max_chain_len(chain_len);
+        //                     update_local_stat_min_chain_len(chain_len);
+        //                 }
+        //                 return Ok(());
+        //             }
+        //             Err(ShortKeyPageError::KeyExists) => {
+        //                 return Err(PagedHashMapError::KeyExists);
+        //             }
+        //             Err(ShortKeyPageError::OutOfSpace) => {
+        //                 break;
+        //             }
+        //             Err(err) => {
+        //                 return Err(PagedHashMapError::Other(format!("Insert error: {:?}", err)));
+        //             }
+        //         }
+        //     } else {
+        //         match current_page.get(key.as_ref()) {
+        //             Some(_) => {
+        //                 return Err(PagedHashMapError::KeyExists);
+        //             }
+        //             None => {
+        //                 let (next_page_id, next_frame_id) = (
+        //                     current_page.get_next_page_id(),
+        //                     current_page.get_next_frame_id(),
+        //                 );
+        //                 page_key = PageFrameKey::new_with_frame_id(self.c_key, next_page_id, next_frame_id);
+        //                 let next_page = self.bp.get_page_for_write(page_key).unwrap();
+        //                 if next_frame_id != next_page.frame_id() {
+        //                     current_page.set_next_frame_id(next_page.frame_id());
+        //                 }
+        //                 #[cfg(feature = "stat")]
+        //                 {
+        //                     chain_len += 1;
+        //                 }
+        //                 current_page = next_page;
+        //             }
+        //         }
+        //     }
+        // }
+
+        // // If we reach here, we need to create a new page
+        // let mut new_page = self.bp.create_new_page_for_write(self.c_key).unwrap();
+        // #[cfg(feature = "stat")]
+        // {
+        //     chain_len += 1;
+        //     update_local_stat_max_chain_len(chain_len);
+        //     update_local_stat_min_chain_len(chain_len);
+        //     inc_local_stat_total_page_count();
+        // }
+        // new_page.init();
+        // current_page.set_next_page_id(new_page.get_id());
+        // current_page.set_next_frame_id(new_page.frame_id());
+
+        // match new_page.insert(key.as_ref(), value.as_ref()) {
+        //     Ok(_) => Ok(()),
+        //     Err(err) => Err(PagedHashMapError::Other(format!("Insert error: {:?}", err))),
+        // }
+    }
+
+    fn insert_traverse_to_endofchain_for_write(&self, page_key: PageFrameKey, key: &[u8]) -> Result<FrameWriteGuard<E>, PagedHashMapError> {
+        let base = Duration::from_millis(1);
+        let mut attempts = 0;
+        loop {
+            let page = self.try_insert_traverse_to_endofchain_for_write(page_key, key);
+            match page {
+                Ok(page) => {
+                    return Ok(page);
+                }
+                Err(PagedHashMapError::WriteLatchFailed) => {
+                    attempts += 1;
+                    std::thread::sleep(base * attempts);
+                }
+                Err(PagedHashMapError::KeyExists) => {
                     return Err(PagedHashMapError::KeyExists);
                 }
-                Err(ShortKeyPageError::OutOfSpace) => {
-                    let (next_page_id, next_frame_id) = (
-                        current_page.get_next_page_id(),
-                        current_page.get_next_frame_id(),
-                    );
-                    if next_page_id == 0 {
-                        break;
+                Err(err) => {
+                    panic!("Traverse to end of chain error: {:?}", err);
+                }
+            }    
+        }
+    }
+
+    fn try_insert_traverse_to_endofchain_for_write(&self, page_key: PageFrameKey, key: &[u8]) -> Result<FrameWriteGuard<E>, PagedHashMapError> {
+        let mut current_page = self.read_page(page_key);
+        loop {
+            if current_page.is_exist(key) {
+                return Err(PagedHashMapError::KeyExists);
+            }
+            let next_page_id = current_page.get_next_page_id();
+            if next_page_id == 0 {
+                match current_page.try_upgrade(true) {
+                    Ok(mut upgraded_page) => {
+                        return Ok(upgraded_page);
                     }
-                    page_key =
-                        PageFrameKey::new_with_frame_id(self.c_key, next_page_id, next_frame_id);
-                    let next_page = self.bp.get_page_for_write(page_key).unwrap();
-                    if next_frame_id != next_page.frame_id() {
-                        current_page.set_next_frame_id(next_page.frame_id());
+                    Err(current_page) => {
+                        return Err(PagedHashMapError::WriteLatchFailed);
+                    },
+                };
+            }
+            let next_frame_id = current_page.get_next_frame_id();
+            let next_page_key = PageFrameKey::new_with_frame_id(self.c_key, next_page_id, next_frame_id);
+            let next_page = self.read_page(next_page_key);
+            if next_frame_id != next_page.frame_id() {
+                current_page = match current_page.try_upgrade(true) {
+                    Ok(mut upgraded_page) => {
+                        upgraded_page.set_next_frame_id(next_page.frame_id());
+                        upgraded_page.downgrade()
                     }
-                    #[cfg(feature = "stat")]
-                    {
-                        chain_len += 1;
-                    }
-                    current_page = next_page;
+                    Err(current_page) => current_page,
+                };
+            }
+            current_page = next_page;
+        }
+    }
+
+    fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard<E> {
+        loop {
+            let page = self.bp.get_page_for_read(page_key);
+            match page {
+                Ok(page) => {
+                    return page;
+                }
+                Err(MemPoolStatus::FrameReadLatchGrantFailed) => {
+                    std::hint::spin_loop();
+                }
+                Err(MemPoolStatus::CannotEvictPage) => {
+                    std::thread::sleep(Duration::from_millis(1));
                 }
                 Err(err) => {
-                    return Err(PagedHashMapError::Other(format!("Insert error: {:?}", err)));
+                    panic!("Read page error: {:?}", err);
                 }
             }
-        }
-
-        // If we reach here, we need to create a new page
-        let mut new_page = self.bp.create_new_page_for_write(self.c_key).unwrap();
-        #[cfg(feature = "stat")]
-        {
-            chain_len += 1;
-            update_local_stat_max_chain_len(chain_len);
-            update_local_stat_min_chain_len(chain_len);
-            inc_local_stat_total_page_count();
-        }
-        new_page.init();
-        current_page.set_next_page_id(new_page.get_id());
-        current_page.set_next_frame_id(new_page.frame_id());
-
-        match new_page.insert(key.as_ref(), value.as_ref()) {
-            Ok(_) => Ok(()),
-            Err(err) => Err(PagedHashMapError::Other(format!("Insert error: {:?}", err))),
         }
     }
 

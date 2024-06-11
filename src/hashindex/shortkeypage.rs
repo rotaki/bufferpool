@@ -66,6 +66,10 @@ pub trait ShortKeyPage {
     // return (found, index)
     where
         F: Fn(u16) -> std::cmp::Ordering;
+    fn is_exist(&self, key: &[u8]) -> bool {
+        let (found, _) = self.binary_search(|slot_id| self.compare_key(key, slot_id));
+        found
+    }
     fn slot_end_offset(&self) -> usize;
     fn num_slots(&self) -> u16 {
         self.decode_shortkey_header().slot_num
