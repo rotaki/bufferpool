@@ -83,7 +83,7 @@ pub enum ShortKeyPageError {
 #[derive(Debug, Clone)]
 pub struct ShortKeyHeader {
     next_page_id: PageId,  // u32
-    next_frame_id: u32,     // u32
+    next_frame_id: u32,    // u32
     slot_num: u16,         // u16
     val_start_offset: u16, // u16
 }
@@ -170,7 +170,7 @@ impl ShortKeyPage for Page {
 
         let mut low = 0;
         let mut high = header.slot_num - 1;
-       
+
         match f(low) {
             std::cmp::Ordering::Equal => return (true, low),
             std::cmp::Ordering::Greater => return (false, 0),
@@ -220,9 +220,8 @@ impl ShortKeyPage for Page {
             self.copy_within(start_pos..end_pos, start_pos + SHORT_KEY_SLOT_SIZE);
         }
 
-        let new_val_offset =
-            header.val_start_offset as usize - (value.len() + 2 + remain_key_len);
-        
+        let new_val_offset = header.val_start_offset as usize - (value.len() + 2 + remain_key_len);
+
         let new_slot = ShortKeySlot {
             key_len: key.len() as u16,
             key_prefix: {
@@ -274,15 +273,15 @@ impl ShortKeyPage for Page {
         } else {
             let remain_key_len = key.len().saturating_sub(8);
             let required_space = remain_key_len + val.len() + 2;
-            if required_space > self.decode_shortkey_header().val_start_offset as usize
-                - self.slot_end_offset()
+            if required_space
+                > self.decode_shortkey_header().val_start_offset as usize - self.slot_end_offset()
             {
                 self.remove_shortkey_slot(index);
                 return Err(ShortKeyPageError::OutOfSpace);
             }
 
-            let new_val_offset =
-                self.decode_shortkey_header().val_start_offset as usize - (val.len() + 2 + remain_key_len);
+            let new_val_offset = self.decode_shortkey_header().val_start_offset as usize
+                - (val.len() + 2 + remain_key_len);
             let new_value_entry = ShortKeyValue {
                 remain_key: old_value_entry.remain_key,
                 vals_len: val.len() as u16,
@@ -1090,7 +1089,10 @@ mod tests {
         let value = b"test_value";
 
         // Test insertion of a new key
-        assert!(page.insert(key, value).is_ok(), "Insertion should be successful");
+        assert!(
+            page.insert(key, value).is_ok(),
+            "Insertion should be successful"
+        );
 
         // Verify the inserted key and value
         let retrieved_value = page.get(key);
@@ -1136,7 +1138,10 @@ mod tests {
         let value2 = b"second_value";
 
         // Insert the first value with the key
-        assert!(page.insert(key, value1).is_ok(), "First insertion should be successful");
+        assert!(
+            page.insert(key, value1).is_ok(),
+            "First insertion should be successful"
+        );
 
         // Attempt to insert another value with the same key
         let result = page.insert(key, value2);
@@ -1159,7 +1164,7 @@ mod tests {
     #[test]
     fn test_multiple_operations() {
         let mut page = <Page as ShortKeyPage>::new();
-        
+
         // Initial inserts
         let key1 = b"key1";
         let value1 = b"value1";
@@ -1195,7 +1200,10 @@ mod tests {
         );
 
         // Ensure key1 is no longer present
-        assert!(page.get(key1).is_none(), "Key1 should be removed and return None");
+        assert!(
+            page.get(key1).is_none(),
+            "Key1 should be removed and return None"
+        );
 
         // Check that key3 is still intact
         assert_eq!(
@@ -1240,15 +1248,22 @@ mod tests {
                     // Get
                     if !inserted_keys.is_empty() {
                         let key_to_get = &inserted_keys[rng.gen_range(0..inserted_keys.len())];
-                        let expected_value = keys_and_values.iter().find(|(k, _)| k == key_to_get).map(|(_, v)| v.clone());
+                        let expected_value = keys_and_values
+                            .iter()
+                            .find(|(k, _)| k == key_to_get)
+                            .map(|(_, v)| v.clone());
                         assert_eq!(page.get(&key_to_get), expected_value);
                     }
                 }
                 3 => {
                     // Remove
                     if !inserted_keys.is_empty() {
-                        let key_to_remove = inserted_keys.remove(rng.gen_range(0..inserted_keys.len()));
-                        let expected_value = keys_and_values.iter().find(|(k, _)| *k == key_to_remove).map(|(_, v)| v.clone());
+                        let key_to_remove =
+                            inserted_keys.remove(rng.gen_range(0..inserted_keys.len()));
+                        let expected_value = keys_and_values
+                            .iter()
+                            .find(|(k, _)| *k == key_to_remove)
+                            .map(|(_, v)| v.clone());
                         assert_eq!(page.remove(&key_to_remove), expected_value);
                         keys_and_values.retain(|(k, _)| *k != key_to_remove);
                     }

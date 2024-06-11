@@ -23,8 +23,8 @@ use crate::{
 use crate::{
     bp::prelude::*,
     hashindex::{
-        pagedhashmap::PagedHashMap, rusthashmap::RustHashMap,
-        hash_eviction_policy::HashEvictionPolicy,
+        hash_eviction_policy::HashEvictionPolicy, pagedhashmap::PagedHashMap,
+        rusthashmap::RustHashMap,
     },
 };
 
@@ -218,8 +218,8 @@ pub fn run_bench_for_hash_map<E: EvictionPolicy, M: MemPool<E>>(
     phm: Arc<PagedHashMap<E, M>>,
 ) {
     // simple function to merge two values, not Box
-    let func = |old: &[u8], new: &[u8]| new.to_vec();
-    
+    // let func = |old: &[u8], new: &[u8]| new.to_vec();
+
     let ops_ratio = bench_params.parse_ops_ratio();
     thread::scope(|s| {
         for partition in kvs.iter() {
@@ -230,7 +230,8 @@ pub fn run_bench_for_hash_map<E: EvictionPolicy, M: MemPool<E>>(
                     let op = rand.get();
                     match op {
                         TreeOperation::Insert => {
-                            let _ = phm.upsert_with_merge(k, v, func);
+                            // let _ = phm.upsert_with_merge(k, v, func);
+                            let _ = phm.insert(k, v);
                         }
                         TreeOperation::Update => {
                             panic!("Update not supported")
@@ -301,10 +302,11 @@ pub fn insert_into_paged_hash_map<E: EvictionPolicy, M: MemPool<E>>(
     phm: Arc<PagedHashMap<E, M>>,
     kvs: &[RandomKVs],
 ) {
-    let func = |old: &[u8], new: &[u8]| new.to_vec();
+    // let func = |old: &[u8], new: &[u8]| new.to_vec();
     for partition in kvs.iter() {
         for (k, v) in partition.iter() {
-            let _ = phm.upsert_with_merge(k, v, func);
+            // let _ = phm.upsert_with_merge(k, v, func);
+            let _ = phm.insert(k, v);
         }
     }
 }

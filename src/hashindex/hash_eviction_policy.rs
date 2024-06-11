@@ -4,7 +4,7 @@ use crate::bp::prelude::{BufferFrame, EvictionPolicy};
 
 pub const INITIAL_COUNTER: u64 = 1;
 static LRU_COUNTER: AtomicU64 = AtomicU64::new(INITIAL_COUNTER);
-    
+
 pub struct HashEvictionPolicy {
     pub score: u64,
 }
