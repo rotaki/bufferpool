@@ -1,4 +1,5 @@
 use core::panic;
+use crate::log;
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
@@ -340,6 +341,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
             );
         }
 
+        #[cfg(feature = "stat")]
         let mut chain_len = 0;
         #[cfg(feature = "stat")]
         {

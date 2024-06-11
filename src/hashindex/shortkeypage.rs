@@ -55,6 +55,7 @@ pub trait ShortKeyPage {
     fn remove_shortkey_slot(&mut self, index: u16);
 
     fn encode_shortkey_value(&mut self, offset: usize, entry: &ShortKeyValue);
+    fn encode_shortkey_value_sample(&mut self, offset: usize, entry: &ShortKeyValueSample);
     fn decode_shortkey_value(&self, offset: usize, remain_key_len: u16) -> ShortKeyValue;
     fn decode_shortkey_value_by_id(&self, slot_id: u16) -> ShortKeyValue {
         let slot = self.decode_shortkey_slot(slot_id);
@@ -104,6 +105,12 @@ pub struct ShortKeyValue {
     pub remain_key: Vec<u8>, // dynamic size (remain part of actual key), if key_len > 8
     pub vals_len: u16,       // u16
     pub vals: Vec<u8>, // vector of vals (variable size), decode in the top of the page (HashTable)
+}
+
+pub struct ShortKeyValueSample<'a> {
+    pub remain_key: &'a [u8],
+    pub vals_len: u16,
+    pub vals: &'a [u8],
 }
 
 impl ShortKeyPage for Page {
@@ -238,6 +245,7 @@ impl ShortKeyPage for Page {
         };
         self.encode_shortkey_slot(index, &new_slot);
 
+        /*
         let remain_key = if key.len() > 8 {
             key[8..].to_vec()
         } else {
@@ -249,7 +257,13 @@ impl ShortKeyPage for Page {
             vals_len: value.len() as u16,
             vals: value.to_vec(),
         };
-        self.encode_shortkey_value(new_val_offset, &new_value_entry);
+        */
+        let new_value_entry = ShortKeyValueSample {
+            remain_key: &key[key.len().min(8)..],
+            vals_len: value.len() as u16,
+            vals: value,
+        };
+        self.encode_shortkey_value_sample(new_val_offset, &new_value_entry);
 
         header.slot_num += 1;
         header.val_start_offset = new_val_offset as u16;
@@ -619,6 +633,15 @@ impl ShortKeyPage for Page {
         self[offset + entry.remain_key.len() + 2
             ..offset + entry.remain_key.len() + 2 + entry.vals.len()]
             .copy_from_slice(&entry.vals);
+    }
+
+    fn encode_shortkey_value_sample(&mut self, offset: usize, entry: &ShortKeyValueSample) {
+        self[offset..offset + entry.remain_key.len()].copy_from_slice(entry.remain_key);
+        self[offset + entry.remain_key.len()..offset + entry.remain_key.len() + 2]
+            .copy_from_slice(&entry.vals_len.to_le_bytes());
+        self[offset + entry.remain_key.len() + 2
+            ..offset + entry.remain_key.len() + 2 + entry.vals.len()]
+            .copy_from_slice(entry.vals);
     }
 
     fn decode_shortkey_value(&self, offset: usize, key_len: u16) -> ShortKeyValue {
